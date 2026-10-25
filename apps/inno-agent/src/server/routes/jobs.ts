@@ -11,6 +11,8 @@ import { logger } from "../../logger.js";
 import { questionBridge } from "../../agent/question-bridge.js";
 import { permissionBridge } from "../../agent/permission-bridge.js";
 import { cancelDeferredRun, isDeferredExecuting } from "../../scheduler/deferred-runs.js";
+import type { TenantStore } from "../../tenants/store.js";
+import { claimRequestResource, getRequestTenant, ownsRequestResource, releaseRequestResource } from "../../tenants/http.js";
 
 type JobRunStreamEvent =
 	| { type: "job_state"; status: "queued" | "running" }
@@ -131,6 +133,7 @@ export interface JobsRouteContext {
 	recordJobRunSession?: (sessionId: string) => void;
 	/** Abort the in-flight manual job run streaming into this session. */
 	abortJobRun?: (sessionId: string) => Promise<boolean>;
+	tenantStore: TenantStore | null;
 }
 
 /**
@@ -146,7 +149,12 @@ export async function handleJobsRoutes(
 	url: string,
 	ctx: JobsRouteContext,
 ): Promise<boolean> {
-	const { jobStore, channelRegistry } = ctx;
+	const { jobStore, channelRegistry, tenantStore } = ctx;
+	const requireSessionOwnership = async (sessionId: string): Promise<boolean> => {
+		if (await ownsRequestResource(req, tenantStore, "session", sessionId)) return true;
+		json(res, 404, { error: "Session not found" });
+		return false;
+	};
 
 	if (method === "GET" && url === "/api/jobs") {
 		json(res, 200, jobStore.list());
@@ -174,17 +182,31 @@ export async function handleJobsRoutes(
 			json(res, 400, { error: `Invalid cron: ${cronCheck.error}` });
 			return true;
 		}
+		if (body.channel && getRequestTenant(req)) {
+			json(res, 400, { error: "Channel-backed jobs are unavailable until channel tenant isolation is enabled" });
+			return true;
+		}
 		if (body.channel && !channelRegistry.get(body.channel)) {
 			json(res, 400, { error: `Channel not registered: ${body.channel}. Enable it in settings first.` });
 			return true;
 		}
 		const job = jobStore.create(body);
+		try {
+			await claimRequestResource(req, tenantStore, "job", job.id);
+		} catch (err) {
+			jobStore.delete(job.id);
+			throw err;
+		}
 		json(res, 201, job);
 		return true;
 	}
 
 	const runsMatch = matchRoute("GET", method, url, "/api/jobs/:id/runs");
 	if (runsMatch) {
+		if (getRequestTenant(req) && !jobStore.get(runsMatch.id)) {
+			json(res, 404, { error: "Job not found" });
+			return true;
+		}
 		json(res, 200, jobStore.listRuns(runsMatch.id));
 		return true;
 	}
@@ -197,6 +219,7 @@ export async function handleJobsRoutes(
 			json(res, 400, { error: "sessionId is required" });
 			return true;
 		}
+		if (!await requireSessionOwnership(sessionId)) return true;
 		const stopped = ctx.abortJobRun ? await ctx.abortJobRun(sessionId) : false;
 		if (stopped) logger.info({ sessionId }, "Manual job run stop requested");
 		else logger.warn({ sessionId }, "Job stop request not applied: no matching in-flight run");
@@ -217,6 +240,7 @@ export async function handleJobsRoutes(
 			json(res, 400, { error: "sessionId is required for streaming job runs" });
 			return true;
 		}
+		if (!await requireSessionOwnership(sessionId)) return true;
 		const occurrenceId = typeof body.occurrenceId === "string" ? body.occurrenceId.trim() : "";
 		// Resolve the target session BEFORE claiming the slot: a 404 here must
 		// not leak the claim, which would wedge the occurrence (auto-exec is
@@ -353,6 +377,11 @@ export async function handleJobsRoutes(
 		const body = await readBody(req) as Record<string, unknown>;
 		const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
 		const occurrenceId = typeof body.occurrenceId === "string" ? body.occurrenceId.trim() : "";
+		if (getRequestTenant(req) && !sessionId) {
+			json(res, 400, { error: "sessionId is required for authenticated manual job runs" });
+			return true;
+		}
+		if (sessionId && !await requireSessionOwnership(sessionId)) return true;
 		const sessionPath = sessionId ? ctx.resolveSessionPath?.(sessionId) : undefined;
 		if (sessionId && !sessionPath) {
 			json(res, 404, { error: "Session not found" });
@@ -393,6 +422,10 @@ export async function handleJobsRoutes(
 				return true;
 			}
 		}
+		if (body.channel && getRequestTenant(req)) {
+			json(res, 400, { error: "Channel-backed jobs are unavailable until channel tenant isolation is enabled" });
+			return true;
+		}
 		if (body.channel && !channelRegistry.get(body.channel)) {
 			json(res, 400, { error: `Channel not registered: ${body.channel}. Enable it in settings first.` });
 			return true;
@@ -413,6 +446,7 @@ export async function handleJobsRoutes(
 			json(res, 404, { error: "Job not found" });
 			return true;
 		}
+		await releaseRequestResource(req, tenantStore, "job", deleteMatch.id);
 		json(res, 204, null);
 		return true;
 	}

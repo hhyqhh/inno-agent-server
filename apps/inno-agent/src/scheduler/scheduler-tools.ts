@@ -7,6 +7,7 @@ import type { ChannelRegistry } from "../channels/channel.js";
 import { executeJob } from "./job-runner.js";
 import { validateCron } from "./cron-utils.js";
 import type { CheckInStore } from "../checkins/check-in-store.js";
+import { getCurrentTenant, getCurrentTenantStore } from "../tenants/current.js";
 
 /**
  * Create scheduler tools that allow the agent to manage scheduled jobs.
@@ -47,6 +48,12 @@ export function createSchedulerTools(jobStore: JobStore, channelRegistry?: Chann
 					details: { error: "invalid_cron" } as Record<string, unknown>,
 				};
 			}
+			if (params.channel && getCurrentTenant()) {
+				return {
+					content: [{ type: "text" as const, text: "多用户频道隔离尚未启用，当前不能创建 channel 推送任务；请创建不指定 channel 的站内任务。" }],
+					details: { error: "channel_tenant_isolation_unavailable" } as Record<string, unknown>,
+				};
+			}
 			if (params.channel && !channelRegistry?.get(params.channel)) {
 				return {
 					content: [{
@@ -69,6 +76,20 @@ export function createSchedulerTools(jobStore: JobStore, channelRegistry?: Chann
 					? { channel: params.channel, chatId: params.chatId }
 					: defaultTarget,
 			});
+			const tenant = getCurrentTenant();
+			if (tenant) {
+				const tenantStore = getCurrentTenantStore();
+				if (!tenantStore) {
+					jobStore.delete(job.id);
+					throw new Error("Tenant store is required to create a scheduled job");
+				}
+				try {
+					await tenantStore.claimResource(tenant, "job", job.id);
+				} catch (err) {
+					jobStore.delete(job.id);
+					throw err;
+				}
+			}
 
 			return {
 				content: [{
@@ -153,6 +174,12 @@ export function createSchedulerTools(jobStore: JobStore, channelRegistry?: Chann
 		}),
 		async execute(_toolCallId, params) {
 			const deleted = jobStore.delete(params.id);
+			const tenant = getCurrentTenant();
+			const tenantStore = getCurrentTenantStore();
+			if (deleted && tenant) {
+				if (!tenantStore) throw new Error("Tenant store is required to delete a scheduled job");
+				await tenantStore.releaseResource(tenant, "job", params.id);
+			}
 			return {
 				content: [{
 					type: "text" as const,
@@ -179,6 +206,12 @@ export function createSchedulerTools(jobStore: JobStore, channelRegistry?: Chann
 					details: {},
 				};
 			}
+			if (getCurrentTenant()) {
+				return {
+					content: [{ type: "text" as const, text: "多用户 singleton runtime 隔离尚未完成，暂不能通过 agent 工具无 session 执行任务；请从任务面板选择一个当前会话手动运行。" }],
+					details: { error: "scoped_runtime_unavailable" } as Record<string, unknown>,
+				};
+			}
 			if (!channelRegistry) {
 				return {
 					content: [{
@@ -197,7 +230,7 @@ export function createSchedulerTools(jobStore: JobStore, channelRegistry?: Chann
 						? `任务「${job.name}」已执行完成。\nRun: ${result.runId}\n${result.pushedToChannel ? `已推送到: ${result.pushedToChannel}\n` : ""}\n输出：\n${result.output ?? ""}`
 						: `任务「${job.name}」执行失败。\nRun: ${result.runId}\n错误：${result.error}`,
 				}],
-				details: result,
+				details: { ...result },
 			};
 		},
 	});

@@ -3,9 +3,12 @@ import { randomUUID } from "node:crypto";
 import type { CheckInStore } from "../../checkins/check-in-store.js";
 import { cancelDeferredRun, listDeferredRuns } from "../../scheduler/deferred-runs.js";
 import { json, readBody } from "../http-helpers.js";
+import type { TenantStore } from "../../tenants/store.js";
+import { getRequestTenant, ownsRequestResource } from "../../tenants/http.js";
 
 export interface CheckInsRouteContext {
 	checkInStore: CheckInStore;
+	tenantStore?: TenantStore | null;
 }
 
 /** /api/checkins* route domain for the personal learning check-in MVP. */
@@ -16,6 +19,12 @@ export async function handleCheckInsRoutes(
 	url: string,
 	ctx: CheckInsRouteContext,
 ): Promise<boolean> {
+	const getOwnedOccurrence = async (occurrenceId: string) => {
+		const occurrence = ctx.checkInStore.getOccurrenceById(occurrenceId);
+		return occurrence && await ownsRequestResource(req, ctx.tenantStore, "job", occurrence.jobId)
+			? occurrence
+			: undefined;
+	};
 	// Read-only by design: check-in state is derived server-side from job runs;
 	// clients cannot create or forge a check-in.
 	if (method === "GET" && (url === "/api/checkins" || url === "/api/checkins/today")) {
@@ -27,12 +36,16 @@ export async function handleCheckInsRoutes(
 	// Slots that already settled today are filtered out — no reminder for a
 	// completed task even if a stale deferred entry is still armed.
 	if (method === "GET" && url === "/api/checkins/pending-runs") {
-		const runs = listDeferredRuns().filter((run) => {
-			if (!ctx.checkInStore) return true;
+		const runs = await Promise.all(listDeferredRuns().map(async (run) => {
 			const occurrence = ctx.checkInStore.getOccurrence(run.jobId, run.occurrenceId);
-			return !occurrence || (occurrence.status !== "success" && occurrence.status !== "skipped");
-		});
-		json(res, 200, runs);
+			if (getRequestTenant(req)) {
+				if (!occurrence || !await ownsRequestResource(req, ctx.tenantStore, "job", run.jobId)) return null;
+			} else if (!ctx.checkInStore) {
+				return run;
+			}
+			return !occurrence || (occurrence.status !== "success" && occurrence.status !== "skipped") ? run : null;
+		}));
+		json(res, 200, runs.filter((run) => run !== null));
 		return true;
 	}
 
@@ -43,6 +56,10 @@ export async function handleCheckInsRoutes(
 		const occurrenceId = typeof body.occurrenceId === "string" ? body.occurrenceId.trim() : "";
 		if (!occurrenceId) {
 			json(res, 400, { error: "occurrenceId is required" });
+			return true;
+		}
+		if (getRequestTenant(req) && !await getOwnedOccurrence(occurrenceId)) {
+			json(res, 404, { error: "Occurrence not found" });
 			return true;
 		}
 		const cancelled = cancelDeferredRun(occurrenceId);
@@ -69,6 +86,10 @@ export async function handleCheckInsRoutes(
 		const occurrenceId = typeof body.occurrenceId === "string" ? body.occurrenceId.trim() : "";
 		if (!occurrenceId) {
 			json(res, 400, { error: "occurrenceId is required" });
+			return true;
+		}
+		if (getRequestTenant(req) && !await getOwnedOccurrence(occurrenceId)) {
+			json(res, 404, { error: "Occurrence not found" });
 			return true;
 		}
 		const cancelled = cancelDeferredRun(occurrenceId);

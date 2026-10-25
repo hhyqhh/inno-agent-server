@@ -13,6 +13,11 @@ export function resolveTenantDataDir(
 	return tenant ? join(dataDir, "tenants", tenant.tenantId, domain) : join(dataDir, domain);
 }
 
+export function resolveCurrentTenantDataRoot(dataDir: string): string {
+	const tenant = getCurrentTenant();
+	return tenant ? join(dataDir, "tenants", tenant.tenantId) : dataDir;
+}
+
 export function resolveCurrentTenantDataDir(
 	dataDir: string,
 	domain: "learner" | "l2" | "l3" | "runs",

@@ -20,3 +20,13 @@ export function getCurrentTenant(): TenantContext | null {
 export function getCurrentTenantStore(): TenantStore | null {
 	return currentTenant.getStore()?.store ?? null;
 }
+
+/** Run work with an explicit verified tenant, without leaking it to siblings. */
+export function runInTenantContext<T>(context: TenantContext, store: TenantStore, operation: () => T): T {
+	return currentTenant.run({ context, store }, operation);
+}
+
+/** Singleton construction/background timers must not capture the bootstrap request's tenant. */
+export function runWithoutTenantContext<T>(operation: () => T): T {
+	return currentTenant.exit(operation);
+}

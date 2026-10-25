@@ -6,6 +6,10 @@ import { CheckInStore, occurrenceIdFor } from "./check-in-store.js";
 import { dateKeyForTimeZone } from "../scheduler/cron-utils.js";
 import { JobStore } from "../scheduler/job-store.js";
 import { writeJson } from "../storage/file-store.js";
+import { ScopedJobStore } from "../scheduler/scoped-job-store.js";
+import { runInTenantContext } from "../tenants/current.js";
+import type { TenantContext, TenantStore } from "../tenants/store.js";
+import { resolveCurrentTenantDataRoot } from "../tenants/paths.js";
 
 let dir: string;
 let jobStore: JobStore;
@@ -193,5 +197,31 @@ describe("CheckInStore daily plan", () => {
 		const job = createJob();
 		const occurrence = checkInStore.getTodayPlan(TODAY).jobs[0].occurrences[0];
 		expect(occurrence.occurrenceId).toBe(occurrenceIdFor(job.id, occurrence.scheduledAt));
+	});
+});
+
+describe("tenant-scoped check-ins", () => {
+	it("derives plans and occurrence ledgers from the current tenant only", () => {
+		const scopedJobs = new ScopedJobStore(dir, join(dir, "legacy-jobs"), "Asia/Shanghai");
+		const scopedCheckIns = new CheckInStore(() => resolveCurrentTenantDataRoot(join(dir, "tenant-data")), "Asia/Shanghai", scopedJobs);
+		const tenantStore = {} as TenantStore;
+		const tenantA: TenantContext = { tenantId: "a", userId: "a", role: "owner" };
+		const tenantB: TenantContext = { tenantId: "b", userId: "b", role: "owner" };
+		runInTenantContext(tenantA, tenantStore, () => {
+			const job = scopedJobs.create({
+				name: "private plan", cron: "0 9 * * *", timezone: "Asia/Shanghai", enabled: true,
+				taskType: "daily_review", prompt: "review",
+			});
+			const occurrence = scopedCheckIns.getTodayPlan(TODAY).jobs[0].occurrences[0];
+			scopedCheckIns.recordOccurrence({
+				occurrenceId: occurrence.occurrenceId, jobId: job.id, scheduledAt: occurrence.scheduledAt,
+				status: "success", runId: "run-a", finishedAt: TODAY.toISOString(),
+			});
+			expect(scopedCheckIns.status(TODAY).todayCheckedIn).toBe(true);
+		});
+		runInTenantContext(tenantB, tenantStore, () => {
+			expect(scopedCheckIns.status(TODAY).dayStatus).toBe("no_tasks");
+			expect(scopedCheckIns.list()).toEqual([]);
+		});
 	});
 });

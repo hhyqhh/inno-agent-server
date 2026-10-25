@@ -10,7 +10,7 @@ import { isComputerUseEnabled, saveConfig, setDefaultModel, type InnoConfig } fr
 import { createLearnerTools } from "../memory/learner/learner-tools.js";
 import { isProfileEmpty, loadProfile, loadRecentEvents } from "../memory/learner/profile-store.js";
 import { buildContextPack, formatContextPackForPrompt } from "../memory/learner/context-pack.js";
-import { JobStore } from "../scheduler/job-store.js";
+import { ScopedJobStore } from "../scheduler/scoped-job-store.js";
 import { CheckInStore } from "../checkins/check-in-store.js";
 import { createSchedulerTools } from "../scheduler/scheduler-tools.js";
 import { createChannelTools } from "../channels/channel-tools.js";
@@ -34,7 +34,7 @@ import type { ChannelName } from "../channels/types.js";
 import type { RuntimePaths } from "../runtime.js";
 import type { WorkspaceRegistry } from "../workspace/workspace-registry.js";
 import type { RunRecordStore } from "../terminal/run-record-store.js";
-import { resolveCurrentTenantDataDir } from "../tenants/paths.js";
+import { resolveCurrentTenantDataDir, resolveCurrentTenantDataRoot } from "../tenants/paths.js";
 
 const INNO_VERSION = "0.0.1";
 
@@ -306,8 +306,8 @@ export function createInnoExtension(
 		}
 
 		// 3. Register scheduler tools
-		const jobStore = new JobStore(paths.jobsDir, configHolder.current.scheduler?.timezone);
-		const checkInStore = new CheckInStore(paths.dataDir, configHolder.current.scheduler?.timezone, jobStore);
+		const jobStore = new ScopedJobStore(paths.dataDir, paths.jobsDir, configHolder.current.scheduler?.timezone);
+		const checkInStore = new CheckInStore(() => resolveCurrentTenantDataRoot(paths.dataDir), configHolder.current.scheduler?.timezone, jobStore);
 		const schedulerTools = createSchedulerTools(jobStore, channelRegistry, checkInStore);
 		for (const tool of schedulerTools) {
 			pi.registerTool(tool);

@@ -98,24 +98,37 @@ export function isLearningJob(job: ScheduledJob): boolean {
  * occurrence ledger; a client cannot mark a day complete on its own.
  */
 export class CheckInStore {
-	private readonly filePath: string;
-	private readonly occurrencesFilePath: string;
 	readonly timezone: string;
 
 	constructor(
-		dataDir: string,
+		private readonly dataDir: string | (() => string),
 		timezone: string = DEFAULT_SCHEDULER_TIMEZONE,
-		private readonly jobStore: JobStore,
+		private readonly jobStore: JobStore | (() => JobStore),
 	) {
+		this.timezone = timezone || DEFAULT_SCHEDULER_TIMEZONE;
+		if (typeof dataDir === "string") ensureDir(join(dataDir, "checkins"));
+	}
+
+	private filePath(): string {
+		const dataDir = typeof this.dataDir === "function" ? this.dataDir() : this.dataDir;
 		const checkinsDir = join(dataDir, "checkins");
 		ensureDir(checkinsDir);
-		this.filePath = join(checkinsDir, CHECKINS_FILE);
-		this.occurrencesFilePath = join(checkinsDir, OCCURRENCES_FILE);
-		this.timezone = timezone || DEFAULT_SCHEDULER_TIMEZONE;
+		return join(checkinsDir, CHECKINS_FILE);
+	}
+
+	private occurrencesFilePath(): string {
+		const dataDir = typeof this.dataDir === "function" ? this.dataDir() : this.dataDir;
+		const checkinsDir = join(dataDir, "checkins");
+		ensureDir(checkinsDir);
+		return join(checkinsDir, OCCURRENCES_FILE);
+	}
+
+	private jobs(): ScheduledJob[] {
+		return (typeof this.jobStore === "function" ? this.jobStore() : this.jobStore).list();
 	}
 
 	list(): CheckInRecord[] {
-		const records = readJson<unknown>(this.filePath, []);
+		const records = readJson<unknown>(this.filePath(), []);
 		if (!Array.isArray(records)) return [];
 		return records
 			.map(parseCheckInRecord)
@@ -125,7 +138,7 @@ export class CheckInStore {
 	getTodayPlan(now: Date = new Date()): TodayLearningPlan {
 		const today = dateKeyForTimeZone(now, this.timezone);
 		const occurrenceRecords = new Map(this.listOccurrenceRecords().map((record) => [record.occurrenceId, record]));
-		const jobs = this.jobStore.list()
+		const jobs = this.jobs()
 			.filter((job) => job.enabled && isLearningJob(job))
 			.map((job): CheckInJobStatus | null => {
 				const scheduledAt = getCronOccurrencesForDate(job.cron, job.timezone, today, this.timezone);
@@ -184,7 +197,7 @@ export class CheckInStore {
 					completedOccurrenceIds,
 				};
 				records = [...records.filter((record) => record.date !== plan.today), todayRecord];
-				writeJson(this.filePath, records);
+				writeJson(this.filePath(), records);
 			}
 		}
 
@@ -292,7 +305,7 @@ export class CheckInStore {
 		};
 		if (index >= 0) records[index] = next;
 		else records.push(next);
-		writeJson(this.occurrencesFilePath, records);
+		writeJson(this.occurrencesFilePath(), records);
 
 		const after = this.status(finishedAt);
 		return {
@@ -302,7 +315,7 @@ export class CheckInStore {
 	}
 
 	private listOccurrenceRecords(): OccurrenceRecord[] {
-		const records = readJson<unknown>(this.occurrencesFilePath, []);
+		const records = readJson<unknown>(this.occurrencesFilePath(), []);
 		if (!Array.isArray(records)) return [];
 		return records.filter(isOccurrenceRecord);
 	}

@@ -40,8 +40,8 @@ compose application retains the explicit insecure local-mode override because
 its port is published; use Better Auth for non-local deployments.
 
 > **Isolation boundary:** account authentication and the current tenant/ownership
-> slices do not yet make all application data tenant-safe. Memory, jobs,
-> channels, settings, permissions, and the singleton agent runtime
+> slices do not yet make all application data tenant-safe. Background memory
+> access and execution, channels, settings, permissions, and the singleton agent runtime
 > are still shared until each domain's authorization migration lands. `INNO_MULTI_USER_ENABLED=true`
 > deliberately fails at startup until resource ownership and cross-tenant
 > isolation are implemented. Do not treat this stage as a safe multi-user
@@ -123,6 +123,26 @@ that tenant's L2 root. Local mode keeps the original shared run directory.
 
 Background jobs/channels, settings, permissions, and the singleton agent runtime
 still have remaining migration work. `INNO_MULTI_USER_ENABLED` remains
+unavailable.
+
+## Job and check-in isolation (stage 2E)
+
+Authenticated job and check-in storage uses `<dataDir>/tenants/<tenantId>/jobs`
+and `.../checkins`. HTTP and agent-tool list/update/delete/run-history views are
+resolved at execution time, so legacy global jobs and other tenants' jobs are
+not visible. New jobs receive ownership metadata and deletion releases it.
+Manual run/stream/stop operations require an owned target session; authenticated
+API runs must specify that session explicitly. Agent-initiated unscoped runs are
+temporarily rejected rather than falling back to the global active session.
+
+Automatic cron and deferred execution currently start only in local mode.
+Channel-backed tenant jobs are rejected until channel registries and delivery
+are tenant-scoped. These are deliberate fail-closed limitations, not a claim
+that background execution is ready for multi-user deployment. Legacy global job
+files remain hidden and are not copied implicitly.
+
+Channels, settings, permissions, background execution, and the singleton agent
+runtime still have remaining migration work. `INNO_MULTI_USER_ENABLED` remains
 unavailable.
 
 

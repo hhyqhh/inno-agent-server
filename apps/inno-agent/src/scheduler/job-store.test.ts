@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { JobStore } from "./job-store.js";
 import type { ScheduledJob } from "./types.js";
+import { ScopedJobStore } from "./scoped-job-store.js";
+import { runInTenantContext, runWithoutTenantContext } from "../tenants/current.js";
+import type { TenantContext, TenantStore } from "../tenants/store.js";
 
 let dir: string;
 let store: JobStore;
@@ -197,5 +200,35 @@ describe("JobStore.getStatus", () => {
 		expect(status.enabled).toBe(1);
 		expect(status.disabled).toBe(1);
 		expect(status.nextRunAt).toBeDefined();
+	});
+});
+
+describe("ScopedJobStore", () => {
+	it("keeps tenant jobs and runs separate from each other and legacy local data", () => {
+		const scoped = new ScopedJobStore(dir, join(dir, "legacy-jobs"));
+		const tenantStore = {} as TenantStore;
+		const tenantA: TenantContext = { tenantId: "tenant-a", userId: "user-a", role: "owner" };
+		const tenantB: TenantContext = { tenantId: "tenant-b", userId: "user-b", role: "owner" };
+		runWithoutTenantContext(() => scoped.create({
+			name: "legacy", cron: "0 9 * * *", timezone: "UTC", enabled: true, taskType: "custom_prompt", prompt: "legacy",
+		}));
+		const jobA = runInTenantContext(tenantA, tenantStore, () => scoped.create({
+			name: "private-a", cron: "0 9 * * *", timezone: "UTC", enabled: true, taskType: "custom_prompt", prompt: "a",
+		}));
+		runInTenantContext(tenantA, tenantStore, () => scoped.appendRun({
+			id: "run-a", jobId: jobA.id, jobName: jobA.name, status: "success", startedAt: "2026-10-25T00:00:00Z", trigger: "manual",
+		}));
+
+		runInTenantContext(tenantB, tenantStore, () => {
+			expect(scoped.list()).toEqual([]);
+			expect(scoped.get(jobA.id)).toBeUndefined();
+			expect(scoped.listRuns()).toEqual([]);
+			expect(scoped.getStatus().total).toBe(0);
+		});
+		runInTenantContext(tenantA, tenantStore, () => {
+			expect(scoped.list().map((job) => job.id)).toEqual([jobA.id]);
+			expect(scoped.listRuns().map((run) => run.id)).toEqual(["run-a"]);
+		});
+		runWithoutTenantContext(() => expect(scoped.list().map((job) => job.name)).toEqual(["legacy"]));
 	});
 });

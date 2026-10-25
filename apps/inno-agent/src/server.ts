@@ -34,7 +34,7 @@ import { PersonalChannelDispatcher } from "./channels/personal-dispatcher.js";
 import { BridgeChannel } from "./channels/bridge/bridge-channel.js";
 import { WeChatChannel } from "./channels/wechat/wechat-channel.js";
 import type { PersonalBridgeChannelConfig } from "./config.js";
-import { JobStore } from "./scheduler/job-store.js";
+import { ScopedJobStore } from "./scheduler/scoped-job-store.js";
 import { CheckInStore } from "./checkins/check-in-store.js";
 import { seedManagedMcpConfig } from "./mcp/mcp-config-store.js";
 import { CronScheduler } from "./scheduler/cron-scheduler.js";
@@ -92,7 +92,8 @@ import { readAuthRuntimeConfig, readListenConfig } from "./auth/config.js";
 import { assertSignUpAllowed, isPublicApiRequest, isTrustedOrigin, requireSession } from "./auth/http.js";
 import { createAuthRuntime } from "./auth/runtime.js";
 import { ownsRequestResource, setRequestTenant } from "./tenants/http.js";
-import { resolveCurrentTenantDataDir } from "./tenants/paths.js";
+import { resolveCurrentTenantDataDir, resolveCurrentTenantDataRoot } from "./tenants/paths.js";
+import { runWithoutTenantContext } from "./tenants/current.js";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -143,7 +144,7 @@ const contentHubCatalog = new ContentHubCatalog({
 // All stateful services are declared with !: — they are guaranteed to be
 // initialised before any API handler that uses them runs, because the HTTP
 // handler calls ensureBootstrapped() before dispatching.
-let jobStore!: JobStore;
+let jobStore!: ScopedJobStore;
 let checkInStore!: CheckInStore;
 let channelRegistry!: ChannelRegistry;
 let workspaceRegistry!: WorkspaceRegistry;
@@ -193,7 +194,7 @@ async function ensureBootstrapped(): Promise<void> {
 	if (bootstrapped) return;
 	if (bootstrapPromise) return bootstrapPromise;
 
-	bootstrapPromise = (async () => {
+	bootstrapPromise = runWithoutTenantContext(async () => {
 		logger.info("[inno-server] first meaningful request — bootstrapping...");
 
 		// ---- config (loaded lazily, not at process start) ----
@@ -212,9 +213,9 @@ async function ensureBootstrapped(): Promise<void> {
 		ensureDir(paths.workspaceDir);
 
 		// ---- stores ----
-		jobStore = new JobStore(paths.jobsDir, config.scheduler?.timezone);
+		jobStore = new ScopedJobStore(dataDir, paths.jobsDir, config.scheduler?.timezone);
 		jobStore.normalizePersistedJobs();
-		checkInStore = new CheckInStore(dataDir, config.scheduler?.timezone, jobStore);
+		checkInStore = new CheckInStore(() => resolveCurrentTenantDataRoot(dataDir), config.scheduler?.timezone, jobStore);
 
 		channelRegistry = new ChannelRegistry(join(dataDir, "channels", "default-targets.json"));
 
@@ -296,7 +297,7 @@ async function ensureBootstrapped(): Promise<void> {
 			wechatChannel = new WeChatChannel(dataDir, wechatCfg);
 			channelRegistry.register(wechatChannel);
 		}
-		migrateReminderChannels();
+		if (auth.mode === "local") migrateReminderChannels();
 
 		// ---- agent session ----
 		logger.info("[inno-server] initializing agent session...");
@@ -360,26 +361,30 @@ async function ensureBootstrapped(): Promise<void> {
 			wechatChannel.start();
 		}
 
-		const scheduler = new CronScheduler(jobStore, channelRegistry, checkInStore);
-		configureDeferredRuns({
-			jobStore,
-			channelRegistry,
-			checkInStore,
-			// Deferred auto-execution always runs in a fresh, scheduler-born
-			// conversation so it never lands in the user's active chat.
-			createSession: async () => {
-				try {
-					const id = await createNewSession({});
-					recordCurrentSessionChannel("scheduler", id, { setOriginIfEmpty: true });
-					const sessionPath = sessionFileFromId(paths.sessionDir, id);
-					return sessionPath && existsSync(sessionPath) ? sessionPath : null;
-				} catch (err) {
-					logger.error({ err }, "deferred run session creation failed");
-					return null;
-				}
-			},
-		});
-		scheduler.start();
+		if (auth.mode === "local") {
+			const scheduler = new CronScheduler(jobStore, channelRegistry, checkInStore);
+			configureDeferredRuns({
+				jobStore,
+				channelRegistry,
+				checkInStore,
+				// Deferred auto-execution always runs in a fresh, scheduler-born
+				// conversation so it never lands in the user's active chat.
+				createSession: async () => {
+					try {
+						const id = await createNewSession({});
+						recordCurrentSessionChannel("scheduler", id, { setOriginIfEmpty: true });
+						const sessionPath = sessionFileFromId(paths.sessionDir, id);
+						return sessionPath && existsSync(sessionPath) ? sessionPath : null;
+					} catch (err) {
+						logger.error({ err }, "deferred run session creation failed");
+						return null;
+					}
+				},
+			});
+			scheduler.start();
+		} else {
+			logger.warn("[scheduler] automatic and deferred runs are disabled until background tenant isolation lands");
+		}
 
 		logger.info({ channels: channelRegistry.all().map((c) => c.name).join(", ") || "none" }, "[inno-server] channels");
 		logger.info({ jobCount: jobStore.list().length }, "[inno-server] jobs loaded");
@@ -389,7 +394,7 @@ async function ensureBootstrapped(): Promise<void> {
 		// Simple Mode cards and the remote skill library are warmed in the
 		// background. Never make the first meaningful API response wait on GitHub.
 		void contentHubCatalog.warm();
-	})().catch((err) => {
+	}).catch((err) => {
 		logger.error({ err }, "[inno-server] bootstrap failed");
 		bootstrapPromise = null; // allow retry on next request
 		throw err;
@@ -1412,7 +1417,7 @@ async function runQueueOpWithTimeout<T>(
 
 const { dispatch: dispatchRoutes } = createRouteDispatcher({
 	// --- Check-ins API ---
-	checkins: (req, res, method, url) => handleCheckInsRoutes(req, res, method, url, { checkInStore }),
+	checkins: (req, res, method, url) => handleCheckInsRoutes(req, res, method, url, { checkInStore, tenantStore: auth.tenantStore }),
 
 	// --- Jobs CRUD (extracted to server/routes/jobs.ts) ---
 	jobs: (req, res, method, url) => handleJobsRoutes(req, res, method, url, {
@@ -1424,6 +1429,7 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 			return sessionPath && existsSync(sessionPath) ? sessionPath : null;
 		},
 		recordJobRunSession,
+		tenantStore: auth.tenantStore,
 		abortJobRun: async (sessionId) => {
 			const sessionPath = sessionFileFromId(paths.sessionDir, sessionId);
 			if (!sessionPath || !existsSync(sessionPath)) return false;

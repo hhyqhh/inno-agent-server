@@ -295,6 +295,79 @@ describe("session and workspace tenant isolation", () => {
 	});
 });
 
+describe("job and check-in tenant isolation", () => {
+	it("separates job storage and rejects cross-tenant runs and occurrence control", async () => {
+		const [cookieA, cookieB] = await Promise.all([
+			registerUser("jobs-a@example.com"),
+			registerUser("jobs-b@example.com"),
+		]);
+		await mkdir(join(home, "data", "jobs"), { recursive: true });
+		await writeFile(join(home, "data", "jobs", "jobs.json"), JSON.stringify([{
+			id: "job_legacy", name: "legacy global", cron: "0 9 * * *", timezone: "UTC", enabled: true,
+			taskType: "custom_prompt", prompt: "must stay hidden",
+		}]));
+		const created = await api(cookieA, "/api/jobs", {
+			method: "POST", body: JSON.stringify({
+				name: "tenant a review", cron: "0 9 * * *", timezone: "Asia/Shanghai", enabled: true,
+				taskType: "daily_review", prompt: "review private notes",
+			}),
+		});
+		expect(created.status).toBe(201);
+		const jobA = await created.json() as { id: string };
+		const jobsA = await (await api(cookieA, "/api/jobs")).json() as Array<{ id: string }>;
+		expect(jobsA.map((job) => job.id)).toEqual([jobA.id]);
+		const jobsB = await (await api(cookieB, "/api/jobs")).json() as Array<{ id: string }>;
+		expect(jobsB).toEqual([]);
+		expect(await (await api(cookieB, "/api/jobs/status")).json()).toMatchObject({ total: 0 });
+		expect(await (await api(cookieB, "/api/jobs/runs")).json()).toEqual([]);
+
+		for (const [path, init] of [
+			[`/api/jobs/${jobA.id}/runs`, {}],
+			[`/api/jobs/${jobA.id}`, { method: "PATCH", body: JSON.stringify({ name: "stolen" }) }],
+			[`/api/jobs/${jobA.id}`, { method: "DELETE" }],
+			[`/api/jobs/${jobA.id}/run`, { method: "POST", body: JSON.stringify({}) }],
+			[`/api/jobs/${jobA.id}/run/stream`, { method: "POST", body: JSON.stringify({ sessionId: "anything" }) }],
+		] as Array<[string, RequestInit]>) {
+			expect((await api(cookieB, path, init)).status, path).toBe(404);
+		}
+		expect((await api(cookieA, "/api/jobs", {
+			method: "POST", body: JSON.stringify({
+				name: "unsafe push", cron: "0 9 * * *", taskType: "push_reminder", prompt: "secret", channel: "feishu",
+			}),
+		})).status).toBe(400);
+
+		const sessionResponse = await api(cookieB, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ newWorkspace: { isTemp: true } }),
+		});
+		const sessionB = await sessionResponse.json() as { id: string };
+		expect((await api(cookieA, `/api/jobs/${jobA.id}/run`, {
+			method: "POST", body: JSON.stringify({}),
+		})).status).toBe(400);
+		expect((await api(cookieA, `/api/jobs/${jobA.id}/run`, {
+			method: "POST", body: JSON.stringify({ sessionId: sessionB.id }),
+		})).status).toBe(404);
+		expect((await api(cookieA, "/api/jobs/run/stop", {
+			method: "POST", body: JSON.stringify({ sessionId: sessionB.id }),
+		})).status).toBe(404);
+
+		const planA = await (await api(cookieA, "/api/checkins/today")).json() as {
+			jobs: Array<{ jobId: string; occurrences: Array<{ occurrenceId: string }> }>;
+		};
+		const occurrenceId = planA.jobs.find((job) => job.jobId === jobA.id)?.occurrences[0]?.occurrenceId;
+		expect(occurrenceId).toBeDefined();
+		expect(await (await api(cookieB, "/api/checkins/today")).json()).toMatchObject({ dayStatus: "no_tasks", jobs: [] });
+		expect((await api(cookieB, "/api/checkins/claim", {
+			method: "POST", body: JSON.stringify({ occurrenceId }),
+		})).status).toBe(404);
+		expect((await api(cookieB, "/api/checkins/skip", {
+			method: "POST", body: JSON.stringify({ occurrenceId }),
+		})).status).toBe(404);
+
+		expect((await api(cookieA, `/api/jobs/${jobA.id}`, { method: "DELETE" })).status).toBe(204);
+		expect((await api(cookieA, `/api/jobs/${jobA.id}`, { method: "DELETE" })).status).toBe(404);
+	});
+});
+
 describe("L1 and L2 tenant storage", () => {
 	it("uses separate profile and wiki roots and hides legacy global memory", async () => {
 		const [cookieA, cookieB] = await Promise.all([
