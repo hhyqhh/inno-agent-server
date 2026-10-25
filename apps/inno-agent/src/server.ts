@@ -1469,7 +1469,7 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 	}),
 
 	// --- Wiki + L2 raw upload API (extracted to server/routes/wiki.ts) ---
-	wiki: (req, res, method, url) => handleWikiRoutes(req, res, method, url, { l2DataDir }),
+	wiki: (req, res, method, url) => handleWikiRoutes(req, res, method, url, { l2DataDir, dataDir }),
 
 	// --- Learner profile API (extracted to server/routes/learner.ts) ---
 	learner: (req, res, method, url) => handleLearnerRoutes(req, res, method, url, { paths }),

@@ -9,6 +9,7 @@ import type {
 	Misconception,
 } from "../../memory/learner/types.js";
 import type { RuntimePaths } from "../../runtime.js";
+import { resolveTenantDataDir } from "../../tenants/paths.js";
 import { json, matchRoute, readBody } from "../http-helpers.js";
 
 export interface LearnerRouteContext {
@@ -52,31 +53,32 @@ export async function handleLearnerRoutes(
 	ctx: LearnerRouteContext,
 ): Promise<boolean> {
 	const { paths } = ctx;
+	const learnerDataDir = resolveTenantDataDir(req, paths.dataDir, "learner");
 
 	// --- Learner profile API (L1) ---
 	if (method === "GET" && url === "/api/learner/profile") {
-		const profile = loadProfile(paths.learnerDataDir);
+		const profile = loadProfile(learnerDataDir);
 		json(res, 200, profile);
 		return true;
 	}
 
 	if (method === "PATCH" && url === "/api/learner/profile") {
 		const body = await readBody(req) as Partial<LearnerProfile>;
-		const profile = loadProfile(paths.learnerDataDir);
+		const profile = loadProfile(learnerDataDir);
 		if (typeof body.profile_summary === "string") {
 			profile.profile_summary = body.profile_summary;
 		}
 		if (body.preferences && typeof body.preferences === "object") {
 			profile.preferences = normalizePreferences(body.preferences as Partial<LearnerPreferences>);
 		}
-		saveProfile(paths.learnerDataDir, profile);
+		saveProfile(learnerDataDir, profile);
 		json(res, 200, profile);
 		return true;
 	}
 
 	if (method === "POST" && url === "/api/learner/profile/goals") {
 		const body = await readBody(req) as Partial<LearningGoal>;
-		const profile = loadProfile(paths.learnerDataDir);
+		const profile = loadProfile(learnerDataDir);
 		const goal: LearningGoal = {
 			goal_id: `goal_${randomUUID().slice(0, 8)}`,
 			title: typeof body.title === "string" ? body.title : "新目标",
@@ -88,7 +90,7 @@ export async function handleLearnerRoutes(
 			updated_at: new Date().toISOString(),
 		};
 		profile.goals = [goal, ...profile.goals];
-		saveProfile(paths.learnerDataDir, profile);
+		saveProfile(learnerDataDir, profile);
 		json(res, 201, goal);
 		return true;
 	}
@@ -96,7 +98,7 @@ export async function handleLearnerRoutes(
 	const goalPatchMatch = matchRoute("PATCH", method, url, "/api/learner/profile/goals/:goalId");
 	if (goalPatchMatch) {
 		const body = await readBody(req) as Partial<LearningGoal>;
-		const profile = loadProfile(paths.learnerDataDir);
+		const profile = loadProfile(learnerDataDir);
 		const index = profile.goals.findIndex((g) => g.goal_id === goalPatchMatch.goalId);
 		if (index < 0) {
 			json(res, 404, { error: "Goal not found" });
@@ -114,21 +116,21 @@ export async function handleLearnerRoutes(
 				: current.success_criteria,
 			updated_at: new Date().toISOString(),
 		};
-		saveProfile(paths.learnerDataDir, profile);
+		saveProfile(learnerDataDir, profile);
 		json(res, 200, profile.goals[index]);
 		return true;
 	}
 
 	const goalDeleteMatch = matchRoute("DELETE", method, url, "/api/learner/profile/goals/:goalId");
 	if (goalDeleteMatch) {
-		const profile = loadProfile(paths.learnerDataDir);
+		const profile = loadProfile(learnerDataDir);
 		const before = profile.goals.length;
 		profile.goals = profile.goals.filter((g) => g.goal_id !== goalDeleteMatch.goalId);
 		if (profile.goals.length === before) {
 			json(res, 404, { error: "Goal not found" });
 			return true;
 		}
-		saveProfile(paths.learnerDataDir, profile);
+		saveProfile(learnerDataDir, profile);
 		json(res, 200, { deleted: true });
 		return true;
 	}
@@ -136,7 +138,7 @@ export async function handleLearnerRoutes(
 	const knowledgePatchMatch = matchRoute("PATCH", method, url, "/api/learner/profile/knowledge/:conceptId");
 	if (knowledgePatchMatch) {
 		const body = await readBody(req) as Partial<KnowledgeState>;
-		const profile = loadProfile(paths.learnerDataDir);
+		const profile = loadProfile(learnerDataDir);
 		const index = profile.knowledge_states.findIndex((k) => k.concept_id === knowledgePatchMatch.conceptId);
 		if (index < 0) {
 			json(res, 404, { error: "Concept not found" });
@@ -153,7 +155,7 @@ export async function handleLearnerRoutes(
 				? body.next_actions.filter((s) => typeof s === "string")
 				: current.next_actions,
 		};
-		saveProfile(paths.learnerDataDir, profile);
+		saveProfile(learnerDataDir, profile);
 		json(res, 200, profile.knowledge_states[index]);
 		return true;
 	}
@@ -161,7 +163,7 @@ export async function handleLearnerRoutes(
 	const misconceptionPatchMatch = matchRoute("PATCH", method, url, "/api/learner/profile/misconceptions/:miscId");
 	if (misconceptionPatchMatch) {
 		const body = await readBody(req) as Partial<Misconception>;
-		const profile = loadProfile(paths.learnerDataDir);
+		const profile = loadProfile(learnerDataDir);
 		const index = profile.misconceptions.findIndex((m) => m.misconception_id === misconceptionPatchMatch.miscId);
 		if (index < 0) {
 			json(res, 404, { error: "Misconception not found" });
@@ -175,7 +177,7 @@ export async function handleLearnerRoutes(
 			repair_strategy: typeof body.repair_strategy === "string" ? body.repair_strategy : current.repair_strategy,
 			last_seen_at: new Date().toISOString(),
 		};
-		saveProfile(paths.learnerDataDir, profile);
+		saveProfile(learnerDataDir, profile);
 		json(res, 200, profile.misconceptions[index]);
 		return true;
 	}

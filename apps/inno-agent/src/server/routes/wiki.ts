@@ -11,9 +11,12 @@ import { ensureDir, readJsonl, readText, writeText } from "../../storage/file-st
 import { safeJoinReal } from "../file-helpers.js";
 import { json, readBody, UPLOAD_MAX_BODY_BYTES } from "../http-helpers.js";
 import { listWikiPagePaths } from "../../memory/l2/wiki-page-files.js";
+import { getRequestTenant } from "../../tenants/http.js";
+import { resolveTenantDataDir } from "../../tenants/paths.js";
 
 export interface WikiRouteContext {
 	l2DataDir: string;
+	dataDir?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -66,7 +69,11 @@ export async function handleWikiRoutes(
 	url: string,
 	ctx: WikiRouteContext,
 ): Promise<boolean> {
-	const { l2DataDir } = ctx;
+	const tenant = getRequestTenant(req);
+	if (tenant && !ctx.dataDir) throw new Error("dataDir is required for tenant wiki storage");
+	const l2DataDir = tenant
+		? resolveTenantDataDir(req, ctx.dataDir!, "l2")
+		: ctx.l2DataDir;
 
 	// --- Wiki API ---
 	if (method === "GET" && url === "/api/wiki/pages") {

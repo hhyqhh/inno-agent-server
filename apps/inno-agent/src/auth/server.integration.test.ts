@@ -268,3 +268,40 @@ describe("session and workspace tenant isolation", () => {
 		expect(afterUnclaim.map((session) => session.id)).not.toContain(sessionA.id);
 	});
 });
+
+describe("L1 and L2 tenant storage", () => {
+	it("uses separate profile and wiki roots and hides legacy global memory", async () => {
+		const [cookieA, cookieB] = await Promise.all([
+			registerUser("memory-a@example.com"),
+			registerUser("memory-b@example.com"),
+		]);
+		await mkdir(join(home, "data", "l2"), { recursive: true });
+		await writeFile(join(home, "data", "l2", "legacy.md"), "legacy global memory");
+
+		expect((await api(cookieA, "/api/learner/profile", {
+			method: "PATCH", body: JSON.stringify({ profile_summary: "tenant-a-profile" }),
+		})).status).toBe(200);
+		const profileB = await (await api(cookieB, "/api/learner/profile")).json() as { profile_summary?: string };
+		expect(profileB.profile_summary).not.toBe("tenant-a-profile");
+		expect((await api(cookieB, "/api/learner/profile/goals/goal_missing", {
+			method: "PATCH", body: JSON.stringify({ title: "missing" }),
+		})).status).toBe(404);
+
+		expect((await api(cookieA, "/api/wiki/page", {
+			method: "PUT", body: JSON.stringify({ path: "private.md", content: "tenant-a-wiki" }),
+		})).status).toBe(200);
+		const ownPage = await api(cookieA, "/api/wiki/page?path=private.md");
+		expect(ownPage.status).toBe(200);
+		expect(await ownPage.json()).toMatchObject({ content: "tenant-a-wiki" });
+		expect((await api(cookieB, "/api/wiki/page?path=private.md")).status).toBe(404);
+		expect((await api(cookieB, "/api/wiki/page?path=legacy.md")).status).toBe(404);
+		const pagesB = await (await api(cookieB, "/api/wiki/pages")).json() as Array<{ path: string }>;
+		expect(pagesB.map((page) => page.path)).not.toContain("private.md");
+
+		expect((await api(cookieB, "/api/wiki/page", {
+			method: "PUT", body: JSON.stringify({ path: "private.md", content: "tenant-b-wiki" }),
+		})).status).toBe(200);
+		expect((await api(cookieB, "/api/wiki/page?path=private.md", { method: "DELETE" })).status).toBe(200);
+		expect(await (await api(cookieA, "/api/wiki/page?path=private.md")).json()).toMatchObject({ content: "tenant-a-wiki" });
+	});
+});
