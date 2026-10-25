@@ -29,6 +29,7 @@ export interface GracefulShutdownOptions {
 		close(callback: () => void): unknown;
 	};
 	exit: (code: number) => void;
+	onClose?: () => void | Promise<void>;
 	exitTimeoutMs?: number;
 }
 
@@ -66,6 +67,7 @@ export function createGracefulShutdownHandler(
 			new Promise<void>((resolveClose) => {
 				try { options.wss.close(resolveClose); } catch { resolveClose(); }
 			}),
+			Promise.resolve().then(() => options.onClose?.()).catch(() => {}),
 		]).then(() => {
 			// HTTP close does not wait for upgraded sockets; let the WS close
 			// handshakes finish too before exiting, unless the deadline wins.

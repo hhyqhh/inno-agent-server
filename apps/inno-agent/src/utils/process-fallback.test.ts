@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createGracefulShutdownHandler } from "./process-fallback.js";
 
-function setup(shuttingDown = false, exitTimeoutMs?: number) {
+function setup(shuttingDown = false, exitTimeoutMs?: number, onClose?: () => void | Promise<void>) {
 	const state = { shuttingDown };
 	const clients = [{ close: vi.fn() }, { close: vi.fn() }];
 	const server = { close: vi.fn<(callback: () => void) => void>() };
 	const wss = { clients, close: vi.fn<(callback: () => void) => void>() };
 	const exit = vi.fn<(code: number) => void>();
-	const shutdown = createGracefulShutdownHandler({ server, wss, exit, exitTimeoutMs }, state);
+	const shutdown = createGracefulShutdownHandler({ server, wss, exit, exitTimeoutMs, onClose }, state);
 	return { state, clients, server, wss, exit, shutdown };
 }
 
@@ -95,6 +95,19 @@ describe("graceful shutdown handler", () => {
 		expect(server.close).not.toHaveBeenCalled();
 		expect(wss.close).not.toHaveBeenCalled();
 		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("closes authentication resources before exiting", async () => {
+		const onClose = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+		const { server, wss, exit, shutdown } = setup(false, undefined, onClose);
+		server.close.mockImplementation((callback) => callback());
+		wss.close.mockImplementation((callback) => callback());
+
+		shutdown();
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(onClose).toHaveBeenCalledOnce();
+		expect(exit).toHaveBeenCalledExactlyOnceWith(0);
 	});
 
 	it("continues cleanup if one client or server close throws", async () => {

@@ -1,4 +1,19 @@
 {
+	"auth": {
+		"loading": "Checking your session",
+		"retry": "Retry",
+		"welcomeBack": "Sign in to continue",
+		"createAccount": "Create your account",
+		"name": "Name",
+		"email": "Email",
+		"password": "Password",
+		"signIn": "Sign in",
+		"signUp": "Create account",
+		"signOut": "Sign out",
+		"submitting": "Please wait…",
+		"needAccount": "Need an account? Sign up",
+		"haveAccount": "Already have an account? Sign in"
+	},
 	"contextUsage": {
 		"title": "Context usage",
 		"close": "Close context usage",

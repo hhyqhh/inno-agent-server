@@ -1,3 +1,5 @@
+import { UNAUTHORIZED_EVENT } from "./auth.js";
+
 export class ApiError extends Error {
 	constructor(
 		public status: number,
@@ -12,12 +14,18 @@ export class ApiError extends Error {
 
 const BASE_URL = ""; // Same origin — Vite proxy in dev
 
+function notifyUnauthorized(res: Response): void {
+	if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+}
+
 export async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 	const res = await fetch(`${BASE_URL}${path}`, {
+		credentials: "same-origin",
 		headers: { "Content-Type": "application/json", ...options?.headers },
 		...options,
 	});
 	if (!res.ok) {
+		notifyUnauthorized(res);
 		const body = await res.json().catch(() => ({}));
 		throw new ApiError(res.status, (body as Record<string, string>).error || res.statusText, body as Record<string, unknown>);
 	}
@@ -100,6 +108,7 @@ export async function* streamSSE<T>(url: string, body: unknown, signal?: AbortSi
 	try {
 		res = await fetch(url, {
 			method: "POST",
+			credentials: "same-origin",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(body),
 			signal,
@@ -109,6 +118,7 @@ export async function* streamSSE<T>(url: string, body: unknown, signal?: AbortSi
 		throw err;
 	}
 	if (!res.ok) {
+		notifyUnauthorized(res);
 		const errBody = await res.json().catch(() => ({}));
 		throw new ApiError(res.status, (errBody as Record<string, string>).error || res.statusText);
 	}
@@ -122,7 +132,7 @@ export async function* streamSSE<T>(url: string, body: unknown, signal?: AbortSi
 export async function* streamSSEGet<T>(url: string, signal?: AbortSignal, options: { allowNotFound?: boolean } = {}): AsyncGenerator<T> {
 	let res: Response;
 	try {
-		res = await fetch(url, { method: "GET", signal });
+		res = await fetch(url, { method: "GET", credentials: "same-origin", signal });
 	} catch (err) {
 		if (signal?.aborted) return;
 		throw err;
@@ -136,6 +146,7 @@ export async function* streamSSEGet<T>(url: string, signal?: AbortSignal, option
 		throw new ApiError(404, "Stream not found");
 	}
 	if (!res.ok) {
+		notifyUnauthorized(res);
 		const errBody = await res.json().catch(() => ({}));
 		throw new ApiError(res.status, (errBody as Record<string, string>).error || res.statusText);
 	}

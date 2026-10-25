@@ -13,6 +13,7 @@
 	"main": "electron/main.js",
 	"scripts": {
 		"test": "vitest run",
+		"test:integration": "vitest run --config vitest.integration.config.ts",
 		"eval:l2-retrieval": "tsx scripts/eval-l2-retrieval.ts",
 		"build": "npm --workspace inno-agent run build && npm --workspace inno-agent-web run build",
 		"start": "npm --workspace inno-agent run start --",

@@ -231,7 +231,7 @@ INNO_PORT=3000 \
 npm run server
 ```
 
-A [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](./docker-compose.yml) are provided as starting points; see [`docs/SYSTEM_DEPENDENCIES.md`](./docs/SYSTEM_DEPENDENCIES.md) for the full dependency reference. Desktop packaging notes are in [`ELECTRON_BUILD.md`](./ELECTRON_BUILD.md).
+A [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](./docker-compose.yml) are provided as starting points; see [`docs/SYSTEM_DEPENDENCIES.md`](./docs/SYSTEM_DEPENDENCIES.md) for the full dependency reference. Optional Better Auth + PostgreSQL setup and its current single-tenant limitation are documented in [`docs/AUTHENTICATION.md`](./docs/AUTHENTICATION.md). Desktop packaging notes are in [`ELECTRON_BUILD.md`](./ELECTRON_BUILD.md).
 
 ## Showcase — Session Replay Site
 

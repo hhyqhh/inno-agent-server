@@ -33,6 +33,7 @@ import {
 	Sun,
 	Moon,
 	Languages,
+	LogOut,
 } from "lucide-react";
 import { appStore, type AppPage } from "../stores/app-store.js";
 import { CHAT_ONLY_BP, canOpenWorkspaceBesideSidebar, WORKSPACE_DEFAULT_WIDTH } from "../stores/app-layout.js";
@@ -50,6 +51,7 @@ import { useStoreSnapshot, useTitleMarquee } from "./hooks.js";
 import { Spinner } from "./ui/Spinner.js";
 import { ContextMenu, type ContextMenuItem } from "./ui/ContextMenu.js";
 import { getLongPressHandlers } from "./ui/long-press.js";
+import { getAuthSession, signOut, type AuthUser } from "../api/auth.js";
 
 interface SessionSidebarProps {
 	collapsed: boolean;
@@ -598,6 +600,11 @@ function SidebarUserMenu() {
 	const { t, i18n } = useTranslation();
 	const [open, setOpen] = useState(false);
 	const theme = useStoreSnapshot(themeStore, () => themeStore.current);
+	const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+
+	useEffect(() => {
+		void getAuthSession().then((session) => setAuthUser(session.user));
+	}, []);
 
 	useEffect(() => {
 		if (!open) return;
@@ -618,9 +625,9 @@ function SidebarUserMenu() {
 				onClick={() => setOpen((v) => !v)}
 			>
 				<span className="flex h-7 w-7 shrink-0 select-none items-center justify-center rounded-full border border-[var(--inno-border)] bg-[var(--inno-surface)] text-[10px] font-semibold text-[var(--inno-text)]">
-					IA
+					{authUser ? (authUser.name || authUser.email).slice(0, 2).toUpperCase() : "IA"}
 				</span>
-				<span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--inno-text)]">Inno Agent</span>
+				<span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--inno-text)]">{authUser?.name || authUser?.email || "Inno Agent"}</span>
 				<SettingsIcon size={14} className="shrink-0 text-[var(--inno-text-subtle)]" />
 			</button>
 			{open ? (
@@ -666,6 +673,17 @@ function SidebarUserMenu() {
 							<SettingsIcon size={14} className="text-[var(--inno-text-muted)]" />
 							{t("nav.settings")}
 						</button>
+						{authUser ? (
+							<button
+								type="button"
+								role="menuitem"
+								className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-[var(--inno-text)] hover:bg-[var(--inno-surface-muted)]"
+								onClick={() => void signOut().then(() => window.location.reload())}
+							>
+								<LogOut size={14} className="text-[var(--inno-text-muted)]" />
+								{t("auth.signOut")}
+							</button>
+						) : null}
 					</div>
 				</>
 			) : null}

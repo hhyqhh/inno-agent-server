@@ -88,6 +88,9 @@ import { writeRunFile } from "./terminal/run-file.js";
 import { TerminalSessionManager } from "./terminal/terminal-session-manager.js";
 import type { ClientTerminalEvent, ServerTerminalEvent } from "./terminal/terminal-types.js";
 import { WebSocketServer, type WebSocket } from "ws";
+import { readAuthRuntimeConfig, readListenConfig } from "./auth/config.js";
+import { assertSignUpAllowed, isPublicApiRequest, isTrustedOrigin, requireSession } from "./auth/http.js";
+import { createAuthRuntime } from "./auth/runtime.js";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -105,6 +108,11 @@ installFetchLogger();
 const parsed = parseRuntimeArgs(process.argv.slice(2));
 const paths = resolveRuntimePaths(parsed.options);
 applyRuntimeEnvironment(paths);
+
+const authConfig = readAuthRuntimeConfig(process.env);
+const listenConfig = readListenConfig(process.env, authConfig.mode);
+const auth = createAuthRuntime(authConfig);
+await auth.checkConnection();
 
 // Port is resolved from CLI / env only — config.json is read lazily.
 const port = parsed.options.port
@@ -1546,6 +1554,31 @@ const server = createServer(async (req, response) => {
 			return;
 		}
 
+		// Better Auth must receive the untouched request body and must not
+		// initialize the agent just to sign in or register.
+		if (path === "/api/auth" || path.startsWith("/api/auth/")) {
+			assertSignUpAllowed(auth, method, path);
+			await auth.handle(req, res);
+			return;
+		}
+		if (method === "GET" && path === "/api/session") {
+			const session = await auth.getSession(req);
+			json(res, 200, {
+				mode: auth.mode,
+				allowSignUp: auth.allowSignUp,
+				user: session?.principal ?? null,
+			});
+			return;
+		}
+
+		if (path.startsWith("/api/") && !isPublicApiRequest(method, path)) {
+			if (auth.mode === "better-auth" && !isTrustedOrigin(req.headers.origin, authConfig)) {
+				throw new HttpError(403, "Untrusted request origin");
+			}
+			const session = await requireSession(req, res, auth);
+			if (auth.mode === "better-auth" && !session) return;
+		}
+
 		// --- Lazy bootstrap on first API request ---
 		// All /api/* endpoints need the agent session and data stores.
 		// Static files and SPA fallback skip this so no directories are
@@ -1608,21 +1641,30 @@ const server = createServer(async (req, response) => {
 
 const wss = new WebSocketServer({ noServer: true });
 server.on("upgrade", (req, socket, head) => {
-	const url = req.url ?? "";
+	void (async () => {
+		const url = req.url ?? "";
+		const m = /^\/api\/terminal\/sessions\/([^/?]+)\/ws$/.exec(url.split("?")[0]);
+		if (!m) { socket.destroy(); return; }
+		if (auth.mode === "better-auth" && !isTrustedOrigin(req.headers.origin, authConfig)) {
+			socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+			socket.destroy();
+			return;
+		}
+		if (auth.mode === "better-auth" && !await auth.getSession(req)) {
+			socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+			socket.destroy();
+			return;
+		}
 		if (!bootstrapped) { socket.destroy(); return; }
-	const m = /^\/api\/terminal\/sessions\/([^/?]+)\/ws$/.exec(url.split("?")[0]);
-	if (!m) {
+		const terminalId = decodeURIComponent(m[1]);
+		const ts = terminalManager.get(terminalId);
+		if (!ts) { socket.destroy(); return; }
+		wss.handleUpgrade(req, socket, head, (ws) => {
+			bindTerminalWs(ws, terminalId);
+		});
+	})().catch((err) => {
+		logger.warn({ err }, "Terminal WebSocket authentication failed");
 		socket.destroy();
-		return;
-	}
-	const terminalId = decodeURIComponent(m[1]);
-	const ts = terminalManager.get(terminalId);
-	if (!ts) {
-		socket.destroy();
-		return;
-	}
-	wss.handleUpgrade(req, socket, head, (ws) => {
-		bindTerminalWs(ws, terminalId);
 	});
 });
 
@@ -1749,11 +1791,12 @@ const gracefulShutdown = createGracefulShutdownHandler({
 	server,
 	wss,
 	exit: (code) => process.exit(code),
+	onClose: () => auth.close(),
 });
 process.on("SIGTERM", gracefulShutdown);
 process.on("SIGINT", gracefulShutdown);
 
-server.listen(port, () => {
-	console.log(`[inno-server] listening on http://localhost:${port}`);
+server.listen(port, listenConfig.host, () => {
+	console.log(`[inno-server] listening on http://${listenConfig.host}:${port}`);
 	console.log(`[inno-server] config: ${paths.configPath}`);
 });

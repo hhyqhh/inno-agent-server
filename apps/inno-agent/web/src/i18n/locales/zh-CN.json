@@ -1,4 +1,19 @@
 {
+	"auth": {
+		"loading": "正在检查登录状态",
+		"retry": "重试",
+		"welcomeBack": "登录以继续",
+		"createAccount": "创建你的账号",
+		"name": "姓名",
+		"email": "邮箱",
+		"password": "密码",
+		"signIn": "登录",
+		"signUp": "注册",
+		"signOut": "退出登录",
+		"submitting": "请稍候…",
+		"needAccount": "没有账号？立即注册",
+		"haveAccount": "已有账号？返回登录"
+	},
 	"contextUsage": {
 		"title": "上下文用量",
 		"close": "关闭上下文用量",

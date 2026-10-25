@@ -9,8 +9,35 @@ services:
       INNO_SKILLS_DIR: /var/lib/inno-agent/skills
       INNO_WORKSPACE_DIR: /srv/inno-workspace
       INNO_PORT: 3000
+      INNO_HOST: 0.0.0.0
+      # Compose publishes this unauthenticated local-mode port intentionally.
+      # Use better-auth for any non-local deployment.
+      INNO_ALLOW_UNAUTHENTICATED_NETWORK: "true"
+      # DATABASE_URL: postgresql://inno:inno@postgres:5432/inno
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - ./runtime/config:/etc/inno-agent
       - ./runtime/data:/var/lib/inno-agent/data
       - ./runtime/skills:/var/lib/inno-agent/skills
       - ./workspace:/srv/inno-workspace
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: inno
+      POSTGRES_PASSWORD: inno
+      POSTGRES_DB: inno
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inno -d inno"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+volumes:
+  postgres-data:
