@@ -91,7 +91,8 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { readAuthRuntimeConfig, readListenConfig } from "./auth/config.js";
 import { assertSignUpAllowed, isPublicApiRequest, isTrustedOrigin, requireSession } from "./auth/http.js";
 import { createAuthRuntime } from "./auth/runtime.js";
-import { setRequestTenant } from "./tenants/http.js";
+import { ownsRequestResource, setRequestTenant } from "./tenants/http.js";
+import { resolveCurrentTenantDataDir } from "./tenants/paths.js";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -228,7 +229,7 @@ async function ensureBootstrapped(): Promise<void> {
 			logger.warn({ err }, "[sessions] unbound-session migration failed");
 		}
 
-		runRecordStore = new RunRecordStore(join(dataDir, "runs"));
+		runRecordStore = new RunRecordStore(() => resolveCurrentTenantDataDir(dataDir, "runs"));
 		terminalManager = new TerminalSessionManager(workspaceRegistry, runRecordStore);
 
 		// Resolve agent cwd per session based on its workspace binding.
@@ -1487,7 +1488,7 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 
 	// --- Terminal sessions + Runs (extracted to server/routes/practice.ts) ---
 	practice: (req, res, method, url) => handlePracticeRoutes(req, res, method, url, {
-		workspaceRegistry, l2DataDir, terminalManager, runRecordStore,
+		workspaceRegistry, dataDir, terminalManager, runRecordStore, tenantStore: auth.tenantStore,
 	}),
 
 	// --- Settings + MCP API (extracted to server/routes/settings.ts) ---
@@ -1655,15 +1656,25 @@ server.on("upgrade", (req, socket, head) => {
 			socket.destroy();
 			return;
 		}
-		if (auth.mode === "better-auth" && !await auth.getSession(req)) {
+		const session = auth.mode === "better-auth" ? await auth.getSession(req) : null;
+		if (auth.mode === "better-auth" && !session) {
 			socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
 			socket.destroy();
 			return;
 		}
+		if (session && auth.tenantStore) {
+			const tenant = await auth.tenantStore.ensurePersonalTenant(session.principal.userId);
+			setRequestTenant(req, tenant, auth.tenantStore);
+		}
 		if (!bootstrapped) { socket.destroy(); return; }
 		const terminalId = decodeURIComponent(m[1]);
 		const ts = terminalManager.get(terminalId);
-		if (!ts) { socket.destroy(); return; }
+		if (!ts || !await ownsRequestResource(req, auth.tenantStore, "terminal", terminalId)
+			|| !await ownsRequestResource(req, auth.tenantStore, "session", ts.sessionId)) {
+			socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+			socket.destroy();
+			return;
+		}
 		wss.handleUpgrade(req, socket, head, (ws) => {
 			bindTerminalWs(ws, terminalId);
 		});

@@ -41,7 +41,7 @@ its port is published; use Better Auth for non-local deployments.
 
 > **Isolation boundary:** account authentication and the current tenant/ownership
 > slices do not yet make all application data tenant-safe. Memory, jobs,
-> channels, settings, terminals, permissions, and the singleton agent runtime
+> channels, settings, permissions, and the singleton agent runtime
 > are still shared until each domain's authorization migration lands. `INNO_MULTI_USER_ENABLED=true`
 > deliberately fails at startup until resource ownership and cross-tenant
 > isolation are implemented. Do not treat this stage as a safe multi-user
@@ -90,7 +90,7 @@ hidden in Better Auth mode. Local mode retains the existing shared `tmp`
 behavior.
 
 This is still partial application isolation: background jobs/channels and their
-memory access, settings, terminal/permissions, and the singleton agent runtime
+memory access, settings, permissions, and the singleton agent runtime
 have their own remaining migration work.
 `INNO_MULTI_USER_ENABLED` therefore remains unavailable.
 
@@ -108,8 +108,21 @@ only owned sessions, and rechecks ownership when returning recall results.
 Background jobs/channels still use legacy global services until their own
 migration; they must not be treated as tenant-safe.
 
-Jobs, channels, settings, terminal/permissions, and the singleton agent runtime
+Jobs, channels, settings, permissions, and the singleton agent runtime
 still have remaining migration work. `INNO_MULTI_USER_ENABLED` therefore remains
+unavailable.
+
+## Terminal and run isolation (stage 2D)
+
+Terminal creation checks both session and workspace ownership. Terminal close
+and WebSocket upgrades check the terminal claim and its parent session; a
+cross-tenant WebSocket receives 404 after cookie authentication. Run listings,
+details, and archive operations also require ownership of the parent session.
+Run records live under `<dataDir>/tenants/<tenantId>/runs`, and run archives use
+that tenant's L2 root. Local mode keeps the original shared run directory.
+
+Background jobs/channels, settings, permissions, and the singleton agent runtime
+still have remaining migration work. `INNO_MULTI_USER_ENABLED` remains
 unavailable.
 
 

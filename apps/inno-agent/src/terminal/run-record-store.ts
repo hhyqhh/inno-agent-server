@@ -65,15 +65,21 @@ export interface FinishRunInput {
  * full pty transcript — metadata holds command + exit, log holds raw bytes.
  */
 export class RunRecordStore {
-	constructor(private readonly runsDir: string) {
-		ensureDir(runsDir);
+	constructor(private readonly runsDirInput: string | (() => string)) {
+		if (typeof runsDirInput === "string") ensureDir(runsDirInput);
+	}
+
+	private runsDir(): string {
+		const dir = typeof this.runsDirInput === "function" ? this.runsDirInput() : this.runsDirInput;
+		ensureDir(dir);
+		return dir;
 	}
 
 	private dateDir(date = new Date()): string {
 		const y = date.getUTCFullYear();
 		const m = String(date.getUTCMonth() + 1).padStart(2, "0");
 		const d = String(date.getUTCDate()).padStart(2, "0");
-		const dir = join(this.runsDir, `${y}-${m}-${d}`);
+		const dir = join(this.runsDir(), `${y}-${m}-${d}`);
 		ensureDir(dir);
 		return dir;
 	}
@@ -176,10 +182,11 @@ export class RunRecordStore {
 	}
 
 	private listDateDirs(): string[] {
-		if (!existsSync(this.runsDir)) return [];
-		return readdirSync(this.runsDir)
+		const runsDir = this.runsDir();
+		if (!existsSync(runsDir)) return [];
+		return readdirSync(runsDir)
 			.filter((name) => /^\d{4}-\d{2}-\d{2}$/.test(name))
-			.map((name) => join(this.runsDir, name))
+			.map((name) => join(runsDir, name))
 			.filter((dir) => statSync(dir).isDirectory())
 			.sort((a, b) => basename(b).localeCompare(basename(a)));
 	}

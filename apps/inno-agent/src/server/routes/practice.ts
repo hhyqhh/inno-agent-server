@@ -9,6 +9,10 @@ import type { RunRecordStore } from "../../terminal/run-record-store.js";
 import type { TerminalSessionManager } from "../../terminal/terminal-session-manager.js";
 import type { WorkspaceRegistry } from "../../workspace/workspace-registry.js";
 import { json, matchRoute, readBody } from "../http-helpers.js";
+import type { TenantStore } from "../../tenants/store.js";
+import { claimRequestResource, ownsRequestResource, releaseRequestResource } from "../../tenants/http.js";
+import { resolveRequestWorkspace } from "../../tenants/workspaces.js";
+import { resolveTenantDataDir } from "../../tenants/paths.js";
 
 /**
  * Practice-lab dependencies owned by server.ts. `terminalManager` and
@@ -17,9 +21,10 @@ import { json, matchRoute, readBody } from "../http-helpers.js";
  */
 export interface PracticeRouteContext {
 	workspaceRegistry: WorkspaceRegistry;
-	l2DataDir: string;
+	dataDir: string;
 	terminalManager: TerminalSessionManager;
 	runRecordStore: RunRecordStore;
+	tenantStore: TenantStore | null;
 }
 
 /**
@@ -35,20 +40,36 @@ export async function handlePracticeRoutes(
 	url: string,
 	ctx: PracticeRouteContext,
 ): Promise<boolean> {
-	const { workspaceRegistry, l2DataDir, terminalManager, runRecordStore } = ctx;
+	const { workspaceRegistry, dataDir, terminalManager, runRecordStore, tenantStore } = ctx;
+	const getVisibleRun = async (id: string) => {
+		const record = runRecordStore.get(id);
+		return record && await ownsRequestResource(req, tenantStore, "session", record.sessionId) ? record : null;
+	};
 
 	// --- Terminal sessions ---
 	if (method === "POST" && url === "/api/terminal/sessions") {
 		const body = (await readBody(req)) as Record<string, unknown>;
 		const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
 		if (!sessionId) { json(res, 400, { error: "Missing sessionId" }); return true; }
+		if (!await ownsRequestResource(req, tenantStore, "session", sessionId)) {
+			json(res, 404, { error: "Session not found" });
+			return true;
+		}
 		const requestedWs = typeof body.workspaceId === "string" && body.workspaceId.trim()
 			? body.workspaceId.trim()
 			: workspaceRegistry.getSessionWorkspaceId(sessionId);
+		const workspace = await resolveRequestWorkspace(req, workspaceRegistry, tenantStore, requestedWs);
+		if (!workspace) { json(res, 404, { error: "Workspace not found" }); return true; }
 		const cols = typeof body.cols === "number" ? body.cols : 100;
 		const rows = typeof body.rows === "number" ? body.rows : 24;
 		try {
-			const ts = terminalManager.create({ sessionId, workspaceId: requestedWs, cols, rows });
+			const ts = terminalManager.create({ sessionId, workspaceId: workspace.id, cols, rows });
+			try {
+				await claimRequestResource(req, tenantStore, "terminal", ts.id);
+			} catch (err) {
+				terminalManager.close(ts.id);
+				throw err;
+			}
 			json(res, 201, { id: ts.id, sessionId: ts.sessionId, workspaceId: ts.workspaceId, cwd: ts.cwd, status: "ready" });
 		} catch (err) {
 			logger.error({ err }, "failed to create terminal session");
@@ -59,7 +80,19 @@ export async function handlePracticeRoutes(
 
 	const terminalCloseMatch = matchRoute("POST", method, url, "/api/terminal/sessions/:id/close");
 	if (terminalCloseMatch) {
-		terminalManager.close(decodeURIComponent(terminalCloseMatch.id));
+		const terminal = terminalManager.get(terminalCloseMatch.id);
+		if (!terminal) {
+			terminalManager.close(terminalCloseMatch.id);
+			json(res, 200, { closed: true });
+			return true;
+		}
+		if (!await ownsRequestResource(req, tenantStore, "terminal", terminal.id)
+			|| !await ownsRequestResource(req, tenantStore, "session", terminal.sessionId)) {
+			json(res, 404, { error: "Terminal not found" });
+			return true;
+		}
+		terminalManager.close(terminal.id);
+		await releaseRequestResource(req, tenantStore, "terminal", terminal.id);
 		json(res, 200, { closed: true });
 		return true;
 	}
@@ -70,13 +103,17 @@ export async function handlePracticeRoutes(
 		const sessionId = params.get("sessionId") ?? "";
 		const limit = Math.min(Number.parseInt(params.get("limit") ?? "20", 10) || 20, 100);
 		if (!sessionId) { json(res, 400, { error: "Missing sessionId" }); return true; }
+		if (!await ownsRequestResource(req, tenantStore, "session", sessionId)) {
+			json(res, 404, { error: "Session not found" });
+			return true;
+		}
 		json(res, 200, runRecordStore.listForSession(sessionId, limit));
 		return true;
 	}
 
 	const runDetailMatch = matchRoute("GET", method, url.split("?")[0], "/api/runs/:id");
 	if (runDetailMatch) {
-		const record = runRecordStore.get(decodeURIComponent(runDetailMatch.id));
+		const record = await getVisibleRun(runDetailMatch.id);
 		if (!record) { json(res, 404, { error: "Run not found" }); return true; }
 		const params = new URL(url, "http://localhost").searchParams;
 		const lines = Math.min(Number.parseInt(params.get("lines") ?? "200", 10) || 200, 2000);
@@ -87,7 +124,7 @@ export async function handlePracticeRoutes(
 
 	const runArchiveMatch = matchRoute("POST", method, url, "/api/runs/:id/archive");
 	if (runArchiveMatch) {
-		const record = runRecordStore.get(decodeURIComponent(runArchiveMatch.id));
+		const record = await getVisibleRun(runArchiveMatch.id);
 		if (!record) { json(res, 404, { error: "Run not found" }); return true; }
 		const body = (await readBody(req)) as Record<string, unknown>;
 		const title = typeof body.title === "string" && body.title.trim()
@@ -95,11 +132,12 @@ export async function handlePracticeRoutes(
 			: `Run: ${record.command.slice(0, 40)}`;
 		const note = typeof body.note === "string" ? body.note.trim() : "";
 		const outputTail = runRecordStore.getOutputTail(record, 500);
-		const ws = workspaceRegistry.getWorkspace(record.workspaceId);
+		const ws = await resolveRequestWorkspace(req, workspaceRegistry, tenantStore, record.workspaceId);
+		if (!ws) { json(res, 404, { error: "Workspace not found" }); return true; }
 
 		const now = new Date().toISOString();
 		const wikiRelPath = wikiPathJoin("wiki", "analysis", `run-${record.id}.md`);
-		const fullPath = join(l2DataDir, wikiRelPath);
+		const fullPath = join(resolveTenantDataDir(req, dataDir, "l2"), wikiRelPath);
 		if (existsSync(fullPath)) {
 			json(res, 409, { error: "Run already archived", path: wikiRelPath });
 			return true;

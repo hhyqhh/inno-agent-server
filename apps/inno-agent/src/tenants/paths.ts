@@ -15,7 +15,7 @@ export function resolveTenantDataDir(
 
 export function resolveCurrentTenantDataDir(
 	dataDir: string,
-	domain: "learner" | "l2" | "l3",
+	domain: "learner" | "l2" | "l3" | "runs",
 ): string {
 	const tenant = getCurrentTenant();
 	return tenant ? join(dataDir, "tenants", tenant.tenantId, domain) : join(dataDir, domain);
