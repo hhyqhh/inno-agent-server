@@ -292,6 +292,7 @@ export function instantiatePreset(
 	paths: RuntimePaths,
 	registry: WorkspaceRegistry,
 	presetId: string,
+	tenantScope?: string,
 ): WorkspaceMeta {
 	const id = presetId.trim();
 	if (!isValidPresetId(id)) {
@@ -309,7 +310,7 @@ export function instantiatePreset(
 		throw new Error(`Preset metadata invalid: ${presetId}`);
 	}
 
-	const { ws, created } = registry.ensurePresetWorkspace(id, meta.name);
+	const { ws, created } = registry.ensurePresetWorkspace(id, meta.name, tenantScope);
 	const destDir = registry.resolveWorkspaceDir(ws.id);
 	if (!destDir) {
 		throw new Error(`Failed to resolve workspace dir for ${ws.id}`);

@@ -5,6 +5,8 @@ import { appendAssistantNotificationInSession, completeSideQuestion } from "../.
 import { json, matchRoute, readBody } from "../http-helpers.js";
 import { logger } from "../../logger.js";
 import type { SessionMessageSummary } from "../session-model.js";
+import type { TenantStore } from "../../tenants/store.js";
+import { ownsRequestResource } from "../../tenants/http.js";
 import {
 	readBtwState,
 	writeBtwState,
@@ -26,6 +28,7 @@ import {
 
 export interface BtwRouteContext {
 	dataDir: string;
+	tenantStore?: TenantStore | null;
 	sessionFileFromId: (sessionDir: string, id: string) => string | null;
 	parseSessionFile: (filePath: string) => { messages: SessionMessageSummary[] } | null;
 }
@@ -189,10 +192,12 @@ export async function handleBtwRoutes(
 	url: string,
 	ctx: BtwRouteContext,
 ): Promise<boolean> {
+	const ownsSession = (sessionId: string) => ownsRequestResource(req, ctx.tenantStore, "session", sessionId);
 	const stateMatch = matchRoute("GET", method, url, "/api/btw/state/:sessionId")
 		?? matchRoute("PUT", method, url, "/api/btw/state/:sessionId");
 	if (stateMatch) {
 		const sessionId = stateMatch.sessionId;
+		if (!await ownsSession(sessionId)) { json(res, 404, { error: "Session not found" }); return true; }
 		if (!sessionPathFor(ctx, sessionId)) {
 			json(res, 404, { error: "Session not found" });
 			return true;
@@ -214,6 +219,7 @@ export async function handleBtwRoutes(
 	if (method === "POST" && url === "/api/btw/ask") {
 		const body = (await readBody(req)) as Record<string, unknown>;
 		const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+		if (sessionId && !await ownsSession(sessionId)) { json(res, 404, { error: "Session not found" }); return true; }
 		const question = typeof body.question === "string" ? body.question.trim() : "";
 		const thread = readThread(body.thread);
 		if (!sessionId || !question || !thread) {
@@ -249,6 +255,7 @@ export async function handleBtwRoutes(
 	if (method === "POST" && url === "/api/btw/bring-back") {
 		const body = (await readBody(req)) as Record<string, unknown>;
 		const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+		if (sessionId && !await ownsSession(sessionId)) { json(res, 404, { error: "Session not found" }); return true; }
 		const question = typeof body.question === "string" ? body.question.trim() : "";
 		const answer = typeof body.answer === "string" ? body.answer.trim() : "";
 		if (!sessionId || !question || !answer) {

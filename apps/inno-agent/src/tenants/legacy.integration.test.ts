@@ -71,18 +71,18 @@ describe("legacy owner migration command", () => {
 	it("keeps dry-run read-only and executes idempotently for an explicit owner", async () => {
 		const dry = await migrateLegacy("--dry-run");
 		expect(dry).toMatchObject({ code: 0 });
-		expect(dry.output).toContain('"assigned": 3');
+		expect(dry.output).toContain('"assigned": 2');
 		expect((await pool.query("SELECT COUNT(*)::int AS count FROM resource_ownership")).rows[0].count).toBe(0);
 		expect((await pool.query("SELECT COUNT(*)::int AS count FROM tenants")).rows[0].count).toBe(0);
 
 		const executed = await migrateLegacy("--execute");
 		expect(executed).toMatchObject({ code: 0 });
-		expect(executed.output).toContain('"assigned": 3');
-		expect((await pool.query("SELECT COUNT(*)::int AS count FROM resource_ownership")).rows[0].count).toBe(3);
+		expect(executed.output).toContain('"assigned": 2');
+		expect((await pool.query("SELECT COUNT(*)::int AS count FROM resource_ownership")).rows[0].count).toBe(2);
 
 		const repeated = await migrateLegacy("--execute");
 		expect(repeated).toMatchObject({ code: 0 });
-		expect(repeated.output).toContain('"alreadyOwned": 3');
-		expect((await pool.query("SELECT COUNT(*)::int AS count FROM resource_ownership")).rows[0].count).toBe(3);
+		expect(repeated.output).toContain('"alreadyOwned": 2');
+		expect((await pool.query("SELECT COUNT(*)::int AS count FROM resource_ownership")).rows[0].count).toBe(2);
 	});
 });

@@ -3,6 +3,7 @@ import { betterAuth, type BetterAuthOptions } from "better-auth";
 import { fromNodeHeaders, toNodeHandler } from "better-auth/node";
 import { Pool } from "pg";
 import type { AuthRuntimeConfig } from "./config.js";
+import { TenantStore } from "../tenants/store.js";
 
 export interface AuthPrincipal {
 	userId: string;
@@ -18,6 +19,7 @@ export interface AuthSession {
 export interface AuthRuntime {
 	mode: "local" | "better-auth";
 	allowSignUp: boolean;
+	tenantStore: TenantStore | null;
 	getSession(req: IncomingMessage): Promise<AuthSession | null>;
 	handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
 	checkConnection(): Promise<void>;
@@ -33,6 +35,7 @@ export function createAuthRuntime(config: AuthRuntimeConfig): AuthRuntime {
 		return {
 			mode: config.mode,
 			allowSignUp: false,
+			tenantStore: null,
 			getSession: async () => null,
 			handle: async (_req, res) => {
 				res.writeHead(404).end();
@@ -54,10 +57,12 @@ export function createAuthRuntime(config: AuthRuntimeConfig): AuthRuntime {
 		trustedOrigins: config.trustedOrigins,
 	});
 	const nodeHandler = toNodeHandler(auth);
+	const tenantStore = new TenantStore(pool);
 
 	return {
 		mode: config.mode,
 		allowSignUp: config.allowSignUp,
+		tenantStore,
 		async getSession(req) {
 			const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
 			if (!session) return null;
@@ -80,6 +85,8 @@ export function createAuthRuntime(config: AuthRuntimeConfig): AuthRuntime {
 			try {
 				await pool.query('SELECT 1 FROM "user" LIMIT 1');
 				await pool.query("SELECT 1 FROM tenants LIMIT 1");
+				await pool.query("SELECT 1 FROM tenant_memberships LIMIT 1");
+				await pool.query("SELECT 1 FROM resource_ownership LIMIT 1");
 			} catch (err) {
 				throw new Error("Better Auth database/schema is unavailable; run auth:migrate before starting the server", { cause: err });
 			}

@@ -31,6 +31,9 @@ import {
 } from "../../showcase/case-exporter.js";
 import { readJson, writeJson } from "../../storage/file-store.js";
 import { TEMP_WORKSPACE_ID, type WorkspaceRegistry } from "../../workspace/workspace-registry.js";
+import type { TenantStore } from "../../tenants/store.js";
+import { claimRequestResource, getRequestTenant, ownsRequestResource, releaseRequestResource } from "../../tenants/http.js";
+import { resolveRequestWorkspace } from "../../tenants/workspaces.js";
 import {
 	clearSessionAttachments,
 	mergeSessionAttachments,
@@ -40,7 +43,7 @@ import { clearSessionTraces, mergeSessionTraces } from "../trace-store.js";
 import { clearSessionBtw } from "../btw-store.js";
 import { contentDispositionAttachment } from "../file-helpers.js";
 import { clearWorkspaceActivity } from "../workspace-activity-store.js";
-import { HttpError, json, matchRoute, readBody } from "../http-helpers.js";
+import { HttpError, decodeRouteParam, json, matchRoute, readBody } from "../http-helpers.js";
 import {
 	mergeChannels,
 	TOPIC_UPGRADE_MESSAGE_THRESHOLD,
@@ -62,6 +65,7 @@ export interface SessionsRouteContext {
 	workspaceRegistry: WorkspaceRegistry;
 	dataDir: string;
 	paths: RuntimePaths;
+	tenantStore?: TenantStore | null;
 	getContentSource: () => RemoteContentSource;
 	getCachedPresetAvailability?: (presetId: string) => boolean | null;
 	parseSessionFile: (filePath: string) => { summary: SessionSummary; messages: SessionMessageSummary[] } | null;
@@ -281,7 +285,18 @@ export async function handleSessionsRoutes(
 		sessionFileFromId,
 		releaseQueueFromQuestionBlockedTurn,
 		runQueueOpWithTimeout,
+		tenantStore,
 	} = ctx;
+
+	// Every session subresource is protected before any file or metadata access.
+	const sessionResourceMatch = /^\/api\/sessions\/([^/]+)(?:\/|$)/.exec(url.split("?", 1)[0]);
+	if (sessionResourceMatch) {
+		const id = decodeRouteParam(sessionResourceMatch[1]);
+		if (!await ownsRequestResource(req, tenantStore, "session", id)) {
+			json(res, 404, { error: "Session not found" });
+			return true;
+		}
+	}
 
 	// Read-only: never switch the singleton runtime to inspect a different session.
 	const contextMatch = matchRoute("GET", method, url, "/api/sessions/:id/context-usage");
@@ -308,13 +323,17 @@ export async function handleSessionsRoutes(
 		const topicMetadata = readSessionTopicMetadata();
 		const archiveMetadata = readJson<Record<string, boolean>>(sessionArchiveMetadataPath(dataDir), {});
 		const currentSessionId = getCurrentSessionId();
+		const tenant = getRequestTenant(req);
+		if (!tenantStore && tenant) throw new Error("Tenant store is required for an authenticated request");
+		const ownedSessionIds = tenant ? await tenantStore!.listResourceIds(tenant, "session") : null;
 		const sessions = existsSync(sessionDir)
 			? readdirSync(sessionDir)
 					.filter((file) => file.endsWith(".jsonl"))
 					.map((file) => parseSessionFile(join(sessionDir, file))?.summary)
 					.filter((summary): summary is SessionSummary => Boolean(summary))
+					.filter((summary) => !ownedSessionIds || ownedSessionIds.has(summary.id))
 					.map((summary) => withRecordedChannels(summary, channelMetadata))
-					.map((summary) => bindCliSessionWorkspace(workspaceRegistry, summary))
+					.map((summary) => tenant ? summary : bindCliSessionWorkspace(workspaceRegistry, summary))
 					.map((summary) => withRecordedTopic(summary, topicMetadata))
 					.map((summary) => ({ ...summary, archived: archiveMetadata[summary.id] === true }))
 					.filter((summary) => summary.messageCount > 0 || (summary.id === currentSessionId && summary.origin === "web"))
@@ -574,9 +593,20 @@ export async function handleSessionsRoutes(
 		const newWorkspaceSpec = body.newWorkspace && typeof body.newWorkspace === "object"
 			? body.newWorkspace as { name?: unknown; isTemp?: unknown }
 			: null;
+		const tenant = getRequestTenant(req);
+		const presetWorkspaceId = `preset-${presetId}${tenant ? `-${tenant.tenantId}` : ""}`;
 		const existingPresetWorkspace = presetId
-			? workspaceRegistry.getWorkspace(`preset-${presetId}`)
+			? workspaceRegistry.getWorkspace(presetWorkspaceId)
 			: null;
+		if (existingPresetWorkspace && !await ownsRequestResource(req, tenantStore, "workspace", existingPresetWorkspace.id)) {
+			json(res, 404, { error: "Workspace not found" });
+			return true;
+		}
+		if (explicitWorkspaceId && explicitWorkspaceId !== TEMP_WORKSPACE_ID
+			&& !await ownsRequestResource(req, tenantStore, "workspace", explicitWorkspaceId)) {
+			json(res, 404, { error: "Workspace not found" });
+			return true;
+		}
 
 		// Validate stale preset cards before creating a session. A preset that has
 		// already been loaded keeps working through its stable workspace even if
@@ -616,6 +646,7 @@ export async function handleSessionsRoutes(
 		releaseQueueFromQuestionBlockedTurn("");
 		const id = await runQueueOpWithTimeout(req, res, (signal) => createNewSession({ signal }));
 		if (id === null) return true; // 409 session_busy already sent (or client gone)
+		await claimRequestResource(req, tenantStore, "session", id);
 		// This endpoint is exclusively the Web UI's session-creation path.
 		// Record the origin immediately so Simple Mode includes the new empty
 		// session before the first assistant response has finished streaming.
@@ -636,17 +667,27 @@ export async function handleSessionsRoutes(
 				if (existingPresetWorkspace) {
 					workspaceId = existingPresetWorkspace.id;
 				} else {
-					const created = instantiatePreset(paths, workspaceRegistry, presetId);
+					const created = instantiatePreset(paths, workspaceRegistry, presetId, tenant?.tenantId);
 					workspaceId = created.id;
+					await claimRequestResource(req, tenantStore, "workspace", workspaceId);
 				}
 			} else if (newWorkspaceSpec) {
-				const created = workspaceRegistry.createWorkspace({
-					name: typeof newWorkspaceSpec.name === "string" ? newWorkspaceSpec.name : undefined,
-					isTemp: Boolean(newWorkspaceSpec.isTemp),
-				});
-				workspaceId = created.id;
-			} else if (explicitWorkspaceId && workspaceRegistry.getWorkspace(explicitWorkspaceId)) {
-				workspaceId = explicitWorkspaceId;
+				if (newWorkspaceSpec.isTemp) {
+					const temp = await resolveRequestWorkspace(req, workspaceRegistry, tenantStore, TEMP_WORKSPACE_ID);
+					if (!temp) throw new Error("Temporary workspace not found");
+					workspaceId = temp.id;
+				} else {
+					const created = workspaceRegistry.createWorkspace({
+						name: typeof newWorkspaceSpec.name === "string" ? newWorkspaceSpec.name : undefined,
+						isTemp: false,
+					});
+					workspaceId = created.id;
+					await claimRequestResource(req, tenantStore, "workspace", workspaceId);
+				}
+			} else {
+				const selected = await resolveRequestWorkspace(req, workspaceRegistry, tenantStore, explicitWorkspaceId || TEMP_WORKSPACE_ID);
+				if (!selected) throw new Error("Workspace not found");
+				workspaceId = selected.id;
 			}
 			workspaceRegistry.bindSession(id, workspaceId);
 			// Apply the new workspace cwd to the active runtime so the agent's
@@ -656,6 +697,7 @@ export async function handleSessionsRoutes(
 				await applyWorkspaceCwd(sessionPath, { signal: cwdAborter.signal });
 			}
 		} catch (err) {
+			if (tenant) throw err;
 			logger.warn({ err }, `failed to bind workspace for session ${id}`);
 		}
 
@@ -683,6 +725,7 @@ export async function handleSessionsRoutes(
 			releaseQueueFromQuestionBlockedTurn("");
 			newActiveId = await runQueueOpWithTimeout(req, res, (signal) => createNewSession({ signal }));
 			if (newActiveId === null) return true; // 409 session_busy already sent (or client gone)
+			await claimRequestResource(req, tenantStore, "session", newActiveId);
 		}
 
 		// If this session is the sole owner of a temp workspace, remove the
@@ -722,6 +765,7 @@ export async function handleSessionsRoutes(
 			if (shouldDropTempWorkspace) {
 				workspaceRegistry.deleteWorkspace(boundWorkspaceId, { removeFiles: true });
 			}
+			await releaseRequestResource(req, tenantStore, "session", sessionId);
 		} catch (err) {
 			logger.warn({ err }, "session delete cleanup failed");
 		}

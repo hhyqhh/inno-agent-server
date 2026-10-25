@@ -22,6 +22,9 @@ import type { RuntimePaths } from "../../runtime.js";
 import { ensureDir } from "../../storage/file-store.js";
 import { isWithin } from "../../utils/path-safety.js";
 import { TEMP_WORKSPACE_ID, type WorkspaceMeta, type WorkspaceRegistry } from "../../workspace/workspace-registry.js";
+import type { TenantStore } from "../../tenants/store.js";
+import { claimRequestResource, getRequestTenant, ownsRequestResource, releaseRequestResource } from "../../tenants/http.js";
+import { resolveRequestWorkspace } from "../../tenants/workspaces.js";
 import {
 	canonicalTreeRoot,
 	contentDispositionAttachment,
@@ -41,7 +44,7 @@ import {
 	workspaceSwitchStatistics,
 	type WorkspaceSwitchFileAction,
 } from "../workspace-switch.js";
-import { json, matchRoute, readBody } from "../http-helpers.js";
+import { decodeRouteParam, json, matchRoute, readBody } from "../http-helpers.js";
 
 /**
  * Server-owned dependencies the workspace routes touch. `workspaceRegistry`
@@ -52,6 +55,7 @@ export interface WorkspacesRouteContext {
 	workspaceRegistry: WorkspaceRegistry;
 	dataDir: string;
 	paths: RuntimePaths;
+	tenantStore?: TenantStore | null;
 	installSkillZip: (fileName: string, data: Buffer, targetRoot?: string) => { name: string; filePath: string };
 	installSkillMarkdown: (fileName: string, data: Buffer, targetRoot?: string) => { name: string; filePath: string };
 	importWorkspaceZip: (fileName: string, data: Buffer, name?: string) => WorkspaceMeta;
@@ -319,7 +323,39 @@ export async function handleWorkspacesRoutes(
 		sessionFileFromId,
 		releaseQueueFromQuestionBlockedTurn,
 		runQueueOpWithTimeout,
+		tenantStore,
 	} = ctx;
+
+	const resolveWorkspace = (workspaceId?: string | null) =>
+		resolveRequestWorkspace(req, workspaceRegistry, tenantStore, workspaceId);
+	const ownsWorkspace = (workspaceId: string) =>
+		ownsRequestResource(req, tenantStore, "workspace", workspaceId);
+	const ownsSession = (sessionId: string) =>
+		ownsRequestResource(req, tenantStore, "session", sessionId);
+
+	// Guard registry subresources before reading metadata or touching the filesystem.
+	const workspaceResourceMatch = /^\/api\/workspaces\/([^/]+)$/.exec(url.split("?", 1)[0]);
+	if (workspaceResourceMatch && (method === "PATCH" || method === "DELETE")) {
+		if (!await ownsWorkspace(decodeRouteParam(workspaceResourceMatch[1]))) {
+			json(res, 404, { error: "Workspace not found" });
+			return true;
+		}
+	}
+	const boundSessionMatch = /^\/api\/sessions\/([^/]+)\/workspace(?:\/|$)/.exec(url.split("?", 1)[0]);
+	if (boundSessionMatch && !await ownsSession(decodeRouteParam(boundSessionMatch[1]))) {
+		json(res, 404, { error: "Session not found" });
+		return true;
+	}
+
+	// Read-only file routes carry workspaceId in the query. Resolve tmp once and
+	// rewrite the local URL so every downstream helper uses the private directory.
+	if ((method === "GET" || method === "HEAD") && url.startsWith("/api/workspace/")) {
+		const requested = new URL(url, "http://localhost");
+		const workspace = await resolveWorkspace(requested.searchParams.get("workspaceId"));
+		if (!workspace) { json(res, 404, { error: "Workspace not found" }); return true; }
+		requested.searchParams.set("workspaceId", workspace.id);
+		url = `${requested.pathname}${requested.search}`;
+	}
 
 	// safeWorkspacePath closed over server.ts's module-level workspaceRegistry;
 	// rebind it to the injected registry here so the route bodies stay verbatim.
@@ -351,6 +387,12 @@ export async function handleWorkspacesRoutes(
 		if (isSwitchableWorkspace(workspaceRegistry.getWorkspace(workspaceId))) return true;
 		json(res, 404, { error: "Target workspace not found or unavailable" });
 		return false;
+	};
+	const resolveSessionWorkspace = async (sessionId: string): Promise<WorkspaceMeta | null> => {
+		const currentId = workspaceRegistry.getSessionWorkspaceId(sessionId);
+		const workspace = await resolveWorkspace(currentId);
+		if (workspace && workspace.id !== currentId) workspaceRegistry.bindSession(sessionId, workspace.id);
+		return workspace;
 	};
 
 	// --- Workspace API ---
@@ -552,7 +594,10 @@ export async function handleWorkspacesRoutes(
 
 	if (method === "PUT" && url === "/api/workspace/file") {
 		const body = (await readBody(req)) as Record<string, unknown>;
-		const wsId = workspaceIdFromBody(body);
+		const requestedWsId = workspaceIdFromBody(body);
+		const workspace = await resolveWorkspace(requestedWsId);
+		if (!workspace) { json(res, 404, { error: "Workspace not found" }); return true; }
+		const wsId = workspace.id;
 		const filePath = typeof body.path === "string" ? body.path.trim() : "";
 		const content = typeof body.content === "string" ? body.content : "";
 		if (!filePath) { json(res, 400, { error: "Missing path" }); return true; }
@@ -569,7 +614,10 @@ export async function handleWorkspacesRoutes(
 
 	if (method === "POST" && url === "/api/workspace/create") {
 		const body = (await readBody(req)) as Record<string, unknown>;
-		const wsId = workspaceIdFromBody(body);
+		const requestedWsId = workspaceIdFromBody(body);
+		const workspace = await resolveWorkspace(requestedWsId);
+		if (!workspace) { json(res, 404, { error: "Workspace not found" }); return true; }
+		const wsId = workspace.id;
 		const root = workspaceRegistry.resolveWorkspaceDir(wsId);
 		if (!root) { json(res, 404, { error: "Workspace not found" }); return true; }
 		const itemPath = typeof body.path === "string" ? body.path.trim() : "";
@@ -597,7 +645,10 @@ export async function handleWorkspacesRoutes(
 
 	if (method === "POST" && url === "/api/workspace/rename") {
 		const body = (await readBody(req)) as Record<string, unknown>;
-		const wsId = workspaceIdFromBody(body);
+		const requestedWsId = workspaceIdFromBody(body);
+		const workspace = await resolveWorkspace(requestedWsId);
+		if (!workspace) { json(res, 404, { error: "Workspace not found" }); return true; }
+		const wsId = workspace.id;
 		const root = workspaceRegistry.resolveWorkspaceDir(wsId);
 		if (!root) { json(res, 404, { error: "Workspace not found" }); return true; }
 		const oldPath = typeof body.oldPath === "string" ? body.oldPath.trim() : "";
@@ -624,7 +675,10 @@ export async function handleWorkspacesRoutes(
 
 	if (method === "POST" && url === "/api/workspace/delete") {
 		const body = (await readBody(req)) as Record<string, unknown>;
-		const wsId = workspaceIdFromBody(body);
+		const requestedWsId = workspaceIdFromBody(body);
+		const workspace = await resolveWorkspace(requestedWsId);
+		if (!workspace) { json(res, 404, { error: "Workspace not found" }); return true; }
+		const wsId = workspace.id;
 		const itemPath = typeof body.path === "string" ? body.path.trim() : "";
 		if (!itemPath) { json(res, 400, { error: "Cannot delete workspace root" }); return true; }
 		const fullPath = safeWorkspacePath(wsId, itemPath);
@@ -637,7 +691,10 @@ export async function handleWorkspacesRoutes(
 
 	if (method === "POST" && url === "/api/workspace/move") {
 		const body = (await readBody(req)) as Record<string, unknown>;
-		const wsId = workspaceIdFromBody(body);
+		const requestedWsId = workspaceIdFromBody(body);
+		const workspace = await resolveWorkspace(requestedWsId);
+		if (!workspace) { json(res, 404, { error: "Workspace not found" }); return true; }
+		const wsId = workspace.id;
 		const root = workspaceRegistry.resolveWorkspaceDir(wsId);
 		if (!root) { json(res, 404, { error: "Workspace not found" }); return true; }
 		const sourcePath = typeof body.sourcePath === "string" ? body.sourcePath.trim() : "";
@@ -664,7 +721,10 @@ export async function handleWorkspacesRoutes(
 
 	if (method === "POST" && url === "/api/workspace/upload") {
 		const body = (await readBody(req)) as Record<string, unknown>;
-		const wsId = workspaceIdFromBody(body);
+		const requestedWsId = workspaceIdFromBody(body);
+		const workspace = await resolveWorkspace(requestedWsId);
+		if (!workspace) { json(res, 404, { error: "Workspace not found" }); return true; }
+		const wsId = workspace.id;
 		const root = workspaceRegistry.resolveWorkspaceDir(wsId);
 		if (!root) { json(res, 404, { error: "Workspace not found" }); return true; }
 		const files = Array.isArray(body.files) ? body.files : [];
@@ -721,7 +781,10 @@ export async function handleWorkspacesRoutes(
 	// Install a skill package (.zip / .md) into the workspace's private .skills dir.
 	if (method === "POST" && url === "/api/workspace/skills/upload") {
 		const body = (await readBody(req)) as Record<string, unknown>;
-		const wsId = workspaceIdFromBody(body);
+		const requestedWsId = workspaceIdFromBody(body);
+		const workspace = await resolveWorkspace(requestedWsId);
+		if (!workspace) { json(res, 404, { error: "Workspace not found" }); return true; }
+		const wsId = workspace.id;
 		const root = workspaceRegistry.resolveWorkspaceDir(wsId);
 		if (!root) { json(res, 404, { error: "Workspace not found" }); return true; }
 		const fileName = typeof body.fileName === "string" ? body.fileName : "";
@@ -749,11 +812,30 @@ export async function handleWorkspacesRoutes(
 
 	// --- Workspaces registry API ---
 	if (method === "GET" && url === "/api/workspaces") {
+		const tenant = getRequestTenant(req);
+		if (tenant && !tenantStore) throw new Error("Tenant store is required for an authenticated request");
+		if (tenant) await resolveWorkspace(TEMP_WORKSPACE_ID);
+		const [ownedWorkspaceIds, ownedSessionIds] = tenant
+			? await Promise.all([
+				tenantStore!.listResourceIds(tenant, "workspace"),
+				tenantStore!.listResourceIds(tenant, "session"),
+			])
+			: [null, null];
 		const sessionDir = join(dataDir, "sessions");
 		const allSessionIds = existsSync(sessionDir)
 			? readdirSync(sessionDir).filter((f) => f.endsWith(".jsonl"))
+				.map((file) => basename(file, ".jsonl"))
+				.filter((id) => !ownedSessionIds || ownedSessionIds.has(id))
 			: [];
-		json(res, 200, workspaceRegistry.listWorkspaces(allSessionIds));
+		const workspaces = workspaceRegistry.listWorkspaces(allSessionIds)
+			.filter((workspace) => !ownedWorkspaceIds || ownedWorkspaceIds.has(workspace.id))
+			.map((workspace) => ({
+				...workspace,
+				sessionIds: ownedSessionIds
+					? workspace.sessionIds.filter((id) => ownedSessionIds.has(id))
+					: workspace.sessionIds,
+			}));
+		json(res, 200, workspaces);
 		return true;
 	}
 
@@ -762,7 +844,11 @@ export async function handleWorkspacesRoutes(
 		const name = typeof body.name === "string" ? body.name : undefined;
 		const isTemp = Boolean(body.isTemp);
 		try {
-			const ws = workspaceRegistry.createWorkspace({ name, isTemp });
+			const ws = isTemp
+				? await resolveWorkspace(TEMP_WORKSPACE_ID)
+				: workspaceRegistry.createWorkspace({ name, isTemp: false });
+			if (!ws) { json(res, 404, { error: "Workspace not found" }); return true; }
+			if (!isTemp) await claimRequestResource(req, tenantStore, "workspace", ws.id);
 			json(res, 201, ws);
 		} catch (err) {
 			logger.error({ err }, "failed to create workspace");
@@ -785,6 +871,7 @@ export async function handleWorkspacesRoutes(
 		}
 		try {
 			const ws = importWorkspaceZip(fileName, Buffer.from(dataBase64, "base64"), name);
+			await claimRequestResource(req, tenantStore, "workspace", ws.id);
 			json(res, 201, ws);
 		} catch (err) {
 			logger.error({ err }, "failed to import workspace archive");
@@ -819,6 +906,7 @@ export async function handleWorkspacesRoutes(
 		const removeFiles = params.get("removeFiles") === "1" || params.get("removeFiles") === "true";
 		const ok = workspaceRegistry.deleteWorkspace(id, { removeFiles });
 		if (!ok) { json(res, 404, { error: "Workspace not found" }); return true; }
+		await releaseRequestResource(req, tenantStore, "workspace", id);
 		json(res, 200, { id, deleted: true, removedFiles: removeFiles });
 		return true;
 	}
@@ -829,9 +917,19 @@ export async function handleWorkspacesRoutes(
 		const sessionId = decodeURIComponent(sessionWorkspaceSwitchPreviewMatch.id);
 		const sessionPath = sessionPathForSwitch(sessionId);
 		if (!sessionPath) return true;
-		const targetWorkspaceId = new URL(url, "http://localhost").searchParams.get("targetWorkspaceId")?.trim() ?? "";
-		if (!targetWorkspaceId) {
+		const requestedTargetWorkspaceId = new URL(url, "http://localhost").searchParams.get("targetWorkspaceId")?.trim() ?? "";
+		if (!requestedTargetWorkspaceId) {
 			json(res, 400, { error: "Missing targetWorkspaceId" });
+			return true;
+		}
+		const targetWorkspace = await resolveWorkspace(requestedTargetWorkspaceId);
+		if (!targetWorkspace) {
+			json(res, 404, { error: "Target workspace not found" });
+			return true;
+		}
+		const targetWorkspaceId = targetWorkspace.id;
+		if (!await resolveSessionWorkspace(sessionId)) {
+			json(res, 404, { error: "Workspace not found" });
 			return true;
 		}
 		if (!isAvailableSwitchTarget(targetWorkspaceId)) return true;
@@ -856,9 +954,19 @@ export async function handleWorkspacesRoutes(
 		const sessionPath = sessionPathForSwitch(sessionId);
 		if (!sessionPath) return true;
 		const body = (await readBody(req)) as Record<string, unknown>;
-		const targetWorkspaceId = typeof body.targetWorkspaceId === "string" ? body.targetWorkspaceId.trim() : "";
-		if (!targetWorkspaceId) {
+		const requestedTargetWorkspaceId = typeof body.targetWorkspaceId === "string" ? body.targetWorkspaceId.trim() : "";
+		if (!requestedTargetWorkspaceId) {
 			json(res, 400, { error: "targetWorkspaceId is required" });
+			return true;
+		}
+		const targetWorkspace = await resolveWorkspace(requestedTargetWorkspaceId);
+		if (!targetWorkspace) {
+			json(res, 404, { error: "Target workspace not found" });
+			return true;
+		}
+		const targetWorkspaceId = targetWorkspace.id;
+		if (!await resolveSessionWorkspace(sessionId)) {
+			json(res, 404, { error: "Workspace not found" });
 			return true;
 		}
 		if (!body.fileActions || typeof body.fileActions !== "object" || Array.isArray(body.fileActions)) {
@@ -938,9 +1046,9 @@ export async function handleWorkspacesRoutes(
 	const sessionWorkspaceGetMatch = matchRoute("GET", method, url, "/api/sessions/:id/workspace");
 	if (sessionWorkspaceGetMatch) {
 		const sessionId = decodeURIComponent(sessionWorkspaceGetMatch.id);
-		const workspaceId = workspaceRegistry.getSessionWorkspaceId(sessionId);
-		const ws = workspaceRegistry.getWorkspace(workspaceId);
-		json(res, 200, { sessionId, workspaceId, workspace: ws });
+		const workspace = await resolveSessionWorkspace(sessionId);
+		if (!workspace) { json(res, 404, { error: "Workspace not found" }); return true; }
+		json(res, 200, { sessionId, workspaceId: workspace.id, workspace });
 		return true;
 	}
 
@@ -952,8 +1060,11 @@ export async function handleWorkspacesRoutes(
 			return true;
 		}
 		const body = (await readBody(req)) as Record<string, unknown>;
-		const workspaceId = typeof body.workspaceId === "string" ? body.workspaceId.trim() : "";
-		if (!workspaceId) { json(res, 400, { error: "Missing workspaceId" }); return true; }
+		const requestedWorkspaceId = typeof body.workspaceId === "string" ? body.workspaceId.trim() : "";
+		if (!requestedWorkspaceId) { json(res, 400, { error: "Missing workspaceId" }); return true; }
+		const targetWorkspace = await resolveWorkspace(requestedWorkspaceId);
+		if (!targetWorkspace) { json(res, 404, { error: "Workspace not found" }); return true; }
+		const workspaceId = targetWorkspace.id;
 		const ok = workspaceRegistry.bindSession(sessionId, workspaceId);
 		if (!ok) { json(res, 404, { error: "Workspace not found" }); return true; }
 		// If the rebinding affects the currently active session, refresh agent cwd.

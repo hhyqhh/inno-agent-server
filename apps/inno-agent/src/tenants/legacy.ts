@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import type { RuntimePaths } from "../runtime.js";
 import { readJson } from "../storage/file-store.js";
 import type { LegacyResourceSet } from "./store.js";
+import { TEMP_WORKSPACE_ID } from "../workspace/workspace-registry.js";
 
 export function discoverLegacyResources(paths: RuntimePaths): LegacyResourceSet {
 	const sessions = existsSync(paths.sessionDir)
@@ -16,6 +17,6 @@ export function discoverLegacyResources(paths: RuntimePaths): LegacyResourceSet 
 	);
 	const workspaces = (registry.workspaces ?? [])
 		.map((workspace) => workspace.id)
-		.filter((id): id is string => typeof id === "string" && id.length > 0);
+		.filter((id): id is string => typeof id === "string" && id.length > 0 && id !== TEMP_WORKSPACE_ID);
 	return { sessions, workspaces };
 }

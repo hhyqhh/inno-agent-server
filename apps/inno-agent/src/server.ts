@@ -91,6 +91,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { readAuthRuntimeConfig, readListenConfig } from "./auth/config.js";
 import { assertSignUpAllowed, isPublicApiRequest, isTrustedOrigin, requireSession } from "./auth/http.js";
 import { createAuthRuntime } from "./auth/runtime.js";
+import { setRequestTenant } from "./tenants/http.js";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -1457,7 +1458,7 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 
 	// --- Sessions API (extracted to server/routes/sessions.ts) ---
 	sessions: (req, res, method, url) => handleSessionsRoutes(req, res, method, url, {
-		workspaceRegistry, dataDir, paths, getContentSource,
+		workspaceRegistry, dataDir, paths, getContentSource, tenantStore: auth.tenantStore,
 		getCachedPresetAvailability: (presetId) => contentHubCatalog.getCachedPresetAvailability(presetId),
 		parseSessionFile, sessionRevision,
 		readSessionChannelMetadata, sessionChannelMetadataPath,
@@ -1475,7 +1476,7 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 
 	// --- Workspace API + registry + session binding (extracted to server/routes/workspaces.ts) ---
 	workspaces: (req, res, method, url) => handleWorkspacesRoutes(req, res, method, url, {
-		workspaceRegistry, dataDir, paths,
+		workspaceRegistry, dataDir, paths, tenantStore: auth.tenantStore,
 		installSkillZip, installSkillMarkdown, scheduleSkillsReload, importWorkspaceZip,
 		sessionFileFromId,
 		releaseQueueFromQuestionBlockedTurn, runQueueOpWithTimeout,
@@ -1504,12 +1505,12 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 
 	// --- Btw side-question API (extracted to server/routes/btw.ts) ---
 	btw: (req, res, method, url) => handleBtwRoutes(req, res, method, url, {
-		dataDir, sessionFileFromId, parseSessionFile,
+		dataDir, sessionFileFromId, parseSessionFile, tenantStore: auth.tenantStore,
 	}),
 
 	// --- Chat API (extracted to server/routes/chat.ts) ---
 	chat: (req, res, method, url) => handleChatRoutes(req, res, method, url, {
-		workspaceRegistry, dataDir, paths,
+		workspaceRegistry, dataDir, paths, tenantStore: auth.tenantStore,
 		sessionFileFromId, releaseQueueFromQuestionBlockedTurn,
 		readSessionQuestionMetadata, writeSessionQuestionMetadata,
 		recordCurrentSessionChannel, maybeAutoGenerateTopic,
@@ -1577,6 +1578,10 @@ const server = createServer(async (req, response) => {
 			}
 			const session = await requireSession(req, res, auth);
 			if (auth.mode === "better-auth" && !session) return;
+			if (session && auth.tenantStore) {
+				const tenant = await auth.tenantStore.ensurePersonalTenant(session.principal.userId);
+				setRequestTenant(req, tenant);
+			}
 		}
 
 		// --- Lazy bootstrap on first API request ---

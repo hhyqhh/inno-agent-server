@@ -26,6 +26,9 @@ import { logger } from "../../logger.js";
 import type { RuntimePaths } from "../../runtime.js";
 import { resolveContainedPath } from "../../utils/path-safety.js";
 import type { WorkspaceRegistry } from "../../workspace/workspace-registry.js";
+import type { TenantStore } from "../../tenants/store.js";
+import { getRequestTenant, ownsRequestResource } from "../../tenants/http.js";
+import { resolveRequestWorkspace } from "../../tenants/workspaces.js";
 import {
 	buildAttachmentContext,
 	parseChatAttachments,
@@ -57,6 +60,7 @@ export interface ChatRouteContext {
 	workspaceRegistry: WorkspaceRegistry;
 	dataDir: string;
 	paths: RuntimePaths;
+	tenantStore?: TenantStore | null;
 	sessionFileFromId: (sessionDir: string, id: string) => string | null;
 	releaseQueueFromQuestionBlockedTurn: (sessionId: string) => void;
 	readSessionQuestionMetadata: () => SessionQuestionMetadata;
@@ -495,7 +499,6 @@ export async function handleChatRoutes(
 	const {
 		workspaceRegistry,
 		dataDir,
-		paths,
 		sessionFileFromId,
 		releaseQueueFromQuestionBlockedTurn,
 		readSessionQuestionMetadata,
@@ -504,7 +507,21 @@ export async function handleChatRoutes(
 		maybeAutoGenerateTopic,
 		parseSessionFile,
 		sessionRevision,
+		tenantStore,
 	} = ctx;
+
+	const ownsSession = (sessionId: string) => ownsRequestResource(req, tenantStore, "session", sessionId);
+	const denySession = () => { json(res, 404, { error: "Session not found" }); return true; };
+	const pathSessionId = matchRoute("GET", method, url, "/api/chat/status/:sessionId")?.sessionId
+		?? matchRoute("GET", method, url, "/api/chat/events/:id")?.id
+		?? matchRoute("POST", method, url, "/api/chat/:sessionId/:turnId/abort")?.sessionId;
+	if (pathSessionId && !await ownsSession(pathSessionId)) return denySession();
+	const resolveSessionWorkspace = async (sessionId: string) => {
+		const currentId = workspaceRegistry.getSessionWorkspaceId(sessionId);
+		const workspace = await resolveRequestWorkspace(req, workspaceRegistry, tenantStore, currentId);
+		if (workspace && workspace.id !== currentId) workspaceRegistry.bindSession(sessionId, workspace.id);
+		return workspace;
+	};
 
 	// --- Chat API ---
 	if (method === "POST" && url === "/api/chat") {
@@ -520,9 +537,16 @@ export async function handleChatRoutes(
 				img && typeof img.data === "string" && typeof img.mimeType === "string")
 			.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
 		const requestedSessionId = typeof body.sessionId === "string" ? body.sessionId : null;
+		if (getRequestTenant(req) && !requestedSessionId) {
+			json(res, 400, { error: "Missing sessionId" });
+			return true;
+		}
+		if (requestedSessionId && !await ownsSession(requestedSessionId)) return denySession();
 		const imageSessionId = requestedSessionId || getCurrentSessionId();
-		const imageWorkspaceId = workspaceRegistry.getSessionWorkspaceId(imageSessionId);
-		const imageWorkspaceRoot = workspaceRegistry.resolveWorkspaceDir(imageWorkspaceId) ?? paths.workspaceDir;
+		const imageWorkspace = await resolveSessionWorkspace(imageSessionId);
+		if (!imageWorkspace) { json(res, 404, { error: "Session workspace not found" }); return true; }
+		const imageWorkspaceId = imageWorkspace.id;
+		const imageWorkspaceRoot = workspaceRegistry.resolveWorkspaceDir(imageWorkspaceId)!;
 		const imagePaths = persistInlineImages(images, imageWorkspaceRoot);
 						recordWorkspaceFileAccess(dataDir, {
 			sessionId: imageSessionId,
@@ -592,6 +616,7 @@ export async function handleChatRoutes(
 			json(res, 400, { error: "Missing sessionId, turnId, questionId or result" });
 			return true;
 		}
+		if (!await ownsSession(sessionId)) return denySession();
 		const status = questionBridge.respond({ sessionId, turnId, questionId, result });
 		if (status === "not_found") {
 			// The live turn is gone (process restarted, or the turn ended while
@@ -628,6 +653,7 @@ export async function handleChatRoutes(
 			json(res, 400, { error: "Missing sessionId, turnId, requestId or a valid decision (allow_once|allow_session|deny)" });
 			return true;
 		}
+		if (!await ownsSession(sessionId)) return denySession();
 		const status = permissionBridge.respond({ sessionId, turnId, requestId, decision: validDecision, reason });
 		json(res, status === "accepted" ? 200 : status === "scope_mismatch" || status === "already_resolved" ? 409 : 404, { accepted: status === "accepted" });
 		return true;
@@ -732,6 +758,7 @@ export async function handleChatRoutes(
 			json(res, 400, { error: "Missing prompt, sessionId or clientRequestId" });
 			return true;
 		}
+		if (!await ownsSession(requestedSessionId)) return denySession();
 		if (streamRegistry.getActiveForSession(requestedSessionId)) {
 			json(res, 409, { error: "Session already has an active chat turn" });
 			return true;
@@ -744,7 +771,12 @@ export async function handleChatRoutes(
 			json(res, 404, { error: "Session not found" });
 			return true;
 		}
-		const streamWorkspaceId = workspaceRegistry.getSessionWorkspaceId(requestedSessionId);
+		const streamWorkspace = await resolveSessionWorkspace(requestedSessionId);
+		if (!streamWorkspace) {
+			json(res, 404, { error: "Session workspace not found" });
+			return true;
+		}
+		const streamWorkspaceId = streamWorkspace.id;
 		const streamWorkspaceRoot = workspaceRegistry.resolveWorkspaceDir(streamWorkspaceId);
 		if (!streamWorkspaceRoot) {
 			json(res, 404, { error: "Session workspace not found" });

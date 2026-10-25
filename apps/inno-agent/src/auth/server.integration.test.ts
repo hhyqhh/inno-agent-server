@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { readAuthRuntimeConfig } from "./config.js";
 import { migrateAuthDatabase } from "./migration.js";
@@ -26,6 +27,30 @@ async function freePort(): Promise<number> {
 	const port = address.port;
 	await new Promise<void>((resolveClose) => listener.close(() => resolveClose()));
 	return port;
+}
+
+async function registerUser(email: string): Promise<string> {
+	const response = await fetch(`${origin}/api/auth/sign-up/email`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json", Origin: origin },
+		body: JSON.stringify({ name: email, email, password: "tenant-test-password-123" }),
+	});
+	expect(response.status).toBe(200);
+	const cookie = response.headers.get("set-cookie")?.split(";", 1)[0];
+	expect(cookie).toContain("session_token");
+	return cookie!;
+}
+
+async function api(cookie: string, path: string, init: RequestInit = {}): Promise<Response> {
+	return fetch(`${origin}${path}`, {
+		...init,
+		headers: {
+			Cookie: cookie,
+			Origin: origin,
+			...(init.body ? { "Content-Type": "application/json" } : {}),
+			...init.headers,
+		},
+	});
 }
 
 beforeAll(async () => {
@@ -149,5 +174,97 @@ describe("server authentication boundary", () => {
 			ws.once("error", () => {});
 		});
 		expect(crossOriginStatus).toBe(403);
+	});
+});
+
+describe("session and workspace tenant isolation", () => {
+	it("hides legacy resources and rejects cross-tenant reads and mutations", async () => {
+		const [cookieA, cookieB] = await Promise.all([
+			registerUser("tenant-a@example.com"),
+			registerUser("tenant-b@example.com"),
+		]);
+		const workspaceResponse = await api(cookieA, "/api/workspaces", {
+			method: "POST", body: JSON.stringify({ name: "Tenant A private" }),
+		});
+		expect(workspaceResponse.status).toBe(201);
+		const workspaceA = await workspaceResponse.json() as { id: string };
+		const sessionResponse = await api(cookieA, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ workspaceId: workspaceA.id }),
+		});
+		expect(sessionResponse.status).toBe(201);
+		const sessionA = await sessionResponse.json() as { id: string };
+		const sessionsA = await (await api(cookieA, "/api/sessions")).json() as Array<{ id: string }>;
+		expect(sessionsA.map((session) => session.id)).toContain(sessionA.id);
+		const otherSessionResponse = await api(cookieB, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ newWorkspace: { isTemp: true } }),
+		});
+		expect(otherSessionResponse.status).toBe(201);
+		const sessionB = await otherSessionResponse.json() as { id: string; workspaceId: string };
+		expect(sessionB.workspaceId).not.toBe("tmp");
+		expect(sessionB.workspaceId.startsWith("tmp-")).toBe(true);
+
+		expect((await api(cookieA, "/api/workspace/create", {
+			method: "POST", body: JSON.stringify({ workspaceId: workspaceA.id, path: "private.txt", type: "file" }),
+		})).status).toBe(201);
+		expect((await api(cookieA, "/api/workspace/file", {
+			method: "PUT", body: JSON.stringify({ workspaceId: workspaceA.id, path: "private.txt", content: "tenant-a-secret" }),
+		})).status).toBe(200);
+		const ownFile = await api(cookieA, `/api/workspace/file?workspaceId=${workspaceA.id}&path=private.txt`);
+		expect(ownFile.status).toBe(200);
+		expect(await ownFile.json()).toMatchObject({ content: "tenant-a-secret" });
+
+		const sessionsB = await (await api(cookieB, "/api/sessions")).json() as Array<{ id: string }>;
+		expect(sessionsB.map((session) => session.id)).not.toContain(sessionA.id);
+		const workspacesB = await (await api(cookieB, "/api/workspaces")).json() as Array<{ id: string; sessionIds: string[] }>;
+		expect(workspacesB.map((workspace) => workspace.id)).not.toContain(workspaceA.id);
+		expect(workspacesB.flatMap((workspace) => workspace.sessionIds)).not.toContain(sessionA.id);
+
+		for (const [path, init] of [
+			[`/api/sessions/${sessionA.id}`, {}],
+			[`/api/sessions/${sessionA.id}`, { method: "PATCH", body: JSON.stringify({ name: "stolen" }) }],
+			[`/api/sessions/${sessionA.id}`, { method: "DELETE" }],
+			[`/api/sessions/${sessionA.id}/activate`, { method: "POST" }],
+			[`/api/sessions/${sessionA.id}/export.md`, {}],
+			[`/api/sessions/${sessionA.id}/workspace`, {}],
+			[`/api/chat/status/${sessionA.id}`, {}],
+			[`/api/chat/events/${sessionA.id}`, {}],
+			[`/api/btw/state/${sessionA.id}`, {}],
+		] as Array<[string, RequestInit]>) {
+			expect((await api(cookieB, path, init)).status, path).toBe(404);
+		}
+		expect((await api(cookieB, "/api/chat/stream", {
+			method: "POST",
+			body: JSON.stringify({ sessionId: sessionA.id, prompt: "no model call", clientRequestId: "cross-tenant-test" }),
+		})).status).toBe(404);
+		expect((await api(cookieB, `/api/workspace/file?workspaceId=${workspaceA.id}&path=private.txt`)).status).toBe(404);
+		expect((await api(cookieB, "/api/workspace/file", {
+			method: "PUT", body: JSON.stringify({ workspaceId: workspaceA.id, path: "private.txt", content: "stolen" }),
+		})).status).toBe(404);
+		expect((await api(cookieB, `/api/sessions/${sessionB.id}/workspace`, {
+			method: "PUT", body: JSON.stringify({ workspaceId: workspaceA.id }),
+		})).status).toBe(404);
+
+		const tempA = await (await api(cookieA, "/api/workspaces", {
+			method: "POST", body: JSON.stringify({ isTemp: true }),
+		})).json() as { id: string };
+		const tempB = await (await api(cookieB, "/api/workspaces", {
+			method: "POST", body: JSON.stringify({ isTemp: true }),
+		})).json() as { id: string };
+		expect(tempA.id).not.toBe(tempB.id);
+		const treeA = await (await api(cookieA, `/api/workspace/tree?workspaceId=${tempA.id}`)).json() as { root: string };
+		const treeB = await (await api(cookieB, `/api/workspace/tree?workspaceId=${tempB.id}`)).json() as { root: string };
+		expect(treeA.root).not.toBe(treeB.root);
+
+		// An existing file without an explicit legacy-owner assignment is hidden
+		// even from the authenticated user who originally created it.
+		const pool = new Pool({ connectionString: postgres.databaseUrl });
+		try {
+			await pool.query("DELETE FROM resource_ownership WHERE resource_type = 'session' AND resource_id = $1", [sessionA.id]);
+		} finally {
+			await pool.end();
+		}
+		expect((await api(cookieA, `/api/sessions/${sessionA.id}`)).status).toBe(404);
+		const afterUnclaim = await (await api(cookieA, "/api/sessions")).json() as Array<{ id: string }>;
+		expect(afterUnclaim.map((session) => session.id)).not.toContain(sessionA.id);
 	});
 });

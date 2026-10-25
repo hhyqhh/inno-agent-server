@@ -39,10 +39,10 @@ For local development, `docker compose up postgres` starts PostgreSQL. The
 compose application retains the explicit insecure local-mode override because
 its port is published; use Better Auth for non-local deployments.
 
-> **Isolation boundary:** account authentication and the tenant/ownership
-> foundation do not yet make all application data tenant-safe. Existing
-> sessions, workspaces, memory, jobs, and tools are still shared until each
-> domain's authorization migration lands. `INNO_MULTI_USER_ENABLED=true`
+> **Isolation boundary:** account authentication and the current tenant/ownership
+> slices do not yet make all application data tenant-safe. Memory, jobs,
+> channels, settings, terminals, permissions, and the singleton agent runtime
+> are still shared until each domain's authorization migration lands. `INNO_MULTI_USER_ENABLED=true`
 > deliberately fails at startup until resource ownership and cross-tenant
 > isolation are implemented. Do not treat this stage as a safe multi-user
 > production deployment. Public registration additionally requires rate
@@ -72,6 +72,26 @@ npm run tenants:legacy --workspace inno-agent -- --dry-run
 
 The dry run creates neither tenants nor ownership rows. This commit establishes
 the persistence/migration layer; HTTP domain enforcement is added separately.
+The legacy shared `tmp` workspace is deliberately excluded: its directory has
+no safe single owner. In Better Auth mode, each tenant receives a separate
+`tmp-<tenantId>` workspace and directory instead. Files left in the legacy
+shared `.tmp` directory are not exposed by the tenant-aware workspace API.
+
+## Session/workspace isolation (stage 2B)
+
+The verified Better Auth session now provisions the request's personal tenant;
+clients cannot select a tenant through a header or body field. Session and
+workspace listings contain only owned resources. Session detail/export/edit/
+activate/delete, chat and SSE replay, side questions, workspace CRUD/import,
+file operations, and session/workspace rebinding reject cross-tenant IDs with
+404. New resources are claimed at creation and deleted resources release their
+ownership rows. Resources without an explicit legacy ownership assignment are
+hidden in Better Auth mode. Local mode retains the existing shared `tmp`
+behavior.
+
+This is still partial application isolation: memory, jobs, channels, settings,
+terminal/permissions, and the singleton agent runtime have their own remaining
+migration work. `INNO_MULTI_USER_ENABLED` therefore remains unavailable.
 
 
 ## Tests

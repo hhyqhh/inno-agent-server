@@ -90,6 +90,14 @@ export function json(res: ServerResponse, status: number, data: unknown): void {
  * Simple route matching with :param support.
  * Returns params object or null if no match.
  */
+export function decodeRouteParam(value: string): string {
+	try {
+		return decodeURIComponent(value);
+	} catch {
+		throw new HttpError(400, "Malformed URL encoding");
+	}
+}
+
 export function matchRoute(
 	method: string,
 	reqMethod: string,
@@ -105,11 +113,7 @@ export function matchRoute(
 	const params: Record<string, string> = {};
 	for (let i = 0; i < patternParts.length; i++) {
 		if (patternParts[i].startsWith(":")) {
-			try {
-				params[patternParts[i].slice(1)] = decodeURIComponent(urlParts[i]);
-			} catch {
-				throw new HttpError(400, "Malformed URL encoding");
-			}
+			params[patternParts[i].slice(1)] = decodeRouteParam(urlParts[i]);
 		} else if (patternParts[i] !== urlParts[i]) {
 			return null;
 		}

@@ -185,26 +185,27 @@ export class WorkspaceRegistry {
 
 	/**
 	 * Create a new workspace.
-	 * - isTemp=true → returns the shared `tmp` workspace (does not allocate a new directory).
+	 * - isTemp=true → returns the shared `tmp` workspace, or a caller-scoped temp workspace when tempId is supplied.
 	 * - isTemp=false → places it at `<slug>-<hash>/`, where slug comes from the name and hash is 8 random hex chars.
 	 */
-	createWorkspace(input: { name?: string; isTemp?: boolean }): WorkspaceMeta {
+	createWorkspace(input: { name?: string; isTemp?: boolean; tempId?: string }): WorkspaceMeta {
 		const reg = this.loadRegistry();
 		const now = new Date().toISOString();
 
 		if (input.isTemp) {
-			const existing = reg.workspaces.find((w) => w.id === TEMP_WORKSPACE_ID);
+			const tempId = input.tempId ?? TEMP_WORKSPACE_ID;
+			const existing = reg.workspaces.find((w) => w.id === tempId);
 			if (existing) {
 				existing.updatedAt = now;
 				this.saveRegistry(reg);
 				ensureDir(join(this.workspaceDir, existing.relPath));
 				return existing;
 			}
-			// Fallback: bootstrap was skipped. Create the shared tmp entry now.
+			// Fallback: bootstrap was skipped. Create the requested temp entry now.
 			const tmp: WorkspaceMeta = {
-				id: TEMP_WORKSPACE_ID,
+				id: tempId,
 				name: "临时工作区",
-				relPath: TEMP_WORKSPACE_REL_PATH,
+				relPath: tempId === TEMP_WORKSPACE_ID ? TEMP_WORKSPACE_REL_PATH : join(TEMP_WORKSPACE_REL_PATH, tempId),
 				createdAt: now,
 				updatedAt: now,
 				isTemp: true,
@@ -274,8 +275,8 @@ export class WorkspaceRegistry {
 	 * together. `created` is true only on the first call (so the caller knows
 	 * when to seed the preset's files).
 	 */
-	ensurePresetWorkspace(presetId: string, name: string): { ws: WorkspaceMeta; created: boolean } {
-		const id = `preset-${presetId}`;
+	ensurePresetWorkspace(presetId: string, name: string, scope?: string): { ws: WorkspaceMeta; created: boolean } {
+		const id = scope ? `preset-${presetId}-${scope}` : `preset-${presetId}`;
 		const reg = this.loadRegistry();
 		const now = new Date().toISOString();
 		let ws = reg.workspaces.find((w) => w.id === id);
@@ -288,7 +289,7 @@ export class WorkspaceRegistry {
 		ws = {
 			id,
 			name,
-			relPath: join(".presets", presetId),
+			relPath: scope ? join(".presets", presetId, scope) : join(".presets", presetId),
 			createdAt: now,
 			updatedAt: now,
 			isTemp: false,
