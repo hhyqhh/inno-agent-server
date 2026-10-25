@@ -1,11 +1,13 @@
 import type { IncomingMessage } from "node:http";
 import type { ResourceKind, TenantContext, TenantStore } from "./store.js";
+import { enterTenantContext } from "./current.js";
 
 const requestTenants = new WeakMap<IncomingMessage, TenantContext>();
 
 /** Tenant identity is populated only from the verified server-side session. */
-export function setRequestTenant(req: IncomingMessage, context: TenantContext): void {
+export function setRequestTenant(req: IncomingMessage, context: TenantContext, store: TenantStore): void {
 	requestTenants.set(req, context);
+	enterTenantContext(context, store);
 }
 
 export function getRequestTenant(req: IncomingMessage): TenantContext | null {

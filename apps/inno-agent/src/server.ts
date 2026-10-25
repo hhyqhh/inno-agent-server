@@ -1580,7 +1580,7 @@ const server = createServer(async (req, response) => {
 			if (auth.mode === "better-auth" && !session) return;
 			if (session && auth.tenantStore) {
 				const tenant = await auth.tenantStore.ensurePersonalTenant(session.principal.userId);
-				setRequestTenant(req, tenant);
+				setRequestTenant(req, tenant, auth.tenantStore);
 			}
 		}
 

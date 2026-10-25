@@ -87,12 +87,14 @@ const PreferencesSchema = Type.Object({
  * so the profile is neither read nor mutated.
  */
 export function createLearnerTools(
-	dataDir: string,
+	dataDir: string | (() => string),
 	learnerId: string,
 	isEnabled?: () => boolean,
-	l2DataDir?: string,
+	l2DataDir?: string | (() => string),
 	isL2Enabled?: () => boolean,
 ): ToolDefinition[] {
+	const resolveDataDir = () => typeof dataDir === "function" ? dataDir() : dataDir;
+	const resolveL2DataDir = () => typeof l2DataDir === "function" ? l2DataDir() : l2DataDir;
 	const L1_DISABLED_TEXT = "L1 学习者画像已在设置中关闭，当前不读取也不更新学习者画像。";
 	const disabledResult = () => ({
 		content: [{ type: "text" as const, text: L1_DISABLED_TEXT }],
@@ -107,8 +109,8 @@ export function createLearnerTools(
 		parameters: Type.Object({}),
 		async execute() {
 			if (isEnabled && !isEnabled()) return disabledResult();
-			const profile = loadProfile(dataDir);
-			const pack = buildContextPack(profile, loadEvents(dataDir));
+			const profile = loadProfile(resolveDataDir());
+			const pack = buildContextPack(profile, loadEvents(resolveDataDir()));
 			return {
 				content: [{ type: "text" as const, text: JSON.stringify(pack, null, 2) }],
 				details: {},
@@ -158,7 +160,7 @@ export function createLearnerTools(
 					params.payload as Record<string, unknown>,
 					params.derived_signals,
 				);
-				const profile = recordEventAndUpdateProfile(dataDir, event);
+				const profile = recordEventAndUpdateProfile(resolveDataDir(), event);
 				return {
 					content: [
 						{
@@ -211,7 +213,7 @@ export function createLearnerTools(
 			try {
 				if (isEnabled && !isEnabled()) return disabledResult();
 				if (params.dedupe_key) {
-					const duplicate = loadEvents(dataDir).find((event) => event.dedupe_key === params.dedupe_key);
+					const duplicate = loadEvents(resolveDataDir()).find((event) => event.dedupe_key === params.dedupe_key);
 					if (duplicate) {
 						return {
 							content: [{ type: "text" as const, text: `学习证据已存在，跳过重复写入: ${duplicate.event_id}` }],
@@ -223,14 +225,14 @@ export function createLearnerTools(
 					...params,
 					hint_level: (params.hint_level ?? 0) as 0 | 1 | 2 | 3,
 				});
-				const profile = recordEventAndUpdateProfile(dataDir, event);
+				const profile = recordEventAndUpdateProfile(resolveDataDir(), event);
 				let profileChanged = event.evidence
 					? applyEvidenceToLinkedMisconception(profile, event.evidence)
 					: false;
-				const state = projectLearnerKnowledge(profile, loadEvents(dataDir))
+				const state = projectLearnerKnowledge(profile, loadEvents(resolveDataDir()))
 					.find((item) => item.concept_id === params.concept_id);
 				if (state) profileChanged = applyDerivedKnowledgeState(profile, state) || profileChanged;
-				if (profileChanged) saveProfile(dataDir, profile);
+				if (profileChanged) saveProfile(resolveDataDir(), profile);
 				return {
 					content: [{
 						type: "text" as const,
@@ -271,7 +273,7 @@ export function createLearnerTools(
 			try {
 				if (isEnabled && !isEnabled()) return disabledResult();
 				const stored = !isL2Enabled || isL2Enabled()
-					? loadPrerequisiteEdges(l2DataDir, params.target_concept_id, { scope: params.task_scope })
+					? loadPrerequisiteEdges(resolveL2DataDir(), params.target_concept_id, { scope: params.task_scope })
 					: [];
 				const inferred = (params.prerequisites ?? []).map((item) => ({
 					target_concept_id: params.target_concept_id,
@@ -284,8 +286,8 @@ export function createLearnerTools(
 					rationale: item.rationale ?? "模型根据当前题目推断的候选前置知识。",
 					scope: item.scope ?? params.task_scope,
 				}));
-				const profile = loadProfile(dataDir);
-				const states = projectLearnerKnowledge(profile, loadEvents(dataDir));
+				const profile = loadProfile(resolveDataDir());
+				const states = projectLearnerKnowledge(profile, loadEvents(resolveDataDir()));
 				const decision = evaluateTeachingEntry({
 					target_concept_id: params.target_concept_id,
 					task_scope: params.task_scope,
@@ -329,7 +331,7 @@ export function createLearnerTools(
 		async execute(_toolCallId, params) {
 			try {
 				if (isEnabled && !isEnabled()) return disabledResult();
-				const updated = patchProfile(dataDir, params);
+				const updated = patchProfile(resolveDataDir(), params);
 				return {
 					content: [
 						{
@@ -361,7 +363,7 @@ export function createLearnerTools(
 		async execute(_toolCallId, params) {
 			try {
 				if (isEnabled && !isEnabled()) return disabledResult();
-				const updated = updateProfile(dataDir, params);
+				const updated = updateProfile(resolveDataDir(), params);
 				return {
 					content: [
 						{
@@ -386,7 +388,7 @@ export function createLearnerTools(
 		parameters: Type.Object({}),
 		async execute() {
 			if (isEnabled && !isEnabled()) return disabledResult();
-			const profile = loadProfile(dataDir);
+			const profile = loadProfile(resolveDataDir());
 			const summary = [
 				`学习者 ID: ${profile.learner_id}`,
 				`版本: ${profile.version}`,

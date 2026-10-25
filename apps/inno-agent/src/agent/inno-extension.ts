@@ -16,7 +16,7 @@ import { createSchedulerTools } from "../scheduler/scheduler-tools.js";
 import { createChannelTools } from "../channels/channel-tools.js";
 import { createL2Tools } from "../memory/l2/l2-tools.js";
 import { getL2Memory } from "../memory/l2/l2-memory.js";
-import { createL3Tools, formatRecallForPrompt, getL3Memory } from "../memory/l3/l3-tools.js";
+import { createL3Tools, formatRecallForPrompt, ScopedL3Memory } from "../memory/l3/l3-tools.js";
 import { createPracticeTools } from "./practice-tools.js";
 import { createDocumentTools } from "./document-tools.js";
 import { createOcrTools } from "./ocr-tools.js";
@@ -34,6 +34,7 @@ import type { ChannelName } from "../channels/types.js";
 import type { RuntimePaths } from "../runtime.js";
 import type { WorkspaceRegistry } from "../workspace/workspace-registry.js";
 import type { RunRecordStore } from "../terminal/run-record-store.js";
+import { resolveCurrentTenantDataDir } from "../tenants/paths.js";
 
 const INNO_VERSION = "0.0.1";
 
@@ -279,10 +280,10 @@ export function createInnoExtension(
 
 		// 2. Register L1 learner tools (gated on config.memory.l1Enabled)
 		const learnerTools = createLearnerTools(
-			paths.learnerDataDir,
+			() => resolveCurrentTenantDataDir(paths.dataDir, "learner"),
 			"default",
 			isL1Enabled,
-			paths.l2DataDir,
+			() => resolveCurrentTenantDataDir(paths.dataDir, "l2"),
 			isL2Enabled,
 		);
 		for (const tool of learnerTools) {
@@ -327,11 +328,11 @@ export function createInnoExtension(
 		}
 
 		// 4. Register L2 Wiki memory tools (gated on config.memory.l2Enabled)
-		const l2Memory = getL2Memory(paths.l2DataDir);
+		const resolveL2Memory = () => getL2Memory(resolveCurrentTenantDataDir(paths.dataDir, "l2"));
 		const l2Tools = createL2Tools(
-			paths.l2DataDir,
+			() => resolveCurrentTenantDataDir(paths.dataDir, "l2"),
 			isL2Enabled,
-			l2Memory,
+			resolveL2Memory,
 			() => resolveActiveWorkspaceDir(paths, deps),
 		);
 		for (const tool of l2Tools) {
@@ -341,13 +342,13 @@ export function createInnoExtension(
 		// Index sync runs even when L2 is disabled (so re-enabling has no gap).
 		// Aggregate pages remain source-driven; startup must not create model-visible
 		// context that the reference ingest path would not create.
-		void l2Memory.backfill();
+		void resolveL2Memory().backfill();
 
 		// 4a. Register L3 cross-conversation memory (sqlite-backed recall).
 		// Recall (auto-inject + the l3_recall tool) is gated at runtime on
 		// config.memory.l3Enabled (default on); indexing always runs so the
 		// switch can be flipped back on without a backfill gap.
-		const l3Memory = getL3Memory(paths.l3DataDir, paths.sessionDir);
+		const l3Memory = new ScopedL3Memory(paths.dataDir, paths.sessionDir);
 		const isL3Enabled = () => configHolder.current.memory?.l3Enabled !== false;
 		const l3Tools = createL3Tools(l3Memory, deps?.getCurrentSessionId, isL3Enabled);
 		for (const tool of l3Tools) {
@@ -454,11 +455,13 @@ export function createInnoExtension(
 			// 6. Inject L1 context and custom system prompt before each agent turn
 			pi.on("before_agent_start", async (event, ctx) => {
 				const sections: string[] = [INNO_SYSTEM_PROMPT];
+				try { await resolveL2Memory().backfill(); } catch { /* retrieval remains best-effort */ }
+				const learnerDataDir = resolveCurrentTenantDataDir(paths.dataDir, "learner");
 
 				// Inject the L1 learner context pack (profile + recent events)
 				// unless the learner has turned L1 off in settings.
 				if (isL1Enabled()) {
-					const profile = loadProfile(paths.learnerDataDir);
+					const profile = loadProfile(learnerDataDir);
 
 					// If the profile is empty (new user), inject the structured
 					// onboarding guide so the agent prioritises building a baseline
@@ -467,7 +470,7 @@ export function createInnoExtension(
 						sections.push(ONBOARDING_GUIDE);
 					}
 
-					const recentEvents = loadRecentEvents(paths.learnerDataDir, 8);
+					const recentEvents = loadRecentEvents(learnerDataDir, 8);
 					const contextPack = buildContextPack(profile, recentEvents);
 					const contextSection = formatContextPackForPrompt(contextPack);
 					sections.push(contextSection);

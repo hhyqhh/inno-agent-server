@@ -19,6 +19,8 @@ import { openL3Store, type L3Store } from "./sqlite-store.js";
 import { indexAllSessions, indexSession } from "./indexer.js";
 import { recall, formatRecallForPrompt, type RecallResult } from "./recall.js";
 import { join } from "node:path";
+import { getCurrentTenant, getCurrentTenantStore } from "../../tenants/current.js";
+import { resolveCurrentTenantDataDir } from "../../tenants/paths.js";
 
 /**
  * Holds the singleton store for a runtime. The store opens lazily on first use
@@ -45,13 +47,13 @@ export class L3Memory {
 	}
 
 	/** One-time backfill of all existing sessions (cheap: skips unchanged files). */
-	async backfill(): Promise<void> {
+	async backfill(includeSession?: (sessionId: string) => boolean): Promise<void> {
 		if (this.backfilled) return;
 		const store = await this.ensureStore();
 		if (!store) return;
 		this.backfilled = true;
 		try {
-			const { sessions, chunks } = indexAllSessions(store, this.sessionDir);
+			const { sessions, chunks } = indexAllSessions(store, this.sessionDir, includeSession);
 			if (sessions > 0) logger.info(`[L3] indexed ${chunks} chunks from ${sessions} session(s).`);
 		} catch (err) {
 			logger.warn({ err }, `[L3] backfill failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -90,12 +92,55 @@ export class L3Memory {
 	}
 }
 
+function ownershipSessionId(sessionId: string): string {
+	return sessionId.endsWith(".jsonl") ? sessionId.slice(0, -".jsonl".length) : sessionId;
+}
+
+/** Resolve L3 storage at execution time and enforce session ownership on index/read. */
+export class ScopedL3Memory {
+	constructor(private readonly dataDir: string, private readonly sessionDir: string) {}
+
+	private memory(): L3Memory {
+		return getL3Memory(resolveCurrentTenantDataDir(this.dataDir, "l3"), this.sessionDir);
+	}
+
+	async backfill(): Promise<void> {
+		const tenant = getCurrentTenant();
+		if (!tenant) return this.memory().backfill();
+		const store = getCurrentTenantStore();
+		if (!store) return;
+		const owned = await store.listResourceIds(tenant, "session");
+		await this.memory().backfill((sessionId) => owned.has(sessionId));
+	}
+
+	async indexById(sessionId: string): Promise<void> {
+		const tenant = getCurrentTenant();
+		if (tenant) {
+			const store = getCurrentTenantStore();
+			if (!store || !await store.ownsResource(tenant, "session", ownershipSessionId(sessionId))) return;
+		}
+		await this.memory().indexById(sessionId);
+	}
+
+	async recall(query: string, excludeSessionId?: string): Promise<RecallResult[]> {
+		await this.backfill();
+		const results = await this.memory().recall(query, excludeSessionId);
+		const tenant = getCurrentTenant();
+		if (!tenant) return results;
+		const store = getCurrentTenantStore();
+		if (!store) return [];
+		const visible = await Promise.all(results.map(async (result) =>
+			await store.ownsResource(tenant, "session", ownershipSessionId(result.sessionId)) ? result : null));
+		return visible.filter((result): result is RecallResult => result !== null);
+	}
+}
+
 /**
  * Register the `l3_recall` tool. The agent calls this to deliberately search
  * its memory of past conversations (separate from the automatic injection).
  */
 export function createL3Tools(
-	memory: L3Memory,
+	memory: Pick<L3Memory, "recall"> | ScopedL3Memory,
 	getCurrentSessionId?: () => string,
 	isEnabled?: () => boolean,
 ): ToolDefinition[] {

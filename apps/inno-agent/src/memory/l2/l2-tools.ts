@@ -66,11 +66,15 @@ function uniquePaths(paths: string[]): string[] {
  * workspaces without recreating the extension.
  */
 export function createL2Tools(
-	l2DataDir: string,
+	l2DataDirInput: string | (() => string),
 	isEnabled?: () => boolean,
-	l2Memory: L2Memory = getL2Memory(l2DataDir),
+	l2Memory?: L2Memory | ((dataDir: string) => L2Memory),
 	getActiveWorkspaceDir?: () => string,
 ): ToolDefinition[] {
+	const resolveDataDir = () => typeof l2DataDirInput === "function" ? l2DataDirInput() : l2DataDirInput;
+	const resolveMemory = (dataDir: string) => typeof l2Memory === "function"
+		? l2Memory(dataDir)
+		: l2Memory ?? getL2Memory(dataDir);
 	const l2DisabledResult = () => ({
 		content: [{ type: "text" as const, text: "L2 Wiki 知识库已在设置中关闭，当前不归档也不检索知识库内容。" }],
 		details: { disabled: true },
@@ -116,6 +120,8 @@ export function createL2Tools(
 					}
 				};
 				reportProgress("等待归档队列", "queued");
+				const l2DataDir = resolveDataDir();
+				const memory = resolveMemory(l2DataDir);
 				return enqueueArchive(l2DataDir, async () => {
 				throwIfAborted(signal);
 			ensureL2Directories(l2DataDir);
@@ -399,14 +405,14 @@ export function createL2Tools(
 					let retrievalIndexFailed = false;
 						for (const wikiPath of entry.wikiPages) {
 							try {
-								await l2Memory.indexPageByPath(wikiPath);
+								await memory.indexPageByPath(wikiPath);
 							} catch (err) {
 								retrievalIndexFailed = true;
 								logger.warn({ err, wikiPath, source: params.title }, "l2_archive: retrieval index update failed");
 							}
 						}
 						if (retrievalIndexFailed) {
-							const reconciled = typeof l2Memory.reconcile === "function" && await l2Memory.reconcile();
+							const reconciled = typeof memory.reconcile === "function" && await memory.reconcile();
 							if (!reconciled) logger.warn({ source: params.title }, "l2_archive: retrieval index remains out of sync");
 						}
 					try {
@@ -474,9 +480,11 @@ export function createL2Tools(
 		}),
 		async execute(_toolCallId, params) {
 			if (isEnabled && !isEnabled()) return l2DisabledResult();
+			const l2DataDir = resolveDataDir();
+			const memory = resolveMemory(l2DataDir);
 			ensureL2Directories(l2DataDir);
 			const query = params.query ?? "";
-			const result = await queryWikiHybridDetailed(l2Memory, query);
+			const result = await queryWikiHybridDetailed(memory, query);
 			appendLog(l2DataDir, "query", query, "- L2 query executed through l2_query.");
 			return {
 				content: [{ type: "text" as const, text: result.text }],
@@ -493,7 +501,7 @@ export function createL2Tools(
 		parameters: Type.Object({}),
 		async execute() {
 			if (isEnabled && !isEnabled()) return l2DisabledResult();
-			const report = runL2Lint(l2DataDir);
+			const report = runL2Lint(resolveDataDir());
 			return {
 				content: [{ type: "text" as const, text: formatL2LintReport(report) }],
 				details: { disabled: false, ...report },

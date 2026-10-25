@@ -89,12 +89,12 @@ ownership rows. Resources without an explicit legacy ownership assignment are
 hidden in Better Auth mode. Local mode retains the existing shared `tmp`
 behavior.
 
-This is still partial application isolation: the agent runtime's memory tools,
-L3 indexing, jobs, channels, settings, terminal/permissions, and the singleton
-agent runtime have their own remaining migration work.
+This is still partial application isolation: background jobs/channels and their
+memory access, settings, terminal/permissions, and the singleton agent runtime
+have their own remaining migration work.
 `INNO_MULTI_USER_ENABLED` therefore remains unavailable.
 
-## L1/L2 HTTP storage (stage 2C)
+## L1/L2/L3 tenant storage (stage 2C)
 
 Authenticated `/api/learner/*`, `/api/wiki/*`, and `/api/l2/raw/upload` requests
 use `<dataDir>/tenants/<tenantId>/learner` and `.../l2`. Each tenant has separate
@@ -102,9 +102,15 @@ profile/event files, wiki files, manifest, and L2 index. Legacy global memory is
 not visible through these HTTP APIs and is not copied implicitly. Local mode
 continues using the original global directories.
 
-The agent extension and L3 still use the legacy singleton memory services; this
-commit does not claim agent-side or L3 isolation. Those paths must become
-tenant-scoped together with the runtime before multi-user mode can be enabled.
+Authenticated web agent execution resolves L1/L2/L3 storage through the same
+request tenant context. L3 uses a separate SQLite database per tenant, indexes
+only owned sessions, and rechecks ownership when returning recall results.
+Background jobs/channels still use legacy global services until their own
+migration; they must not be treated as tenant-safe.
+
+Jobs, channels, settings, terminal/permissions, and the singleton agent runtime
+still have remaining migration work. `INNO_MULTI_USER_ENABLED` therefore remains
+unavailable.
 
 
 ## Tests

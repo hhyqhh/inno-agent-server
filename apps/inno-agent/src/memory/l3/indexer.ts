@@ -185,7 +185,11 @@ export function indexSession(store: L3Store, filePath: string): number {
  * Backfill the store from all session files in the directory. Returns a summary
  * of how many sessions were (re)indexed and total chunks written.
  */
-export function indexAllSessions(store: L3Store, sessionDir: string): { sessions: number; chunks: number } {
+export function indexAllSessions(
+	store: L3Store,
+	sessionDir: string,
+	includeSession?: (sessionId: string) => boolean,
+): { sessions: number; chunks: number } {
 	let entries: string[];
 	try {
 		entries = readdirSync(sessionDir);
@@ -197,6 +201,7 @@ export function indexAllSessions(store: L3Store, sessionDir: string): { sessions
 	let chunks = 0;
 	for (const name of entries) {
 		if (!name.endsWith(".jsonl")) continue;
+		if (includeSession && !includeSession(name.slice(0, -".jsonl".length))) continue;
 		const written = indexSession(store, join(sessionDir, name));
 		if (written > 0) {
 			sessions++;
