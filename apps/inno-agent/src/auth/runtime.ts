@@ -79,6 +79,7 @@ export function createAuthRuntime(config: AuthRuntimeConfig): AuthRuntime {
 		async checkConnection() {
 			try {
 				await pool.query('SELECT 1 FROM "user" LIMIT 1');
+				await pool.query("SELECT 1 FROM tenants LIMIT 1");
 			} catch (err) {
 				throw new Error("Better Auth database/schema is unavailable; run auth:migrate before starting the server", { cause: err });
 			}

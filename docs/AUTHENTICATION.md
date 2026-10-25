@@ -39,13 +39,40 @@ For local development, `docker compose up postgres` starts PostgreSQL. The
 compose application retains the explicit insecure local-mode override because
 its port is published; use Better Auth for non-local deployments.
 
-> **Isolation boundary:** this stage provides identity, not tenant isolation.
-> Existing sessions, workspaces, memory, jobs, and tools are still shared.
-> `INNO_MULTI_USER_ENABLED=true` deliberately fails at startup until resource
-> ownership and cross-tenant isolation are implemented. Do not treat this stage
-> as a safe multi-user production deployment. Public registration additionally
-> requires rate limiting, email verification, and account recovery before an
-> internet-facing launch.
+> **Isolation boundary:** account authentication and the tenant/ownership
+> foundation do not yet make all application data tenant-safe. Existing
+> sessions, workspaces, memory, jobs, and tools are still shared until each
+> domain's authorization migration lands. `INNO_MULTI_USER_ENABLED=true`
+> deliberately fails at startup until resource ownership and cross-tenant
+> isolation are implemented. Do not treat this stage as a safe multi-user
+> production deployment. Public registration additionally requires rate
+> limiting, email verification, and account recovery before an internet-facing
+> launch.
+
+## Personal tenant foundation (stage 2A)
+
+`auth:migrate` also creates personal tenants, owner memberships, and a global
+resource-ownership table. Provisioning is transactional and safe under
+concurrent first requests. Every resource has at most one owner; ownership is
+never inferred from a client-provided tenant or user id.
+
+Existing files are not assigned to the first user who signs in. After creating
+the intended owner account and running `auth:migrate`, inspect and then execute
+the explicit backfill:
+
+```sh
+INNO_LEGACY_OWNER_EMAIL=owner@example.com \
+INNO_AUTH_MODE=better-auth DATABASE_URL=... \
+BETTER_AUTH_SECRET=... BETTER_AUTH_URL=http://localhost:3000 \
+npm run tenants:legacy --workspace inno-agent -- --dry-run
+
+# Review the report, then repeat with --execute. Repeats are idempotent and
+# resources already owned by another tenant are reported as conflicts.
+```
+
+The dry run creates neither tenants nor ownership rows. This commit establishes
+the persistence/migration layer; HTTP domain enforcement is added separately.
+
 
 ## Tests
 

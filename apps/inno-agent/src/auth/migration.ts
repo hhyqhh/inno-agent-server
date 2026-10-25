@@ -3,6 +3,7 @@ import { getMigrations } from "better-auth/db/migration";
 import { Pool } from "pg";
 import type { AuthRuntimeConfig } from "./config.js";
 import { authOptions } from "./runtime.js";
+import { migrateTenantDatabase, TENANT_SCHEMA_SQL } from "../tenants/schema.js";
 
 export async function migrateAuthDatabase(config: AuthRuntimeConfig, print = false): Promise<void> {
 	if (config.mode !== "better-auth") {
@@ -23,6 +24,8 @@ export async function migrateAuthDatabase(config: AuthRuntimeConfig, print = fal
 		const migrations = await getMigrations(auth.options);
 		if (print) console.log(await migrations.compileMigrations());
 		else await migrations.runMigrations();
+		if (print) console.log(TENANT_SCHEMA_SQL);
+		else await migrateTenantDatabase(pool);
 	} finally {
 		await pool.end();
 	}

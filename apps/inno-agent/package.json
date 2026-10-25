@@ -15,7 +15,8 @@
 		"web:dev": "npm --workspace inno-agent-web run dev",
 		"web:build": "npm --workspace inno-agent-web run build",
 		"auth:migrate": "tsx src/auth/migrate.ts",
-		"auth:schema": "tsx src/auth/migrate.ts --print"
+		"auth:schema": "tsx src/auth/migrate.ts --print",
+		"tenants:legacy": "tsx src/tenants/migrate-legacy.ts"
 	},
 	"dependencies": {
 		"@better-auth/core": "1.7.12",
