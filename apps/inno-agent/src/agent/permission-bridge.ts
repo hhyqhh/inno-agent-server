@@ -10,11 +10,11 @@
  * abort, or turn end all resolve to `deny` with a teaching reason the agent
  * can read and self-correct from.
  *
- * `allow_session` answers are cached in-process by (surface, value) so a
- * repeat ask for the same command/path is approved without a second card.
- * The cache is deliberately session-of-the-process scoped (not persisted) —
- * a restart re-prompts, which matches the plugin's own session-approval
- * semantics.
+ * `allow_session` answers are cached in-process by (tenant, session, agent run,
+ * surface, value) so a repeat ask in the same owned runtime can be approved
+ * without a second card. A cached verdict is never used without a bound turn.
+ * The cache is deliberately not persisted — a restart re-prompts, which matches
+ * the plugin's own session-approval semantics.
  */
 
 import { randomUUID } from "node:crypto";
@@ -47,6 +47,9 @@ export type AuthorizerVerdict =
 interface TurnBinding {
 	sessionId: string;
 	turnId: string;
+	tenantId?: string;
+	/** Stable agent runtime identity, normally the owned session file path. */
+	runId?: string;
 	emit: (event: Record<string, unknown> & { type: string }) => void;
 	timeoutMs: number;
 }
@@ -55,7 +58,7 @@ interface PendingAsk {
 	requestId: string;
 	sessionId: string;
 	turnId: string;
-	sessionKey: string | null;
+	approvalKey: string | null;
 	resolve: (verdict: AuthorizerVerdict) => void;
 	timer: ReturnType<typeof setTimeout>;
 }
@@ -70,7 +73,7 @@ export class PermissionBridge {
 	private binding: TurnBinding | null = null;
 	private pending: PendingAsk | null = null;
 	private lastResolved: Pick<PendingAsk, "requestId" | "sessionId" | "turnId"> | null = null;
-	/** (surface, value) pairs the user approved for this process session. */
+	/** (tenant, session, run, surface, value) pairs approved in this process. */
 	private sessionApprovals = new Set<string>();
 
 	bindTurn(binding: TurnBinding): void {
@@ -83,12 +86,12 @@ export class PermissionBridge {
 	/** Called by the plugin's authorizer link. Never throws — every failure
 	 *  mode resolves to a deny verdict so the agent loop always continues. */
 	authorize(details: PermissionAskDetails): Promise<AuthorizerVerdict> {
-		const sessionKey = sessionApprovalKey(details);
-		if (sessionKey && this.sessionApprovals.has(sessionKey)) {
-			return Promise.resolve({ kind: "allow" });
-		}
 		const binding = this.binding;
 		if (!binding) return Promise.resolve({ kind: "deny", reason: NO_UI_REASON });
+		const approvalKey = sessionApprovalKey(binding, details);
+		if (approvalKey && this.sessionApprovals.has(approvalKey)) {
+			return Promise.resolve({ kind: "allow" });
+		}
 		if (this.pending) this.resolvePending({ kind: "deny", reason: "Superseded by a newer permission request." }, false);
 
 		const requestId = typeof details.requestId === "string" && details.requestId ? details.requestId : randomUUID();
@@ -100,7 +103,7 @@ export class PermissionBridge {
 					reason: "Permission prompt timed out waiting for the user. The operation was denied; do not retry it without asking the user first.",
 				}, true);
 			}, binding.timeoutMs);
-			this.pending = { requestId, sessionId: binding.sessionId, turnId: binding.turnId, sessionKey, resolve, timer };
+			this.pending = { requestId, sessionId: binding.sessionId, turnId: binding.turnId, approvalKey, resolve, timer };
 			binding.emit({
 				type: "permission_request",
 				requestId,
@@ -141,8 +144,8 @@ export class PermissionBridge {
 				: "not_found";
 		}
 		if (pending.sessionId !== input.sessionId || pending.turnId !== input.turnId) return "scope_mismatch";
-		if (input.decision === "allow_session" && pending.sessionKey) {
-			this.sessionApprovals.add(pending.sessionKey);
+		if (input.decision === "allow_session" && pending.approvalKey) {
+			this.sessionApprovals.add(pending.approvalKey);
 		}
 		const verdict: AuthorizerVerdict = input.decision === "deny"
 			? { kind: "deny", reason: input.reason?.trim() || "Denied by the user. Do not retry this operation." }
@@ -180,14 +183,14 @@ export class PermissionBridge {
 	}
 }
 
-/** Stable cache key for session approvals: the display surface plus its
- *  normalized value (command for bash, path for file tools, …). Returns null
- *  when the ask carries no usable value — such asks never cache. */
-function sessionApprovalKey(details: PermissionAskDetails): string | null {
+/** Stable cache key for tenant + session + agent run and the normalized
+ * command/path. Returns null when the ask has no usable value. */
+function sessionApprovalKey(binding: TurnBinding, details: PermissionAskDetails): string | null {
 	const surface = details.surface ?? details.toolName ?? null;
 	const value = details.value ?? details.command ?? details.path ?? details.target ?? details.skillName ?? null;
 	if (!surface || !value) return null;
-	return `${surface}${value}`;
+	const scope = `${binding.tenantId ?? "local"}\0${binding.sessionId}\0${binding.runId ?? binding.sessionId}`;
+	return `${scope}\0${surface}\0${value}`;
 }
 
 export const permissionBridge = new PermissionBridge();

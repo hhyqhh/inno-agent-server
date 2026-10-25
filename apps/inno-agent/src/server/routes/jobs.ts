@@ -317,6 +317,8 @@ export async function handleJobsRoutes(
 		permissionBridge.bindTurn({
 			sessionId,
 			turnId: runTurnId,
+			tenantId: getRequestTenant(req)?.tenantId,
+			runId: sessionPath,
 			timeoutMs: 30 * 60_000,
 			emit: (event) => {
 				const forwarded = event.type === "permission_request" ? { ...event, turnId: runTurnId } : event;

@@ -999,6 +999,8 @@ export async function handleChatRoutes(
 					permissionBridge.bindTurn({
 						sessionId: state.sessionId,
 						turnId: state.turnId,
+						tenantId: getRequestTenant(req)?.tenantId,
+						runId: targetSessionPath,
 						emit: (event) => streamRegistry.publishStreamEvent(state, event),
 						timeoutMs: 30 * 60_000,
 					});

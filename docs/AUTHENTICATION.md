@@ -141,9 +141,19 @@ are tenant-scoped. These are deliberate fail-closed limitations, not a claim
 that background execution is ready for multi-user deployment. Legacy global job
 files remain hidden and are not copied implicitly.
 
-Channels, settings, permissions, background execution, and the singleton agent
+Channels, settings, global permission policy, background execution, and the singleton agent
 runtime still have remaining migration work. `INNO_MULTI_USER_ENABLED` remains
 unavailable.
+
+## Permission approval isolation (stage 2F)
+
+`allow_session` permission approvals are cached by tenant, session, agent run,
+and normalized command/path. Cached approvals require a currently bound turn;
+they never authorize a headless/no-UI request. Changing any tenant, session, or
+run requires a new approval. Pending responses remain bound to the exact
+session/turn/request, and chat permission-response routes retain their session
+ownership checks. The global permission policy settings themselves still need
+tenant runtime isolation.
 
 
 ## Tests
