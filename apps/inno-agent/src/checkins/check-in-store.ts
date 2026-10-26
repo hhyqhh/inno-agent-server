@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { readJson, writeJson, ensureDir } from "../storage/file-store.js";
 import type { JobStore } from "../scheduler/job-store.js";
 import type { JobRunStatus, ScheduledJob } from "../scheduler/types.js";
+import { getCurrentTenant } from "../tenants/current.js";
 import {
 	dateKeyForTimeZone,
 	DEFAULT_SCHEDULER_TIMEZONE,
@@ -240,17 +241,22 @@ export class CheckInStore {
 	 * user can retry from the check-in card.
 	 */
 	claimOccurrence(occurrenceId: string): boolean {
-		if (this.claimedOccurrences.has(occurrenceId)) return false;
-		this.claimedOccurrences.add(occurrenceId);
+		const key = this.occurrenceClaimKey(occurrenceId);
+		if (this.claimedOccurrences.has(key)) return false;
+		this.claimedOccurrences.add(key);
 		return true;
 	}
 
 	releaseOccurrenceClaim(occurrenceId: string): void {
-		this.claimedOccurrences.delete(occurrenceId);
+		this.claimedOccurrences.delete(this.occurrenceClaimKey(occurrenceId));
 	}
 
 	isOccurrenceClaimed(occurrenceId: string): boolean {
-		return this.claimedOccurrences.has(occurrenceId);
+		return this.claimedOccurrences.has(this.occurrenceClaimKey(occurrenceId));
+	}
+
+	private occurrenceClaimKey(occurrenceId: string): string {
+		return `${getCurrentTenant()?.tenantId ?? "local"}:${occurrenceId}`;
 	}
 
 	/**

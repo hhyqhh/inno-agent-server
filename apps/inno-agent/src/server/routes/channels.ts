@@ -1,6 +1,8 @@
 import type { IncomingMessage as HttpReq, ServerResponse } from "node:http";
+import { join } from "node:path";
 import { BridgeChannel } from "../../channels/bridge/bridge-channel.js";
 import { handleBridgeMessage } from "../../channels/bridge/bridge-server.js";
+import type { BridgeMessageResponse } from "../../channels/bridge/types.js";
 import type { ChannelRegistry } from "../../channels/channel.js";
 import { feishuRegistrationBegin, feishuRegistrationPoll } from "../../channels/feishu/feishu-registration.js";
 import type { PersonalChannelDispatcher } from "../../channels/personal-dispatcher.js";
@@ -8,6 +10,8 @@ import type { ChannelName } from "../../channels/types.js";
 import { WeChatChannel } from "../../channels/wechat/wechat-channel.js";
 import { saveConfig, type InnoConfig } from "../../config.js";
 import { logger } from "../../logger.js";
+import { loadTenantConfig, saveTenantConfig } from "../../tenants/config.js";
+import { getRequestTenant } from "../../tenants/http.js";
 import { json, matchRoute, readBody } from "../http-helpers.js";
 
 /**
@@ -21,11 +25,27 @@ export interface ChannelsRouteContext {
 	configPath: string;
 	getConfig: () => InnoConfig;
 	setConfig: (config: InnoConfig) => void;
-	getDispatcher: () => PersonalChannelDispatcher | null;
+	getDispatcher: () => Pick<PersonalChannelDispatcher, "handle" | "getRunLog"> | null;
 	getBridgeToken: () => string | undefined;
+	handleBridge?: (authHeader: string | undefined, body: unknown) => Promise<{ status: number; body: BridgeMessageResponse }>;
 	reloadFeishuChannel: () => Promise<void>;
 	getWechatChannel: () => WeChatChannel | null;
 	setWechatChannel: (channel: WeChatChannel) => void;
+	startWechatChannel?: (channel: WeChatChannel) => void;
+	syncChannelOwnership?: (previous: InnoConfig, next: InnoConfig) => Promise<void>;
+	beginFeishuRegistration?: typeof feishuRegistrationBegin;
+	pollFeishuRegistration?: typeof feishuRegistrationPoll;
+	trackWechatQr?: (qrId: string) => void;
+	assertWechatQr?: (qrId: string) => void;
+	confirmWechatLogin?: (qrId: string, botId: string, confirm: () => void) => Promise<void>;
+}
+
+function errorStatus(error: unknown, fallback: number): number {
+	if (error && typeof error === "object" && "statusCode" in error) {
+		const status = (error as { statusCode?: unknown }).statusCode;
+		if (typeof status === "number") return status;
+	}
+	return fallback;
 }
 
 /**
@@ -41,6 +61,21 @@ export async function handleChannelsRoutes(
 	ctx: ChannelsRouteContext,
 ): Promise<boolean> {
 	const { channelRegistry } = ctx;
+	const tenant = getRequestTenant(req);
+	const getConfig = () => tenant ? loadTenantConfig(ctx.dataDir, tenant.tenantId) : ctx.getConfig();
+	const persistConfig = async (previous: InnoConfig, next: InnoConfig): Promise<void> => {
+		if (tenant && ctx.syncChannelOwnership) await ctx.syncChannelOwnership(previous, next);
+		try {
+			if (tenant) saveTenantConfig(ctx.dataDir, tenant.tenantId, next);
+			else ctx.setConfig(saveConfig(ctx.configPath, next));
+		} catch (error) {
+			if (tenant && ctx.syncChannelOwnership) {
+				try { await ctx.syncChannelOwnership(next, previous); }
+				catch (rollbackError) { logger.error({ err: rollbackError }, "failed to roll back channel ownership after config save failure"); }
+			}
+			throw error;
+		}
+	};
 
 	if (method === "GET" && url === "/api/channels") {
 		json(res, 200, channelRegistry.all().map((channel) => {
@@ -99,14 +134,19 @@ export async function handleChannelsRoutes(
 
 	// Bridge message endpoint
 	if (method === "POST" && url === "/api/bridge/messages") {
+		const body = await readBody(req);
+		const authHeader = req.headers.authorization;
+		if (ctx.handleBridge) {
+			const result = await ctx.handleBridge(authHeader, body);
+			json(res, result.status, result.body);
+			return true;
+		}
 		const bridgeToken = ctx.getBridgeToken();
 		const dispatcher = ctx.getDispatcher();
 		if (!bridgeToken || !dispatcher) {
 			json(res, 404, { error: "Bridge not configured" });
 			return true;
 		}
-		const body = await readBody(req);
-		const authHeader = req.headers.authorization;
 		const result = handleBridgeMessage(
 			{ token: bridgeToken, channelRegistry, dispatcher },
 			authHeader,
@@ -136,7 +176,7 @@ export async function handleChannelsRoutes(
 	// Feishu QR device-flow registration
 	if (method === "POST" && url === "/api/channels/feishu/qr-register") {
 		try {
-			const result = await feishuRegistrationBegin();
+			const result = await (ctx.beginFeishuRegistration?.() ?? feishuRegistrationBegin());
 			json(res, 200, {
 				deviceCode: result.deviceCode,
 				qrUrl: result.verificationUri,
@@ -157,24 +197,29 @@ export async function handleChannelsRoutes(
 			return true;
 		}
 		try {
-			const result = await feishuRegistrationPoll(deviceCode);
+			const result = await (ctx.pollFeishuRegistration?.(deviceCode) ?? feishuRegistrationPoll(deviceCode));
 			if (result.status === "confirmed" && result.appId && result.appSecret) {
-				// Save credentials to config and start channel
-				const config = ctx.getConfig();
-				config.feishu = { appId: result.appId, appSecret: result.appSecret };
-				if (!config.channels) config.channels = {};
-				config.channels.feishu = {
-					enabled: true,
-					personalOnly: true,
-					allowedUserIds: result.openId ? [result.openId] : [],
+				// Save credentials to the owning tenant and start only its channel.
+				const previous = getConfig();
+				const next: InnoConfig = {
+					...previous,
+					feishu: { appId: result.appId, appSecret: result.appSecret },
+					channels: {
+						...previous.channels,
+						feishu: {
+							enabled: true,
+							personalOnly: true,
+							allowedUserIds: result.openId ? [result.openId] : [],
+						},
+					},
 				};
-				ctx.setConfig(saveConfig(ctx.configPath, config));
+				await persistConfig(previous, next);
 				await ctx.reloadFeishuChannel();
 			}
 			json(res, 200, { status: result.status });
 		} catch (err) {
 			logger.error({ err }, "[feishu] QR registration poll failed");
-			json(res, 502, { error: err instanceof Error ? err.message : "Failed to poll Feishu registration" });
+			json(res, errorStatus(err, 502), { error: err instanceof Error ? err.message : "Failed to poll Feishu registration" });
 		}
 		return true;
 	}
@@ -184,12 +229,14 @@ export async function handleChannelsRoutes(
 		// Lazily create the WeChat channel if not yet instantiated
 		let wechatChannel = ctx.getWechatChannel();
 		if (!wechatChannel) {
-			wechatChannel = new WeChatChannel(ctx.dataDir, ctx.getConfig().channels?.wechat);
+			const wechatDataDir = tenant ? join(ctx.dataDir, "tenants", tenant.tenantId) : ctx.dataDir;
+			wechatChannel = new WeChatChannel(wechatDataDir, getConfig().channels?.wechat);
 			channelRegistry.register(wechatChannel);
 			ctx.setWechatChannel(wechatChannel);
 		}
 		try {
 			const qr = await wechatChannel.getClient().getQrCode();
+			ctx.trackWechatQr?.(qr.qrcode);
 			const raw = qr.qrcode_img_content ?? "";
 			logger.info(`[wechat] QR response: qrcode=${qr.qrcode}, img_content length=${raw.length}, prefix=${raw.slice(0, 40)}`);
 			let qrUrl = raw;
@@ -216,20 +263,29 @@ export async function handleChannelsRoutes(
 			return true;
 		}
 		try {
+			ctx.assertWechatQr?.(qrId);
 			const status = await wechatChannel.getClient().getQrCodeStatus(qrId);
 			if (status.status === "confirmed" && status.bot_token) {
-				wechatChannel.getClient().confirmLogin(status);
+				const botId = status.ilink_bot_id || wechatChannel.botId;
+				if (!botId) throw new Error("WeChat login did not return a bot id");
+				const confirm = () => wechatChannel.getClient().confirmLogin(status);
+				if (ctx.confirmWechatLogin) await ctx.confirmWechatLogin(qrId, botId, confirm);
+				else confirm();
 				// Start polling if not already running
 				const dispatcher = ctx.getDispatcher();
 				if (!wechatChannel.isConnected && dispatcher) {
-					wechatChannel.onMessage((msg) => dispatcher.handle(wechatChannel, msg));
-					wechatChannel.start();
+					if (ctx.startWechatChannel) {
+						ctx.startWechatChannel(wechatChannel);
+					} else {
+						wechatChannel.onMessage((msg) => dispatcher.handle(wechatChannel, msg));
+						wechatChannel.start();
+					}
 				}
 			}
 			json(res, 200, { status: status.status, botId: status.ilink_bot_id });
 		} catch (err) {
 			logger.error({ err }, "WeChat QR status check failed");
-			json(res, 500, { error: err instanceof Error ? err.message : "Failed to check QR status" });
+			json(res, errorStatus(err, 500), { error: err instanceof Error ? err.message : "Failed to check QR status" });
 		}
 		return true;
 	}

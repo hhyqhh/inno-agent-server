@@ -182,6 +182,31 @@ describe("PersonalChannelDispatcher routing", () => {
 		expect(probe.inSession[1].sessionPath).toBe(join(sessionDir, "sess_1.jsonl"));
 	});
 
+	it("attributes the run to the executed session instead of the mutable global session", async () => {
+		const probe = makeOpts();
+		const dispatcher = new PersonalChannelDispatcher(probe.opts);
+		const { channel } = fakeChannel();
+
+		await dispatcher.handle(channel, msg());
+
+		expect(probe.recordedChannels.at(-1)).toEqual({ channel: "feishu", sessionId: "sess_1.jsonl" });
+	});
+
+	it("discards a persisted binding that fails session ownership validation", async () => {
+		const probe = makeOpts();
+		writeFileSync(join(sessionDir, "other-tenant.jsonl"), "{}\n");
+		writeFileSync(join(channelsDataDir, "chat-sessions.json"), JSON.stringify({ "feishu:chat_1": "other-tenant.jsonl" }));
+		probe.opts.authorizeSession = async () => false;
+		const dispatcher = new PersonalChannelDispatcher(probe.opts);
+		const { channel } = fakeChannel();
+
+		await dispatcher.handle(channel, msg());
+
+		expect(probe.createdSessions).toEqual(["sess_1.jsonl"]);
+		expect(probe.inSession[0].sessionPath).toBe(join(sessionDir, "sess_1.jsonl"));
+		expect(probe.inSession[0].sessionPath).not.toBe(join(sessionDir, "other-tenant.jsonl"));
+	});
+
 	it("drops a stale binding and re-creates when the session file is gone", async () => {
 		const probe = makeOpts();
 		const dispatcher = new PersonalChannelDispatcher(probe.opts);

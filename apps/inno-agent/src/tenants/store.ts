@@ -107,6 +107,19 @@ export class TenantStore {
 		return result.rowCount === 1;
 	}
 
+	/** Resolve an external connection identity without accepting a tenant id from its callback. */
+	async findResourceOwner(kind: ResourceKind, resourceId: string): Promise<TenantContext | null> {
+		const result = await this.pool.query<{ tenant_id: string; user_id: string }>(
+			`SELECT ownership.tenant_id, membership.user_id
+			 FROM resource_ownership ownership
+			 JOIN tenant_memberships membership ON membership.tenant_id = ownership.tenant_id
+			 WHERE ownership.resource_type = $1 AND ownership.resource_id = $2`,
+			[kind, resourceId],
+		);
+		const row = result.rows[0];
+		return row ? { tenantId: row.tenant_id, userId: row.user_id, role: "owner" } : null;
+	}
+
 	async listResourceIds(context: TenantContext, kind: ResourceKind): Promise<Set<string>> {
 		const result = await this.pool.query<{ resource_id: string }>(
 			"SELECT resource_id FROM resource_ownership WHERE tenant_id = $1 AND resource_type = $2",

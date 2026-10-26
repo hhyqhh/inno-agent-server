@@ -224,4 +224,21 @@ describe("tenant-scoped check-ins", () => {
 			expect(scopedCheckIns.list()).toEqual([]);
 		});
 	});
+
+	it("keys in-flight occurrence claims by tenant as well as occurrence id", () => {
+		const tenantStore = {} as TenantStore;
+		const tenantA: TenantContext = { tenantId: "a", userId: "a", role: "owner" };
+		const tenantB: TenantContext = { tenantId: "b", userId: "b", role: "owner" };
+		runInTenantContext(tenantA, tenantStore, () => {
+			expect(checkInStore.claimOccurrence("same-occurrence")).toBe(true);
+			expect(checkInStore.claimOccurrence("same-occurrence")).toBe(false);
+		});
+		runInTenantContext(tenantB, tenantStore, () => {
+			expect(checkInStore.claimOccurrence("same-occurrence")).toBe(true);
+			checkInStore.releaseOccurrenceClaim("same-occurrence");
+		});
+		runInTenantContext(tenantA, tenantStore, () => {
+			expect(checkInStore.isOccurrenceClaimed("same-occurrence")).toBe(true);
+		});
+	});
 });

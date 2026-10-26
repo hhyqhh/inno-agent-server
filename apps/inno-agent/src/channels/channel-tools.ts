@@ -1,4 +1,4 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -15,6 +15,8 @@ export interface ChannelToolsDeps {
 	getCurrentSessionId?: () => string;
 	/** Fallback workspace root (CLI / no registry). */
 	workspaceDir: string;
+	/** Tenant executions fail closed instead of using the deployment workspace root. */
+	allowWorkspaceFallback?: boolean;
 	/**
 	 * Tag the active session as having interacted with a channel. Called after a
 	 * successful file send so the session picks up the channel badge in the UI.
@@ -26,7 +28,7 @@ export interface ChannelToolsDeps {
  * Resolve the active session's workspace directory. Falls back to the runtime
  * workspace root when no registry/session mapping is available (CLI mode).
  */
-function resolveWorkspaceDir(deps: ChannelToolsDeps): string {
+function resolveWorkspaceDir(deps: ChannelToolsDeps): string | null {
 	if (deps.workspaceRegistry && deps.getCurrentSessionId) {
 		try {
 			const sessionId = deps.getCurrentSessionId();
@@ -36,10 +38,10 @@ function resolveWorkspaceDir(deps: ChannelToolsDeps): string {
 				if (dir) return dir;
 			}
 		} catch (err) {
-			logger.warn({ err }, "failed to resolve workspace dir, falling back to root");
-			// fall through to runtime workspace root
+			logger.warn({ err }, "failed to resolve workspace dir");
 		}
 	}
+	if (deps.allowWorkspaceFallback === false) return null;
 	return deps.workspaceDir;
 }
 
@@ -53,6 +55,14 @@ function safeResolveInWorkspace(workspaceDir: string, userPath: string): string 
 	const resolved = resolve(root, cleaned);
 	const rel = relative(root, resolved);
 	if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
+	if (existsSync(resolved)) {
+		try {
+			const realRel = relative(realpathSync(root), realpathSync(resolved));
+			if (realRel === "" || realRel.startsWith("..") || isAbsolute(realRel)) return null;
+		} catch {
+			return null;
+		}
+	}
 	return resolved;
 }
 
@@ -148,6 +158,12 @@ export function createChannelTools(deps: ChannelToolsDeps): ToolDefinition[] {
 
 			// Resolve and validate the file path within the workspace.
 			const workspaceDir = resolveWorkspaceDir(deps);
+			if (!workspaceDir) {
+				return {
+					content: [{ type: "text" as const, text: "无法确定当前会话的工作区，已停止发送文件。" }],
+					details: { error: "workspace_unavailable" } as Record<string, unknown>,
+				};
+			}
 			const resolved = safeResolveInWorkspace(workspaceDir, params.filePath);
 			if (!resolved) {
 				return {

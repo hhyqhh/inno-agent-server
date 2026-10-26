@@ -48,12 +48,6 @@ export function createSchedulerTools(jobStore: JobStore, channelRegistry?: Chann
 					details: { error: "invalid_cron" } as Record<string, unknown>,
 				};
 			}
-			if (params.channel && getCurrentTenant()) {
-				return {
-					content: [{ type: "text" as const, text: "多用户频道隔离尚未启用，当前不能创建 channel 推送任务；请创建不指定 channel 的站内任务。" }],
-					details: { error: "channel_tenant_isolation_unavailable" } as Record<string, unknown>,
-				};
-			}
 			if (params.channel && !channelRegistry?.get(params.channel)) {
 				return {
 					content: [{

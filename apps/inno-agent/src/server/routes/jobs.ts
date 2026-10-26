@@ -182,10 +182,6 @@ export async function handleJobsRoutes(
 			json(res, 400, { error: `Invalid cron: ${cronCheck.error}` });
 			return true;
 		}
-		if (body.channel && getRequestTenant(req)) {
-			json(res, 400, { error: "Channel-backed jobs are unavailable until channel tenant isolation is enabled" });
-			return true;
-		}
 		if (body.channel && !channelRegistry.get(body.channel)) {
 			json(res, 400, { error: `Channel not registered: ${body.channel}. Enable it in settings first.` });
 			return true;
@@ -423,10 +419,6 @@ export async function handleJobsRoutes(
 				json(res, 400, { error: `Invalid cron: ${cronCheck.error}` });
 				return true;
 			}
-		}
-		if (body.channel && getRequestTenant(req)) {
-			json(res, 400, { error: "Channel-backed jobs are unavailable until channel tenant isolation is enabled" });
-			return true;
 		}
 		if (body.channel && !channelRegistry.get(body.channel)) {
 			json(res, 400, { error: `Channel not registered: ${body.channel}. Enable it in settings first.` });

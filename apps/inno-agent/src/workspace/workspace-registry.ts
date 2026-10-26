@@ -246,8 +246,8 @@ export class WorkspaceRegistry {
 	 * (e.g. feishu/wechat/qq). Channel-originated sessions bind here because they
 	 * cannot prompt the user for a workspace choice.
 	 */
-	ensureChannelWorkspace(channel: string): WorkspaceMeta {
-		const id = `channel-${channel}`;
+	ensureChannelWorkspace(channel: string, scope?: string): WorkspaceMeta {
+		const id = scope ? `channel-${channel}-${scope}` : `channel-${channel}`;
 		const reg = this.loadRegistry();
 		const now = new Date().toISOString();
 		let ws = reg.workspaces.find((w) => w.id === id);
@@ -255,7 +255,7 @@ export class WorkspaceRegistry {
 			ws = {
 				id,
 				name: CHANNEL_WORKSPACE_NAMES[channel] ?? channel,
-				relPath: join(".channels", channel),
+				relPath: scope ? join(".channels", scope, channel) : join(".channels", channel),
 				createdAt: now,
 				updatedAt: now,
 				isTemp: false,

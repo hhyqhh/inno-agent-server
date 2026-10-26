@@ -30,7 +30,9 @@ import { configureDeferredRuns } from "./scheduler/deferred-runs.js";
 import { ChannelRegistry } from "./channels/channel.js";
 import type { ChannelStreamEvent } from "./channels/channel.js";
 import { FeishuChannel } from "./channels/feishu/feishu-channel.js";
-import { PersonalChannelDispatcher } from "./channels/personal-dispatcher.js";
+import { PersonalChannelDispatcher, type PersonalChannelDispatcherOptions } from "./channels/personal-dispatcher.js";
+import { TenantChannelManager } from "./channels/tenant-channel-manager.js";
+import { bridgeBearerToken, handleBridgeMessage } from "./channels/bridge/bridge-server.js";
 import { BridgeChannel } from "./channels/bridge/bridge-channel.js";
 import { WeChatChannel } from "./channels/wechat/wechat-channel.js";
 import type { PersonalBridgeChannelConfig } from "./config.js";
@@ -93,7 +95,7 @@ import { assertSignUpAllowed, isPublicApiRequest, isTrustedOrigin, requireSessio
 import { createAuthRuntime } from "./auth/runtime.js";
 import { ownsRequestResource, setRequestTenant } from "./tenants/http.js";
 import { resolveCurrentTenantDataDir, resolveCurrentTenantDataRoot } from "./tenants/paths.js";
-import { runWithoutTenantContext } from "./tenants/current.js";
+import { getCurrentTenant, getCurrentTenantStore, runWithoutTenantContext } from "./tenants/current.js";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -153,6 +155,7 @@ let terminalManager!: TerminalSessionManager;
 let feishuChannel: FeishuChannel | null = null;
 let wechatChannel: WeChatChannel | null = null;
 let dispatcher: PersonalChannelDispatcher | null = null;
+let tenantChannelManager: TenantChannelManager | null = null;
 
 let bootstrapped = false;
 let bootstrapPromise: Promise<void> | null = null;
@@ -275,29 +278,110 @@ async function ensureBootstrapped(): Promise<void> {
 			}
 		}
 
-		if (config.feishu?.appId && config.channels?.feishu?.enabled) {
-			feishuChannel = new FeishuChannel(config.feishu, dataDir, config.channels.feishu);
-			channelRegistry.register(feishuChannel);
-		}
+		const sharedDispatcherOptions: Omit<PersonalChannelDispatcherOptions, "channelRegistry" | "channelsDataDir"> = {
+			runPrompt: runPromptSerialized,
+			runPromptInSession,
+			runPromptStreamingInSession: (sessionPath, prompt, onEvent, images) => {
+				return runPromptStreamingInSession(sessionPath, prompt, (piEvent: any) => {
+					const channelEvent = piEventToChannelStreamEvent(piEvent);
+					if (channelEvent) onEvent(channelEvent);
+				}, images);
+			},
+			createNewSession,
+			getCurrentSessionId,
+			recordSessionChannel: (ch, sid?) => recordCurrentSessionChannel(ch as SessionChannel, sid, { setOriginIfEmpty: true }),
+			maybeAutoGenerateTopic,
+			onSessionCreated: async (sessionId, channel) => {
+				const tenant = getCurrentTenant();
+				if (tenant) {
+					const store = getCurrentTenantStore();
+					if (!store) throw new Error("Channel session creation requires a tenant store");
+					const ws = workspaceRegistry.ensureChannelWorkspace(channel, tenant.tenantId);
+					await store.claimResource(tenant, "workspace", ws.id);
+					workspaceRegistry.bindSession(sessionId, ws.id);
+					return;
+				}
+				try {
+					const ws = workspaceRegistry.ensureChannelWorkspace(channel);
+					workspaceRegistry.bindSession(sessionId, ws.id);
+				} catch (err) {
+					logger.warn({ err }, `[sessions] failed to bind channel session ${sessionId}`);
+				}
+			},
+			sessionDir: join(dataDir, "sessions"),
+		};
 
-		bridgeToken = config.bridge?.token;
-		if (bridgeToken) {
-			const qqConfig = config.channels?.qq as PersonalBridgeChannelConfig | undefined;
-			if (qqConfig?.enabled && qqConfig.sidecarBaseUrl) {
-				channelRegistry.register(new BridgeChannel("qq", qqConfig.sidecarBaseUrl, bridgeToken));
+		if (auth.mode === "local") {
+			if (config.feishu?.appId && config.channels?.feishu?.enabled) {
+				feishuChannel = new FeishuChannel(config.feishu, dataDir, config.channels.feishu);
+				channelRegistry.register(feishuChannel);
 			}
-			const wechatConfigBridge = config.channels?.wechat;
-			if (wechatConfigBridge?.enabled && "sidecarBaseUrl" in wechatConfigBridge && (wechatConfigBridge as PersonalBridgeChannelConfig).mode === "bridge") {
-				channelRegistry.register(new BridgeChannel("wechat", (wechatConfigBridge as PersonalBridgeChannelConfig).sidecarBaseUrl, bridgeToken));
-			}
-		}
 
-		const wechatCfg = config.channels?.wechat;
-		if (wechatCfg?.enabled && (!("mode" in wechatCfg) || (wechatCfg as { mode?: string }).mode !== "bridge")) {
-			wechatChannel = new WeChatChannel(dataDir, wechatCfg);
-			channelRegistry.register(wechatChannel);
+			bridgeToken = config.bridge?.token;
+			if (bridgeToken) {
+				const qqConfig = config.channels?.qq as PersonalBridgeChannelConfig | undefined;
+				if (qqConfig?.enabled && qqConfig.sidecarBaseUrl) {
+					channelRegistry.register(new BridgeChannel("qq", qqConfig.sidecarBaseUrl, bridgeToken));
+				}
+				const wechatConfigBridge = config.channels?.wechat;
+				if (wechatConfigBridge?.enabled && "sidecarBaseUrl" in wechatConfigBridge && (wechatConfigBridge as PersonalBridgeChannelConfig).mode === "bridge") {
+					channelRegistry.register(new BridgeChannel("wechat", (wechatConfigBridge as PersonalBridgeChannelConfig).sidecarBaseUrl, bridgeToken));
+				}
+			}
+
+			const wechatCfg = config.channels?.wechat;
+			if (wechatCfg?.enabled && (!("mode" in wechatCfg) || (wechatCfg as { mode?: string }).mode !== "bridge")) {
+				wechatChannel = new WeChatChannel(dataDir, wechatCfg);
+				channelRegistry.register(wechatChannel);
+			}
+			migrateReminderChannels();
+		} else {
+			bridgeToken = undefined;
+			tenantChannelManager = new TenantChannelManager({
+				dataDir,
+				tenantStore: auth.tenantStore!,
+				dispatcher: sharedDispatcherOptions,
+				createChannels: ({ config: tenantConfig, channelsDataDir: tenantChannelsDir, registry, dispatch }) => {
+					const tenantDataDir = dirname(tenantChannelsDir);
+					let tenantFeishu: FeishuChannel | null = null;
+					let tenantWechat: WeChatChannel | null = null;
+					if (tenantConfig.feishu?.appId && tenantConfig.channels?.feishu?.enabled) {
+						tenantFeishu = new FeishuChannel(tenantConfig.feishu, tenantDataDir, tenantConfig.channels.feishu);
+						registry.register(tenantFeishu);
+						tenantFeishu.onMessage((msg) => dispatch(tenantFeishu!, msg));
+						tenantFeishu.start();
+						if (!registry.getDefaultTarget("feishu")) {
+							void tenantFeishu.discoverDefaultTarget().then((target) => {
+								if (target) registry.setDefaultTarget(target);
+							}).catch((err) => logger.warn({ err }, "[feishu] tenant target discovery failed"));
+						}
+					}
+					const token = tenantConfig.bridge?.token;
+					if (token) {
+						const qq = tenantConfig.channels?.qq;
+						if (qq?.enabled && qq.sidecarBaseUrl) registry.register(new BridgeChannel("qq", qq.sidecarBaseUrl, token));
+						const wechat = tenantConfig.channels?.wechat;
+						if (wechat?.enabled && "sidecarBaseUrl" in wechat && wechat.mode === "bridge") {
+							registry.register(new BridgeChannel("wechat", wechat.sidecarBaseUrl, token));
+						}
+					}
+					const wechatConfig = tenantConfig.channels?.wechat;
+					if (wechatConfig?.enabled && (!("mode" in wechatConfig) || wechatConfig.mode !== "bridge")) {
+						tenantWechat = new WeChatChannel(tenantDataDir, wechatConfig);
+						registry.register(tenantWechat);
+						tenantWechat.onMessage((msg) => dispatch(tenantWechat!, msg));
+						tenantWechat.start();
+					}
+					return {
+						wechatChannel: tenantWechat ?? undefined,
+						stop: async () => {
+							await tenantFeishu?.stop();
+						},
+					};
+				},
+			});
+			channelRegistry = tenantChannelManager;
 		}
-		if (auth.mode === "local") migrateReminderChannels();
 
 		// ---- agent session ----
 		logger.info("[inno-server] initializing agent session...");
@@ -313,53 +397,35 @@ async function ensureBootstrapped(): Promise<void> {
 		});
 
 		// ---- post-init: dispatcher, channels, cron, WebSocket ----
-		const channelsDataDir = join(dataDir, "channels");
-		ensureDir(channelsDataDir);
-		dispatcher = new PersonalChannelDispatcher({
-			channelRegistry,
-			runPrompt: runPromptSerialized,
-			runPromptInSession,
-			runPromptStreamingInSession: (sessionPath, prompt, onEvent, images) => {
-				return runPromptStreamingInSession(sessionPath, prompt, (piEvent: any) => {
-					const channelEvent = piEventToChannelStreamEvent(piEvent);
-					if (channelEvent) onEvent(channelEvent);
-				}, images);
-			},
-			createNewSession,
-			getCurrentSessionId,
-			recordSessionChannel: (ch, sid?) => recordCurrentSessionChannel(ch as SessionChannel, sid, { setOriginIfEmpty: true }),
-			maybeAutoGenerateTopic,
-			onSessionCreated: (sessionId, channel) => {
-				try {
-					const ws = workspaceRegistry.ensureChannelWorkspace(channel);
-					workspaceRegistry.bindSession(sessionId, ws.id);
-				} catch (err) {
-					logger.warn({ err }, `[sessions] failed to bind channel session ${sessionId}`);
+		if (auth.mode === "local") {
+			const channelsDataDir = join(dataDir, "channels");
+			ensureDir(channelsDataDir);
+			dispatcher = new PersonalChannelDispatcher({
+				...sharedDispatcherOptions,
+				channelRegistry,
+				channelsDataDir,
+			});
+
+			if (feishuChannel) {
+				feishuChannel.onMessage((msg) => dispatcher!.handle(feishuChannel!, msg));
+				feishuChannel.start();
+
+				// Auto-discover default target on first boot if none persisted
+				if (!channelRegistry.getDefaultTarget("feishu")) {
+					feishuChannel.discoverDefaultTarget().then((target) => {
+						if (target) {
+							channelRegistry.setDefaultTarget(target);
+							logger.info({ chatId: target.chatId }, "[feishu] auto-set default target from chat list");
+						}
+					}).catch((err) => {
+						logger.warn({ err }, "[feishu] initial target discovery failed");
+					});
 				}
-			},
-			channelsDataDir,
-			sessionDir: join(dataDir, "sessions"),
-		});
-
-		if (feishuChannel) {
-			feishuChannel.onMessage((msg) => dispatcher!.handle(feishuChannel!, msg));
-			feishuChannel.start();
-
-			// Auto-discover default target on first boot if none persisted
-			if (!channelRegistry.getDefaultTarget("feishu")) {
-				feishuChannel.discoverDefaultTarget().then((target) => {
-					if (target) {
-						channelRegistry.setDefaultTarget(target);
-						logger.info({ chatId: target.chatId }, "[feishu] auto-set default target from chat list");
-					}
-				}).catch((err) => {
-					logger.warn({ err }, "[feishu] initial target discovery failed");
-				});
 			}
-		}
-		if (wechatChannel) {
-			wechatChannel.onMessage((msg) => dispatcher!.handle(wechatChannel!, msg));
-			wechatChannel.start();
+			if (wechatChannel) {
+				wechatChannel.onMessage((msg) => dispatcher!.handle(wechatChannel!, msg));
+				wechatChannel.start();
+			}
 		}
 
 		if (auth.mode === "local") {
@@ -387,7 +453,7 @@ async function ensureBootstrapped(): Promise<void> {
 			logger.warn("[scheduler] automatic and deferred runs are disabled until background tenant isolation lands");
 		}
 
-		logger.info({ channels: channelRegistry.all().map((c) => c.name).join(", ") || "none" }, "[inno-server] channels");
+		logger.info({ channels: auth.mode === "local" ? channelRegistry.all().map((c) => c.name).join(", ") || "none" : "tenant-scoped" }, "[inno-server] channels");
 		logger.info({ jobCount: jobStore.list().length }, "[inno-server] jobs loaded");
 
 		bootstrapped = true;
@@ -414,7 +480,12 @@ async function ensureBootstrapped(): Promise<void> {
  * new credentials take effect without a server restart.
  */
 async function reloadFeishuChannel(): Promise<void> {
+	if (tenantChannelManager) {
+		await tenantChannelManager.reloadCurrent();
+		return;
+	}
 	// Tear down existing instance
+	channelRegistry.unregister("feishu");
 	if (feishuChannel) {
 		try { await feishuChannel.stop(); } catch { /* best effort */ }
 		feishuChannel = null;
@@ -942,7 +1013,7 @@ function scheduleSkillsReload(): void {
 }
 
 function sessionTopicMetadataPath(): string {
-	return join(dataDir, "sessions", "meta.json");
+	return join(resolveCurrentTenantDataRoot(dataDir), "sessions", "meta.json");
 }
 
 function readSessionTopicMetadata(): SessionTopicMetadata {
@@ -1146,7 +1217,7 @@ function parseSessionFile(filePath: string): { summary: SessionSummary; messages
 }
 
 function sessionChannelMetadataPath(): string {
-	return join(dataDir, "sessions", "channels.json");
+	return join(resolveCurrentTenantDataRoot(dataDir), "sessions", "channels.json");
 }
 
 // --- Pending question persistence (survives process restart) ---
@@ -1310,14 +1381,15 @@ ${excerpt}
 const _pendingAutoTopics = new Set<string>();
 
 function maybeAutoGenerateTopic(sessionId: string): void {
-	if (!sessionId || _pendingAutoTopics.has(sessionId)) return;
+	const claimKey = `${getCurrentTenant()?.tenantId ?? "local"}:${sessionId}`;
+	if (!sessionId || _pendingAutoTopics.has(claimKey)) return;
 	const existing = readSessionTopicMetadata()[sessionId];
 	if (existing && (!existing.generated || existing.upgraded)) return;
 
 	const sessionPath = sessionFileFromId(join(dataDir, "sessions"), sessionId);
 	if (!sessionPath || !existsSync(sessionPath)) return;
 
-	_pendingAutoTopics.add(sessionId);
+	_pendingAutoTopics.add(claimKey);
 	void (async () => {
 		try {
 			const parsed = parseSessionFile(sessionPath);
@@ -1331,7 +1403,7 @@ function maybeAutoGenerateTopic(sessionId: string): void {
 		} catch (err) {
 			logger.warn({ err }, `auto-topic generation failed for ${sessionId}`);
 		} finally {
-			_pendingAutoTopics.delete(sessionId);
+			_pendingAutoTopics.delete(claimKey);
 		}
 	})();
 }
@@ -1445,11 +1517,38 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 		configPath: paths.configPath,
 		getConfig: () => config,
 		setConfig: (next) => { config = next; },
-		getDispatcher: () => dispatcher,
+		getDispatcher: () => tenantChannelManager ?? dispatcher,
 		getBridgeToken: () => bridgeToken,
+		handleBridge: auth.mode === "better-auth" ? async (authHeader, body) => {
+			const manager = tenantChannelManager!;
+			const token = bridgeBearerToken(authHeader);
+			const result = await manager.runWithBridgeToken(token, () => handleBridgeMessage({
+				token,
+				channelRegistry: manager,
+				dispatcher: manager,
+				requireChatId: true,
+			}, authHeader, body));
+			return result ?? { status: 401, body: { ok: false as const, error: "Unauthorized" } };
+		} : undefined,
 		reloadFeishuChannel,
-		getWechatChannel: () => wechatChannel,
-		setWechatChannel: (channel) => { wechatChannel = channel; },
+		getWechatChannel: () => tenantChannelManager ? tenantChannelManager.getWechatChannel() : wechatChannel,
+		setWechatChannel: (channel) => {
+			if (tenantChannelManager) tenantChannelManager.setWechatChannel(channel);
+			else wechatChannel = channel;
+		},
+		startWechatChannel: auth.mode === "better-auth"
+			? (channel) => tenantChannelManager!.startWechatChannel(channel)
+			: undefined,
+		syncChannelOwnership: auth.mode === "better-auth"
+			? (previous, next) => tenantChannelManager!.syncOwnership(previous, next)
+			: undefined,
+		beginFeishuRegistration: auth.mode === "better-auth" ? () => tenantChannelManager!.beginFeishuRegistration() : undefined,
+		pollFeishuRegistration: auth.mode === "better-auth" ? (deviceCode) => tenantChannelManager!.pollFeishuRegistration(deviceCode) : undefined,
+		trackWechatQr: auth.mode === "better-auth" ? (qrId) => tenantChannelManager!.trackWechatQr(qrId) : undefined,
+		assertWechatQr: auth.mode === "better-auth" ? (qrId) => tenantChannelManager!.assertWechatQr(qrId) : undefined,
+		confirmWechatLogin: auth.mode === "better-auth"
+			? (qrId, botId, confirm) => tenantChannelManager!.confirmWechatLogin(qrId, botId, confirm)
+			: undefined,
 	}),
 
 	// --- Skills API ---
@@ -1504,6 +1603,9 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 		getConfig: () => config,
 		setConfig: (next) => { config = next; },
 		reloadFeishuChannel,
+		syncChannelOwnership: auth.mode === "better-auth"
+			? (previous, next) => tenantChannelManager!.syncOwnership(previous, next)
+			: undefined,
 		scheduleSkillsReload,
 		invalidateContentSource,
 	}),
@@ -1814,7 +1916,10 @@ const gracefulShutdown = createGracefulShutdownHandler({
 	server,
 	wss,
 	exit: (code) => process.exit(code),
-	onClose: () => auth.close(),
+	onClose: async () => {
+		await tenantChannelManager?.close();
+		await auth.close();
+	},
 });
 process.on("SIGTERM", gracefulShutdown);
 process.on("SIGINT", gracefulShutdown);

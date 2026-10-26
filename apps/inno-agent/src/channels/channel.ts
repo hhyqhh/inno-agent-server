@@ -83,6 +83,10 @@ export class ChannelRegistry {
 		this._channels.set(channel.name, channel);
 	}
 
+	unregister(name: string): void {
+		this._channels.delete(name);
+	}
+
 	get(name: string): ChatChannel | undefined {
 		return this._channels.get(name);
 	}

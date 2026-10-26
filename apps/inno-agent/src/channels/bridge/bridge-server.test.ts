@@ -45,4 +45,10 @@ describe("handleBridgeMessage auth", () => {
 		expect(result.status).toBe(400);
 		expect(result.body.error).toContain("not registered");
 	});
+
+	it("requires an explicit chatId for tenant-scoped dispatch", () => {
+		const opts = { ...makeOpts(), requireChatId: true };
+		expect(handleBridgeMessage(opts, "Bearer secret-token", VALID_BODY).body.error).toContain("chatId");
+		expect(handleBridgeMessage(opts, "Bearer secret-token", { ...VALID_BODY, chatId: "chat-1" }).body.error).toContain("not registered");
+	});
 });

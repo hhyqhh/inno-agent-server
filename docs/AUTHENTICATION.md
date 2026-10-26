@@ -40,9 +40,9 @@ compose application retains the explicit insecure local-mode override because
 its port is published; use Better Auth for non-local deployments.
 
 > **Isolation boundary:** account authentication and the current tenant/ownership
-> slices do not yet make all application data tenant-safe. Channels, automatic/
-> deferred background execution, and parts of the singleton agent runtime are
-> still shared until each domain's authorization migration lands. `INNO_MULTI_USER_ENABLED=true`
+> slices do not yet make all application data tenant-safe. Automatic/deferred
+> background execution and parts of the singleton agent runtime are still shared
+> until each domain's authorization migration lands. `INNO_MULTI_USER_ENABLED=true`
 > deliberately fails at startup until resource ownership and cross-tenant
 > isolation are implemented. Do not treat this stage as a safe multi-user
 > production deployment. Public registration additionally requires rate
@@ -136,14 +136,14 @@ API runs must specify that session explicitly. Agent-initiated unscoped runs are
 temporarily rejected rather than falling back to the global active session.
 
 Automatic cron and deferred execution currently start only in local mode.
-Channel-backed tenant jobs are rejected until channel registries and delivery
-are tenant-scoped. These are deliberate fail-closed limitations, not a claim
-that background execution is ready for multi-user deployment. Legacy global job
-files remain hidden and are not copied implicitly.
+At this stage channel-backed tenant jobs are rejected pending tenant-scoped
+channel registries and delivery; stage 2H later enables request-scoped manual
+channel delivery. Legacy global job files remain hidden and are not copied
+implicitly.
 
 Channels, settings, global permission policy, background execution, and the singleton agent
-runtime still have remaining migration work. `INNO_MULTI_USER_ENABLED` remains
-unavailable.
+runtime still have remaining migration work at this stage.
+`INNO_MULTI_USER_ENABLED` remains unavailable.
 
 ## Permission approval isolation (stage 2F)
 
@@ -176,14 +176,47 @@ current tenant config instead of reading another tenant's registry state.
 
 Authenticated mode disables MCP, subagents, pi-web-access, codemode, and
 computer-use because those extensions still load process-global configuration.
-Their settings writes, channel settings, content-hub credentials/settings, and
-permission-policy overrides return 409 rather than pretending to be isolated.
-Permission policy is always managed `default`, preserving the deny floor;
-process-global `bypassProxy` is rejected for tenant providers.
+Their settings writes, content-hub credentials/settings, and permission-policy
+overrides return 409 rather than pretending to be isolated. Permission policy
+is always managed `default`, preserving the deny floor; process-global
+`bypassProxy` is rejected for tenant providers.
 
-Channels, automatic/deferred background execution, and remaining singleton
-runtime state still require migration. `INNO_MULTI_USER_ENABLED` remains
-unavailable.
+At this stage channels, automatic/deferred background execution, and remaining
+singleton runtime state still require migration. `INNO_MULTI_USER_ENABLED`
+remains unavailable.
+
+## Channel runtime isolation (stage 2H)
+
+Authenticated channels resolve through `TenantChannelManager`, which lazily
+creates a separate registry, dispatcher, and channel data directory under
+`<dataDir>/tenants/<tenantId>/channels`. Default targets, dedupe state, run logs,
+and channel-to-chat session mappings are therefore tenant-local. Channel-created
+sessions and workspaces receive ownership claims before their binding or prompt
+is used; persisted session bindings are reauthorized before reuse. Channel and
+topic session metadata also use the current tenant's session data root.
+
+External identities are claimed in PostgreSQL as `channel` resources: bridge
+credentials use `bridge:<sha256(token)>`, Feishu uses `feishu:<appId>`, and
+WeChat iLink uses `wechat:<botId>`. A second tenant cannot take over an owned
+connection. Public bridge callbacks recover tenant context only from the token's
+persisted ownership, never from a request body or custom tenant header; unknown
+tokens return 401 and tenant bridge messages must include a real `chatId`.
+Native callbacks explicitly restore their runtime's tenant context. Feishu
+device flows and WeChat QR confirmation are bound to the initiating tenant, and
+channel reload/shutdown stops tenant-owned polling and cleanup timers.
+
+Channel settings persist to the current tenant config, with ownership claimed
+before activation and rolled back best-effort if persistence fails. Local mode
+retains the original global registry, config, and directories. Authenticated
+agent file sends cannot fall back to the deployment workspace and reject
+symlink escapes from the resolved session workspace.
+
+Channel-backed jobs may use the current tenant's default target for explicit,
+request-scoped manual runs into an owned session. Automatic cron/deferred
+execution remains local-only, and agent-initiated job execution without an
+explicit session still returns `scoped_runtime_unavailable`. Background
+execution and remaining singleton runtime state still require migration;
+`INNO_MULTI_USER_ENABLED` remains unavailable.
 
 
 ## Tests

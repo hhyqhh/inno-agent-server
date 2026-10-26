@@ -6,6 +6,7 @@ import { createSchedulerTools } from "./scheduler-tools.js";
 import { ScopedJobStore } from "./scoped-job-store.js";
 import { runInTenantContext } from "../tenants/current.js";
 import type { TenantContext, TenantStore } from "../tenants/store.js";
+import { ChannelRegistry } from "../channels/channel.js";
 
 let dir: string;
 let jobs: ScopedJobStore;
@@ -26,8 +27,8 @@ afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
-async function execute(toolIndex: number, params: Record<string, unknown>) {
-	const tool = createSchedulerTools(jobs)[toolIndex];
+async function execute(toolIndex: number, params: Record<string, unknown>, channelRegistry?: ChannelRegistry) {
+	const tool = createSchedulerTools(jobs, channelRegistry)[toolIndex];
 	return (tool.execute as (...args: any[]) => Promise<any>)("call", params, undefined, undefined, {});
 }
 
@@ -54,11 +55,19 @@ describe("tenant-scoped scheduler tools", () => {
 		expect(tenantStore.releaseResource).toHaveBeenCalledWith(tenantA, "job", jobId);
 	});
 
-	it("rejects channel-backed jobs before claiming them", async () => {
+	it("claims channel-backed jobs with the current tenant's default target", async () => {
+		const channels = new ChannelRegistry();
+		channels.register({
+			name: "feishu", verify: async () => true, parse: async () => null,
+			reply: async () => {}, push: async () => {},
+		});
+		channels.setDefaultTarget({ channel: "feishu", chatId: "tenant-chat" });
 		const result = await runInTenantContext(tenantA, tenantStore, () => execute(0, {
 			name: "push", cron: "0 9 * * *", taskType: "push_reminder", prompt: "secret", channel: "feishu",
-		}));
-		expect(result.details.error).toBe("channel_tenant_isolation_unavailable");
-		expect(tenantStore.claimResource).not.toHaveBeenCalled();
+		}, channels));
+		const job = runInTenantContext(tenantA, tenantStore, () => jobs.list().at(0));
+		expect(result.details.error).toBeUndefined();
+		expect(job?.target).toEqual({ channel: "feishu", chatId: "tenant-chat" });
+		expect(tenantStore.claimResource).toHaveBeenCalledWith(tenantA, "job", job?.id);
 	});
 });

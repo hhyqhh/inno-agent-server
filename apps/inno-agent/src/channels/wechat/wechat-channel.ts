@@ -15,6 +15,7 @@ export class WeChatChannel implements RealtimeChatChannel {
 	private processedMessages = new Set<number>();
 	private allowedUserIds: Set<string> | null;
 	private contextTokens = new Map<string, string>();
+	private cleanupTimer: NodeJS.Timeout;
 
 	constructor(dataDir: string, channelConfig?: PersonalChannelConfig) {
 		const tokenPath = join(dataDir, "channels", "wechat-token.json");
@@ -23,12 +24,13 @@ export class WeChatChannel implements RealtimeChatChannel {
 			? new Set(channelConfig.allowedUserIds)
 			: null;
 
-		setInterval(() => {
+		this.cleanupTimer = setInterval(() => {
 			if (this.processedMessages.size > 5000) {
 				const arr = [...this.processedMessages];
 				this.processedMessages = new Set(arr.slice(-2000));
 			}
 		}, 60_000);
+		this.cleanupTimer.unref();
 	}
 
 	get isConnected(): boolean {
@@ -61,6 +63,7 @@ export class WeChatChannel implements RealtimeChatChannel {
 	async stop(): Promise<void> {
 		this.running = false;
 		this.pollAbort?.abort();
+		clearInterval(this.cleanupTimer);
 	}
 
 	private async pollLoop(): Promise<void> {

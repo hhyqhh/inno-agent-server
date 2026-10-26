@@ -328,6 +328,7 @@ export function createInnoExtension(
 				workspaceRegistry: deps?.workspaceRegistry,
 				getCurrentSessionId: deps?.getCurrentSessionId,
 				workspaceDir: paths.workspaceDir,
+				allowWorkspaceFallback: !deps?.sharedExtensionsDisabled,
 				recordChannelInteraction: deps?.recordChannelInteraction,
 			});
 			for (const tool of channelTools) {

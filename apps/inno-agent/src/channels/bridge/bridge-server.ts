@@ -10,10 +10,16 @@ const VALID_BRIDGE_CHANNELS = new Set<string>(["qq", "wechat"]);
 export interface BridgeServerOptions {
 	token: string;
 	channelRegistry: ChannelRegistry;
-	dispatcher: PersonalChannelDispatcher;
+	dispatcher: Pick<PersonalChannelDispatcher, "handle">;
+	/** Tenant dispatchers never allow an implicit global-session destination. */
+	requireChatId?: boolean;
 }
 
 /** Constant-time bearer-token check (the token guards message injection). */
+export function bridgeBearerToken(authHeader: string | undefined): string {
+	return authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length) : "";
+}
+
 function bearerTokenMatches(authHeader: string | undefined, token: string): boolean {
 	if (!authHeader) return false;
 	const expected = Buffer.from(`Bearer ${token}`, "utf-8");
@@ -37,6 +43,10 @@ export function handleBridgeMessage(
 
 	if (!VALID_BRIDGE_CHANNELS.has(msg.channel)) {
 		return { status: 400, body: { ok: false, error: `Invalid bridge channel: ${msg.channel}` } };
+	}
+
+	if (opts.requireChatId && (typeof msg.chatId !== "string" || !msg.chatId.trim())) {
+		return { status: 400, body: { ok: false, error: "Missing required field: chatId" } };
 	}
 
 	const channel = opts.channelRegistry.get(msg.channel);

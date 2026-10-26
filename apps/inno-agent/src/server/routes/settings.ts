@@ -57,6 +57,7 @@ export interface SettingsRouteContext {
 	getConfig: () => InnoConfig;
 	setConfig: (config: InnoConfig) => void;
 	reloadFeishuChannel: () => Promise<void>;
+	syncChannelOwnership?: (previous: InnoConfig, next: InnoConfig) => Promise<void>;
 	scheduleSkillsReload: () => void;
 	invalidateContentSource: () => void;
 }
@@ -368,8 +369,8 @@ export async function handleSettingsRoutes(
 
 	// --- Channels Settings ---
 	if (method === "PUT" && url === "/api/settings/channels") {
-		if (tenantScoped) return rejectSharedRuntime("Channel settings");
 		const body = (await readBody(req)) as Record<string, unknown>;
+		const previous = structuredClone(config);
 		try {
 			// Update feishu config
 			if (body.feishu && typeof body.feishu === "object") {
@@ -379,7 +380,7 @@ export async function handleSettingsRoutes(
 				if (appId) {
 					config.feishu = {
 						appId,
-						appSecret: appSecret || config.feishu?.appSecret || "",
+						appSecret: (appSecret.startsWith("****") ? "" : appSecret) || config.feishu?.appSecret || "",
 					};
 				}
 			}
@@ -412,10 +413,22 @@ export async function handleSettingsRoutes(
 					// preserve existing
 				}
 			}
-			save(config);
+			if (tenant && ctx.syncChannelOwnership) await ctx.syncChannelOwnership(previous, config);
+			try {
+				save(config);
+			} catch (error) {
+				if (tenant && ctx.syncChannelOwnership) {
+					try { await ctx.syncChannelOwnership(config, previous); }
+					catch (rollbackError) { logger.error({ err: rollbackError }, "failed to roll back channel ownership after settings save failure"); }
+				}
+				throw error;
+			}
 		} catch (err) {
 			logger.warn({ err }, "failed to update channel settings");
-			json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+			const statusCode = err && typeof err === "object" && "statusCode" in err
+				? Number((err as { statusCode?: unknown }).statusCode) || 400
+				: 400;
+			json(res, statusCode, { error: err instanceof Error ? err.message : String(err) });
 			return true;
 		}
 

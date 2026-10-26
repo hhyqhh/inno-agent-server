@@ -57,6 +57,19 @@ describe("personal tenant store", () => {
 		expect(await store.ownsResource(b, "session", "session-a")).toBe(true);
 	});
 
+	it("resolves external channel identities only through persisted ownership", async () => {
+		const a = await store.ensurePersonalTenant("user-a");
+		const b = await store.ensurePersonalTenant("user-b");
+		await store.claimResource(a, "channel", "bridge:test-token-hash");
+		expect(await store.findResourceOwner("channel", "bridge:test-token-hash")).toEqual(a);
+		expect(await store.findResourceOwner("channel", "bridge:missing")).toBeNull();
+		await expect(store.claimResource(b, "channel", "bridge:test-token-hash")).rejects.toBeInstanceOf(ResourceOwnershipError);
+		await store.releaseResource(a, "channel", "bridge:test-token-hash");
+		expect(await store.findResourceOwner("channel", "bridge:test-token-hash")).toBeNull();
+		await store.claimResource(b, "channel", "bridge:test-token-hash");
+		expect(await store.findResourceOwner("channel", "bridge:test-token-hash")).toEqual(b);
+	});
+
 	it("supports non-writing dry runs, idempotent backfill and ownership conflicts", async () => {
 		const resources = { sessions: ["legacy-session"], workspaces: ["legacy-workspace"] };
 		const dry = await store.migrateLegacyResources("user-c", resources, true);

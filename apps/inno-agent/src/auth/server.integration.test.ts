@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
@@ -22,6 +23,10 @@ let output = "";
 let providerServer: HttpServer;
 let providerOrigin = "";
 const providerRequests: Array<{ authorization: string; body: string }> = [];
+const sidecarServers: HttpServer[] = [];
+const sidecarRequests: Array<{ sidecar: string; method: string; path: string; authorization: string; body: string }> = [];
+let sidecarOriginA = "";
+let sidecarOriginB = "";
 
 async function freePort(): Promise<number> {
 	const listener = createServer();
@@ -57,6 +62,36 @@ async function api(cookie: string, path: string, init: RequestInit = {}): Promis
 	});
 }
 
+async function waitFor(condition: () => boolean, description: string): Promise<void> {
+	const deadline = Date.now() + 10_000;
+	while (!condition()) {
+		if (Date.now() > deadline) throw new Error(`Timed out waiting for ${description}: ${output.slice(-8_000)}`);
+		await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+	}
+}
+
+async function startSidecar(sidecar: string): Promise<string> {
+	const server = createHttpServer((req, res) => {
+		let body = "";
+		req.setEncoding("utf-8");
+		req.on("data", (chunk) => { body += chunk; });
+		req.on("end", () => {
+			sidecarRequests.push({
+				sidecar,
+				method: req.method ?? "",
+				path: req.url ?? "",
+				authorization: req.headers.authorization ?? "",
+				body,
+			});
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end("{}");
+		});
+	});
+	sidecarServers.push(server);
+	await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+	return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
 beforeAll(async () => {
 	postgres = await startTemporaryPostgres();
 	home = await mkdtemp(join(tmpdir(), "inno-server-auth-"));
@@ -86,6 +121,7 @@ beforeAll(async () => {
 	});
 	await new Promise<void>((resolveListen) => providerServer.listen(0, "127.0.0.1", resolveListen));
 	providerOrigin = `http://127.0.0.1:${(providerServer.address() as AddressInfo).port}`;
+	[sidecarOriginA, sidecarOriginB] = await Promise.all([startSidecar("a"), startSidecar("b")]);
 	const port = await freePort();
 	origin = `http://127.0.0.1:${port}`;
 	await mkdir(join(home, "config"), { recursive: true });
@@ -147,6 +183,10 @@ afterAll(async () => {
 		providerServer.closeAllConnections();
 		await new Promise<void>((resolveClose) => providerServer.close(() => resolveClose()));
 	}
+	for (const server of sidecarServers) {
+		server.closeAllConnections();
+		await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+	}
 	await postgres?.close();
 	if (home) await rm(home, { recursive: true, force: true });
 });
@@ -166,9 +206,9 @@ describe("server authentication boundary", () => {
 		const cookie = registered.headers.get("set-cookie")?.split(";", 1)[0]!;
 		expect(cookie).toContain("session_token");
 		expect((await fetch(`${origin}/api/sessions`, { headers: { Cookie: cookie } })).status).toBe(200);
-		// Bridge has its own bearer-token check; it must not become a cookie-auth
-		// route or a blanket channel bypass.
-		expect((await fetch(`${origin}/api/bridge/messages`, { method: "POST" })).status).toBe(404);
+		// Bridge has its own bearer-token/tenant-ownership check; it must not
+		// become a cookie-auth route or fall back to the legacy global channel.
+		expect((await fetch(`${origin}/api/bridge/messages`, { method: "POST" })).status).toBe(401);
 
 		const terminalSessionResponse = await api(cookie, "/api/sessions", {
 			method: "POST", body: JSON.stringify({ newWorkspace: { isTemp: true } }),
@@ -540,7 +580,6 @@ describe("settings and model credential isolation", () => {
 
 		for (const [path, body] of [
 			["/api/settings/permissions", { mode: "yolo" }],
-			["/api/settings/channels", { channels: { feishu: { enabled: true } } }],
 			["/api/settings/mcp", { enabled: true }],
 			["/api/settings/computer-use", { enabled: true }],
 			["/api/settings/codemode", { enabled: true }],
@@ -558,6 +597,153 @@ describe("settings and model credential isolation", () => {
 		await configureProvider(cookieB, "tenant-b-secondary", "extra", "extra-model");
 		expect((await api(cookieB, "/api/settings/providers/shared", { method: "DELETE" })).status).toBe(200);
 		expect((await (await api(cookieA, "/api/settings")).json() as { defaultModel: string }).defaultModel).toBe("tenant-model");
+		expect(await readFile(join(home, "config", "config.json"), "utf-8")).toBe(globalConfigBefore);
+	}, 90_000);
+});
+
+describe("channel runtime isolation", () => {
+	it("isolates bridge identities, inbound delivery, workspaces and manual job pushes", async () => {
+		const [cookieA, cookieB] = await Promise.all([
+			registerUser("channels-a@example.com"),
+			registerUser("channels-b@example.com"),
+		]);
+		const globalConfigBefore = await readFile(join(home, "config", "config.json"), "utf-8");
+		const configureProvider = async (cookie: string, apiKey: string) => {
+			const response = await api(cookie, "/api/settings/providers", {
+				method: "PUT",
+				body: JSON.stringify({
+					providerId: "shared",
+					baseUrl: providerOrigin,
+					apiKey,
+					api: "openai-completions",
+					makeDefault: true,
+					models: [{ id: "tenant-model", name: "Tenant stub" }],
+				}),
+			});
+			expect(response.status).toBe(200);
+		};
+		await Promise.all([
+			configureProvider(cookieA, "channel-a-secret"),
+			configureProvider(cookieB, "channel-b-secret"),
+		]);
+		const configureChannels = (cookie: string, token: string, sidecarBaseUrl: string) => api(cookie, "/api/settings/channels", {
+			method: "PUT",
+			body: JSON.stringify({
+				bridge: { token },
+				channels: { qq: { enabled: true, mode: "bridge", sidecarBaseUrl } },
+			}),
+		});
+
+		expect((await configureChannels(cookieA, "channel-token-a", sidecarOriginA)).status).toBe(200);
+		expect((await configureChannels(cookieB, "channel-token-a", sidecarOriginB)).status).toBe(404);
+		expect(await (await api(cookieB, "/api/settings")).json() as { bridge?: unknown }).not.toHaveProperty("bridge");
+		expect((await configureChannels(cookieB, "channel-token-b", sidecarOriginB)).status).toBe(200);
+		for (const cookie of [cookieA, cookieB]) {
+			const channels = await (await api(cookie, "/api/channels")).json() as Array<{ name: string; mode: string }>;
+			expect(channels).toEqual([{ name: "qq", mode: "bridge", enabled: true, hasDefaultTarget: false }]);
+		}
+		expect((await api(cookieA, "/api/channels/qq/default-target", {
+			method: "POST", body: JSON.stringify({ chatId: "chat-a" }),
+		})).status).toBe(200);
+		expect((await api(cookieB, "/api/channels/qq/default-target", {
+			method: "POST", body: JSON.stringify({ chatId: "chat-b" }),
+		})).status).toBe(200);
+		expect((await api(cookieA, "/api/channels/qq/test", {
+			method: "POST", body: JSON.stringify({ text: "push-only-a" }),
+		})).status).toBe(200);
+		await waitFor(() => sidecarRequests.some((request) => request.path === "/push" && request.body.includes("push-only-a")), "tenant A test push");
+		const pushA = sidecarRequests.find((request) => request.path === "/push" && request.body.includes("push-only-a"));
+		expect(pushA).toMatchObject({ sidecar: "a", authorization: "Bearer channel-token-a" });
+		expect(pushA?.body).toContain("chat-a");
+		expect(sidecarRequests.some((request) => request.sidecar === "b" && request.body.includes("push-only-a"))).toBe(false);
+
+		const bridgeMessage = (token: string, body: Record<string, unknown>) => fetch(`${origin}/api/bridge/messages`, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		});
+		const providerCountBeforeRejected = providerRequests.length;
+		expect((await bridgeMessage("channel-token-a", {
+			channel: "qq", messageId: "missing-chat", text: "must-not-run",
+		})).status).toBe(400);
+		expect((await bridgeMessage("wrong-token", {
+			channel: "qq", messageId: "wrong-token", chatId: "chat-a", text: "must-not-run",
+		})).status).toBe(401);
+		expect(providerRequests).toHaveLength(providerCountBeforeRejected);
+
+		const inboundResponses = await Promise.all([
+			bridgeMessage("channel-token-a", {
+				channel: "qq", messageId: "inbound-a", chatId: "chat-a", text: "channel-a-inbound",
+			}),
+			bridgeMessage("channel-token-b", {
+				channel: "qq", messageId: "inbound-b", chatId: "chat-b", text: "channel-b-inbound",
+			}),
+		]);
+		expect(inboundResponses.map((response) => response.status)).toEqual([200, 200]);
+		await waitFor(() => ["channel-a-inbound", "channel-b-inbound"].every((prompt) =>
+			providerRequests.some((request) => request.body.includes(prompt)),
+		), "tenant inbound model prompts");
+		await waitFor(() => ["inbound-a", "inbound-b"].every((messageId) =>
+			sidecarRequests.some((request) => request.path === "/reply" && request.body.includes(messageId)),
+		), "tenant bridge replies");
+		expect(providerRequests.find((request) => request.body.includes("channel-a-inbound"))?.authorization).toBe("Bearer channel-a-secret");
+		expect(providerRequests.find((request) => request.body.includes("channel-b-inbound"))?.authorization).toBe("Bearer channel-b-secret");
+		const replyA = sidecarRequests.find((request) => request.path === "/reply" && request.body.includes("inbound-a"));
+		const replyB = sidecarRequests.find((request) => request.path === "/reply" && request.body.includes("inbound-b"));
+		expect(replyA).toMatchObject({ sidecar: "a", authorization: "Bearer channel-token-a" });
+		expect(replyB).toMatchObject({ sidecar: "b", authorization: "Bearer channel-token-b" });
+		expect(replyA?.body).toContain("chat-a");
+		expect(replyB?.body).toContain("chat-b");
+		const runsA = await (await api(cookieA, "/api/channels/runs")).json() as Array<{ messageId: string; status: string }>;
+		const runsB = await (await api(cookieB, "/api/channels/runs")).json() as Array<{ messageId: string; status: string }>;
+		expect(runsA.map((run) => run.messageId)).toEqual(["inbound-a"]);
+		expect(runsB.map((run) => run.messageId)).toEqual(["inbound-b"]);
+
+		const pool = new Pool({ connectionString: postgres.databaseUrl });
+		const tenantRows = await pool.query<{ id: string; email: string }>(
+			`SELECT tenant.id, account.email FROM tenants tenant JOIN "user" account ON account.id = tenant.owner_user_id
+			 WHERE account.email IN ('channels-a@example.com', 'channels-b@example.com')`,
+		);
+		await pool.end();
+		const tenantA = tenantRows.rows.find((row) => row.email === "channels-a@example.com")!.id;
+		const tenantB = tenantRows.rows.find((row) => row.email === "channels-b@example.com")!.id;
+		const chatMapA = await readFile(join(home, "data", "tenants", tenantA, "channels", "chat-sessions.json"), "utf-8");
+		const chatMapB = await readFile(join(home, "data", "tenants", tenantB, "channels", "chat-sessions.json"), "utf-8");
+		expect(chatMapA).toContain("qq:chat-a");
+		expect(chatMapA).not.toContain("chat-b");
+		expect(chatMapB).toContain("qq:chat-b");
+		expect(chatMapB).not.toContain("chat-a");
+		expect(existsSync(join(home, "data", "channels", "chat-sessions.json"))).toBe(false);
+		const workspacesA = await (await api(cookieA, "/api/workspaces")).json() as Array<{ id: string }>;
+		const workspacesB = await (await api(cookieB, "/api/workspaces")).json() as Array<{ id: string }>;
+		expect(workspacesA.map((workspace) => workspace.id)).toContain(`channel-qq-${tenantA}`);
+		expect(workspacesA.map((workspace) => workspace.id)).not.toContain(`channel-qq-${tenantB}`);
+		expect(workspacesB.map((workspace) => workspace.id)).toContain(`channel-qq-${tenantB}`);
+
+		const sessionResponse = await api(cookieA, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ newWorkspace: { isTemp: true } }),
+		});
+		expect(sessionResponse.status).toBe(201);
+		const ownedSession = await sessionResponse.json() as { id: string };
+		const jobResponse = await api(cookieA, "/api/jobs", {
+			method: "POST",
+			body: JSON.stringify({
+				name: "channel job A", cron: "0 9 * * *", timezone: "UTC", enabled: true,
+				taskType: "custom_prompt", prompt: "channel-job-a", channel: "qq",
+				target: { channel: "qq", chatId: "chat-a" },
+			}),
+		});
+		expect(jobResponse.status).toBe(201);
+		const job = await jobResponse.json() as { id: string };
+		expect((await api(cookieB, `/api/jobs/${job.id}`)).status).toBe(404);
+		const runResponse = await api(cookieA, `/api/jobs/${job.id}/run`, {
+			method: "POST", body: JSON.stringify({ sessionId: ownedSession.id }),
+		});
+		expect(runResponse.status).toBe(200);
+		expect(await runResponse.json()).toMatchObject({ success: true, pushedToChannel: "qq" });
+		await waitFor(() => sidecarRequests.some((request) => request.path === "/push" && request.body.includes("tenant stub response") && request.body.includes("chat-a")), "manual tenant job push");
+		expect(providerRequests.find((request) => request.body.includes("channel-job-a"))?.authorization).toBe("Bearer channel-a-secret");
+		expect(sidecarRequests.some((request) => request.sidecar === "b" && request.body.includes("channel-job-a"))).toBe(false);
 		expect(await readFile(join(home, "config", "config.json"), "utf-8")).toBe(globalConfigBefore);
 	}, 90_000);
 });

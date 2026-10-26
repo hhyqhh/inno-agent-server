@@ -6,7 +6,7 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import { DedupeStore } from "./dedupe-store.js";
 import { ChannelRunLog, generateRunId } from "./run-log.js";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { logger } from "../logger.js";
 
 const NEW_SESSION_COMMANDS = new Set(["/new", "新建对话", "新建会话"]);
@@ -34,7 +34,11 @@ export interface PersonalChannelDispatcherOptions {
 	/** Fire-and-forget: auto-generate a topic for a session if it lacks one. */
 	maybeAutoGenerateTopic?: (sessionId: string) => void;
 	/** Called after a new session is created for a channel chat. */
-	onSessionCreated?: (sessionId: string, channel: string) => void;
+	onSessionCreated?: (sessionId: string, channel: string) => Promise<void> | void;
+	/** Recheck session ownership before reusing a persisted channel binding. */
+	authorizeSession?: (sessionId: string) => Promise<boolean>;
+	/** Authenticated dispatchers must always execute in an owned explicit session. */
+	allowGlobalSessionFallback?: boolean;
 	channelsDataDir: string;
 	sessionDir: string;
 }
@@ -48,6 +52,7 @@ export class PersonalChannelDispatcher {
 	private opts: PersonalChannelDispatcherOptions;
 	private chatSessionMap: ChatSessionMap;
 	private chatSessionMapPath: string;
+	private cleanupTimer: NodeJS.Timeout;
 
 	constructor(opts: PersonalChannelDispatcherOptions) {
 		this.opts = opts;
@@ -56,7 +61,8 @@ export class PersonalChannelDispatcher {
 		this.chatSessionMapPath = join(opts.channelsDataDir, "chat-sessions.json");
 		this.chatSessionMap = this.loadChatSessionMap();
 
-		setInterval(() => this.dedupeStore.cleanup(), 60 * 60 * 1000);
+		this.cleanupTimer = setInterval(() => this.dedupeStore.cleanup(), 60 * 60 * 1000);
+		this.cleanupTimer.unref();
 	}
 
 	async handle(channel: ChatChannel, msg: IncomingMessage): Promise<void> {
@@ -79,7 +85,7 @@ export class PersonalChannelDispatcher {
 		if (NEW_SESSION_COMMANDS.has(rawText)) {
 			try {
 				const newSessionId = await this.opts.createNewSession();
-				this.opts.onSessionCreated?.(newSessionId, msg.channel);
+				await this.opts.onSessionCreated?.(newSessionId, msg.channel);
 				this.opts.recordSessionChannel(msg.channel, newSessionId);
 				// Bind this chatId to the new session
 				if (chatKey) {
@@ -123,14 +129,14 @@ export class PersonalChannelDispatcher {
 		}
 
 		// Resolve target session for this chat (if any).
-		let targetSessionPath = this.resolveSessionPath(chatKey);
+		let targetSessionPath = await this.resolveSessionPath(chatKey);
 
 		// If this chatKey has no session binding yet, create a dedicated session
 		// so channel messages never piggy-back on the current web/global session.
 		if (!targetSessionPath && chatKey) {
 			try {
 				const newSessionId = await this.opts.createNewSession();
-				this.opts.onSessionCreated?.(newSessionId, msg.channel);
+				await this.opts.onSessionCreated?.(newSessionId, msg.channel);
 				this.chatSessionMap[chatKey] = newSessionId;
 				this.saveChatSessionMap();
 				this.opts.recordSessionChannel(msg.channel, newSessionId);
@@ -171,13 +177,18 @@ export class PersonalChannelDispatcher {
 					}
 				}
 			} else {
+				if (!targetSessionPath && this.opts.allowGlobalSessionFallback === false) {
+					throw new Error("Channel message has no owned session binding");
+				}
 				output = targetSessionPath
 					? await this.opts.runPromptInSession(targetSessionPath, prompt, images.length > 0 ? images : undefined)
 					: await this.opts.runPrompt(prompt, images.length > 0 ? images : undefined);
 				await this.safeReply(channel, msg, output);
 			}
 
-			const sessionId = this.opts.getCurrentSessionId();
+			// The shared PI session can switch to another tenant as soon as the
+			// queue releases. Attribute this run to the path we actually executed.
+			const sessionId = targetSessionPath ? basename(targetSessionPath) : this.opts.getCurrentSessionId();
 			this.opts.recordSessionChannel(msg.channel, sessionId);
 			this.opts.maybeAutoGenerateTopic?.(sessionId);
 
@@ -212,6 +223,10 @@ export class PersonalChannelDispatcher {
 		return this.runLog;
 	}
 
+	dispose(): void {
+		clearInterval(this.cleanupTimer);
+	}
+
 	/** Build a stable key for a channel + chatId combo. */
 	private chatKey(msg: IncomingMessage): string | null {
 		if (!msg.chatId) return null;
@@ -222,10 +237,17 @@ export class PersonalChannelDispatcher {
 	 * Resolve the session file path for the given chatKey.
 	 * Returns null if no binding exists or the file is gone.
 	 */
-	private resolveSessionPath(chatKey: string | null): string | null {
+	private async resolveSessionPath(chatKey: string | null): Promise<string | null> {
 		if (!chatKey) return null;
 		const targetSessionId = this.chatSessionMap[chatKey];
 		if (!targetSessionId) return null;
+		if (basename(targetSessionId) !== targetSessionId
+			|| (this.opts.authorizeSession && !(await this.opts.authorizeSession(targetSessionId)))) {
+			logger.warn({ chatKey, targetSessionId }, "dispatcher discarded an unauthorized session binding");
+			delete this.chatSessionMap[chatKey];
+			this.saveChatSessionMap();
+			return null;
+		}
 		const sessionPath = resolve(join(this.opts.sessionDir, targetSessionId));
 		if (!existsSync(sessionPath)) {
 			// Session was deleted — remove stale mapping
