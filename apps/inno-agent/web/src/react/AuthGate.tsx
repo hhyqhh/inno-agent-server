@@ -7,6 +7,7 @@ import {
 	UNAUTHORIZED_EVENT,
 	type AuthSessionResponse,
 } from "../api/auth.js";
+import { terminalStore } from "../stores/terminal-store.js";
 
 export function AuthGate({ children }: { children: ReactNode }) {
 	const { t } = useTranslation();
@@ -45,7 +46,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
 		);
 	}
 	if (!session) return <main className="h-full bg-[var(--inno-chat-bg)]" aria-label={t("auth.loading")} />;
-	if (session.mode === "local" || session.user) return children;
+	if (session.mode === "local" || session.user) {
+		terminalStore.setHostTerminalDisabled(session.mode === "better-auth");
+		return children;
+	}
 
 	const submit = async (event: FormEvent) => {
 		event.preventDefault();

@@ -13,6 +13,7 @@ import type { TenantStore } from "../../tenants/store.js";
 import { claimRequestResource, ownsRequestResource, releaseRequestResource } from "../../tenants/http.js";
 import { resolveRequestWorkspace } from "../../tenants/workspaces.js";
 import { resolveTenantDataDir } from "../../tenants/paths.js";
+import { HOST_TERMINAL_DISABLED_ERROR } from "../../agent/host-execution-policy.js";
 
 /**
  * Practice-lab dependencies owned by server.ts. `terminalManager` and
@@ -25,6 +26,7 @@ export interface PracticeRouteContext {
 	terminalManager: TerminalSessionManager;
 	runRecordStore: RunRecordStore;
 	tenantStore: TenantStore | null;
+	hostTerminalDisabled?: boolean;
 }
 
 /**
@@ -48,6 +50,10 @@ export async function handlePracticeRoutes(
 
 	// --- Terminal sessions ---
 	if (method === "POST" && url === "/api/terminal/sessions") {
+		if (ctx.hostTerminalDisabled) {
+			json(res, 409, { error: HOST_TERMINAL_DISABLED_ERROR });
+			return true;
+		}
 		const body = (await readBody(req)) as Record<string, unknown>;
 		const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
 		if (!sessionId) { json(res, 400, { error: "Missing sessionId" }); return true; }

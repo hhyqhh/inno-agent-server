@@ -334,8 +334,9 @@ export function EnhancedCodeRenderer({ code, language, isIncomplete }: CustomRen
 	const [fullscreen, setFullscreen] = useState(false);
 	const [moreOpen, setMoreOpen] = useState(false);
 	const [copied, setCopied] = useState(false);
-	// "Run code" feeds the practice terminal.
-	const canRun = /^(?:python|py)$/i.test(language) && !isIncomplete && !editing;
+	// "Run code" feeds the practice terminal when host execution is available.
+	const hostTerminalDisabled = useStoreSnapshot(terminalStore, () => terminalStore.hostTerminalDisabled);
+	const canRun = /^(?:python|py)$/i.test(language) && !isIncomplete && !editing && !hostTerminalDisabled;
 	const source = editedSource ?? code;
 	const expandable = codeOverflowing;
 

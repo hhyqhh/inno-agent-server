@@ -40,14 +40,13 @@ compose application retains the explicit insecure local-mode override because
 its port is published; use Better Auth for non-local deployments.
 
 > **Isolation boundary:** account authentication and the current tenant/ownership
-> slices do not yet make all application data tenant-safe. Host shell/file tools
-> and PTY terminals still inherit the server process's filesystem permissions,
-> and file-backed runtimes are not cross-process active-active.
-> `INNO_MULTI_USER_ENABLED=true` deliberately fails at startup until resource
-> ownership and cross-tenant isolation are implemented. Do not treat this stage
-> as a safe multi-user production deployment. Public registration additionally
-> requires rate limiting, email verification, and account recovery before an
-> internet-facing launch.
+> slices do not yet constitute production multi-user approval. Better Auth mode
+> disables PI host shell/file tools and PTY terminals, and confines retained
+> custom path tools to the owned session workspace. File-backed runtimes are not
+> cross-process active-active. `INNO_MULTI_USER_ENABLED=true` deliberately fails
+> at startup until the remaining isolation review is complete. Public registration
+> additionally requires rate limiting, email verification, and account recovery
+> before an internet-facing launch.
 
 ## File-backed deployment boundary
 
@@ -65,8 +64,8 @@ queues, SSE buffers, or deferred countdowns shareable between processes.
 - The job lease prevents concurrent occurrence claims and permits takeover
   after expiry. It is not a general storage lock, a durable deferred queue, or
   an exactly-once boundary around model calls and channel delivery.
-- Multiple accounts may share the process only after host execution is
-  tenant-confined and `INNO_MULTI_USER_ENABLED` is explicitly made available.
+- Multiple accounts may share the process only after the remaining isolation
+  review is complete and `INNO_MULTI_USER_ENABLED` is explicitly made available.
   Better Auth alone is not production multi-user approval.
 
 ## Personal tenant foundation (stage 2A)
@@ -286,16 +285,35 @@ session/turn, stream replay requires session ownership, and the bundled todo
 tool partitions live state by PI session id. Process-global read-only skill and
 preset catalogs are shared deliberately.
 
-A separate production blocker remains outside the in-memory singleton audit:
-PI file/shell tools and node-pty terminals execute with the host process's
-filesystem permissions. Workspace ownership checks do not stop a shell or an
-unconfined path-capable tool from reaching another tenant's files. Before the
-multi-user gate can open, authenticated multi-user execution needs enforced
-OS-level tenant confinement or must disable those host capabilities; approval
-cards alone are not a filesystem boundary. Public sign-up also still requires
-rate limiting, verification, and recovery for an internet-facing launch.
-`INNO_MULTI_USER_ENABLED` therefore remains unavailable, and the single-process
-file-backed deployment boundary above still applies.
+Stage 2K adds the restricted host-execution boundary. Public sign-up still
+requires rate limiting, verification, and recovery for an internet-facing launch.
+`INNO_MULTI_USER_ENABLED` remains unavailable, and the single-process file-backed
+deployment boundary above still applies.
+
+## Restricted host execution (stage 2K)
+
+Better Auth mode no longer exposes the server process's shell and general host
+filesystem to agent turns. Every authenticated turn removes PI's `bash`, `read`,
+`write`, `edit`, `grep`, `find`, and `ls` tools from the active tool list, with a
+second dispatch-time deny guard for stale calls. Terminal creation returns 409
+before spawning node-pty, and terminal WebSocket upgrades return 409 after cookie
+authentication; anonymous upgrades still return 401 and untrusted origins 403.
+The frontend hides the Practice Lab drawer, terminal toggle, file Run buttons,
+and code-block run actions, and its terminal store refuses direct connect/run
+calls while this capability is disabled.
+
+Retained custom tools use canonical workspace checks in authenticated mode.
+`parse_document`, file-based `l2_archive`, local-file `ocr_image`, and
+`create_practice_lab` reject parent traversal, outside absolute paths, and
+existing symlink escapes before parsing, uploading, or writing content. HTTP(S)
+OCR URLs remain a separate remote-input path. Owned workspace file APIs and
+workspace-private skills remain available. Local server, CLI, and Desktop keep
+their existing host tools, PTY terminal, and path behavior.
+
+This is a deliberate capability reduction, not an OS-level tenant sandbox or a
+claim that arbitrary host execution is confined. `INNO_MULTI_USER_ENABLED`
+remains unavailable pending the final isolation review; public registration and
+single-process deployment requirements are unchanged.
 
 ## Tests
 

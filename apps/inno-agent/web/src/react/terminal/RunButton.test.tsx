@@ -2,8 +2,12 @@
 import { cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { RunButton } from "./RunButton.js";
+import { terminalStore } from "../../stores/terminal-store.js";
 
-afterEach(cleanup);
+afterEach(() => {
+	cleanup();
+	terminalStore.setHostTerminalDisabled(false);
+});
 
 describe("RunButton", () => {
 	it("offers to run runnable files", () => {
@@ -13,6 +17,12 @@ describe("RunButton", () => {
 
 	it("renders nothing for files without a run command", () => {
 		const { container } = render(<RunButton filePath="notes.md" />);
+		expect(container.querySelector("button")).toBeNull();
+	});
+
+	it("hides the action when authenticated host execution is disabled", () => {
+		terminalStore.setHostTerminalDisabled(true);
+		const { container } = render(<RunButton filePath="demo.py" />);
 		expect(container.querySelector("button")).toBeNull();
 	});
 });

@@ -27,6 +27,7 @@ import { parseDocument, DocumentParseError } from "./document-parser.js";
 import { getL2Memory, type L2Memory } from "./l2-memory.js";
 import { formatL2LintReport, runL2Lint } from "./l2-lint.js";
 import { logger } from "../../logger.js";
+import { checkWorkspaceMutationPath } from "../../agent/workspace-path-guard.js";
 
 // PI may dispatch several archive tool calls from one turn concurrently.
 const archiveQueueTails = new Map<string, Promise<void>>();
@@ -70,6 +71,7 @@ export function createL2Tools(
 	isEnabled?: () => boolean,
 	l2Memory?: L2Memory | ((dataDir: string) => L2Memory),
 	getActiveWorkspaceDir?: () => string,
+	restrictToWorkspace = false,
 ): ToolDefinition[] {
 	const resolveDataDir = () => typeof l2DataDirInput === "function" ? l2DataDirInput() : l2DataDirInput;
 	const resolveMemory = (dataDir: string) => typeof l2Memory === "function"
@@ -138,9 +140,19 @@ export function createL2Tools(
 			if (isFileType && params.filePath) {
 				// File-based: parse with LiteParse
 				const workspaceDir = getActiveWorkspaceDir?.() || process.env.INNO_WORKSPACE_DIR || process.cwd();
-				resolvedFilePath = isAbsolute(params.filePath)
-					? params.filePath
-					: resolve(workspaceDir, params.filePath);
+				const pathCheck = restrictToWorkspace
+					? checkWorkspaceMutationPath(workspaceDir, params.filePath)
+					: {
+						allowed: true,
+						resolvedPath: isAbsolute(params.filePath) ? params.filePath : resolve(workspaceDir, params.filePath),
+					};
+				if (!pathCheck.allowed || !pathCheck.resolvedPath) {
+					return {
+						content: [{ type: "text" as const, text: "归档文件必须位于当前工作区内，且不能通过符号链接指向工作区外。" }],
+						details: { error: pathCheck.reason ?? "outside_workspace" },
+					};
+				}
+				resolvedFilePath = pathCheck.resolvedPath;
 
 				let parsed;
 				try {

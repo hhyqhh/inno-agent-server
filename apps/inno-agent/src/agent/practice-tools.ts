@@ -3,10 +3,12 @@ import { Type } from "typebox";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import type { WorkspaceRegistry } from "../workspace/workspace-registry.js";
+import { checkWorkspaceMutationPath } from "./workspace-path-guard.js";
 
 interface PracticeToolDeps {
 	registry: WorkspaceRegistry;
 	getCurrentSessionId(): string;
+	restrictToWorkspace?: boolean;
 }
 
 const FileSchema = Type.Object({
@@ -61,12 +63,22 @@ export function createPracticeTools(deps: PracticeToolDeps): ToolDefinition[] {
 			const errors: string[] = [];
 
 			for (const file of typed.files) {
-				const rel = file.path.replace(/^\/+/, "");
-				const abs = resolve(workspaceRoot, rel);
-				const within = relative(resolve(workspaceRoot), abs);
-				if (within.startsWith("..")) {
-					errors.push(`Path escapes workspace: ${file.path}`);
-					continue;
+				let rel = file.path.replace(/^\/+/, "");
+				let abs = resolve(workspaceRoot, rel);
+				if (deps.restrictToWorkspace) {
+					const check = checkWorkspaceMutationPath(workspaceRoot, file.path);
+					if (!check.allowed || !check.resolvedPath) {
+						errors.push(`Path escapes workspace: ${file.path}`);
+						continue;
+					}
+					abs = check.resolvedPath;
+					rel = relative(workspaceRoot, abs);
+				} else {
+					const within = relative(resolve(workspaceRoot), abs);
+					if (within.startsWith("..")) {
+						errors.push(`Path escapes workspace: ${file.path}`);
+						continue;
+					}
 				}
 				try {
 					mkdirSync(dirname(abs), { recursive: true });

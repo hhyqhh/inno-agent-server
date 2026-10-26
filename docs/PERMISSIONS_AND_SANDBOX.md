@@ -12,6 +12,17 @@ Inno Agent 有两道相互独立的防线控制 agent 的工具执行。**权限
 
 关键性质:**permission 放行 ≠ sandbox 放行**。审批卡片通过后,命令仍会被沙箱按 `allowRead/allowWrite/allowedDomains` 约束;反过来 sandbox 不管"要不要问",只管"能不能做"。
 
+## Better Auth 模式的宿主机能力边界
+
+认证多用户切片采用更严格的 fail-closed 能力策略,而不是把审批卡片当作文件系统边界:
+
+- 每个 agent turn 移除 PI 的 `bash/read/write/edit/grep/find/ls`,并在工具分发时再次拒绝这些宿主机工具。
+- 宿主机 PTY 的 REST 创建和 WebSocket 升级均返回 409;前端隐藏 Practice Lab、终端开关以及文件/代码块 Run 入口。
+- 保留的 `parse_document`、文件型 `l2_archive`、本地文件 `ocr_image` 和 `create_practice_lab` 使用 realpath 与已存在祖先目录检查,拒绝绝对路径越界、`..` 越界和符号链接逃逸。
+- local server、CLI、Desktop 保持原有工具、终端和路径行为。
+
+这是**禁用宿主机能力**,不是已经实现可按租户执行任意 shell 的 OS 沙箱。pi-sandbox 仍可按原有方式用于本地模式;它不会自动覆盖 node-pty,也不会替代上述自定义工具的路径检查。
+
 ## 权限层
 
 ### 三档模式

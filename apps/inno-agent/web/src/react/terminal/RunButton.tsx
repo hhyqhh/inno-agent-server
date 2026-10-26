@@ -1,6 +1,7 @@
 import { Play } from "lucide-react";
 import { useCallback } from "react";
 import { terminalStore } from "../../stores/terminal-store.js";
+import { useStoreSnapshot } from "../hooks.js";
 
 function defaultCommand(relPath: string): string | null {
 	const lower = relPath.toLowerCase();
@@ -18,6 +19,7 @@ interface RunButtonProps {
 }
 
 export function RunButton({ filePath, className }: RunButtonProps) {
+	const hostTerminalDisabled = useStoreSnapshot(terminalStore, () => terminalStore.hostTerminalDisabled);
 	const command = defaultCommand(filePath);
 	const handleClick = useCallback(() => {
 		if (!command) return;
@@ -25,7 +27,7 @@ export function RunButton({ filePath, className }: RunButtonProps) {
 		terminalStore.runCommand(command, filePath);
 	}, [command, filePath]);
 
-	if (!command) return null;
+	if (!command || hostTerminalDisabled) return null;
 
 	return (
 		<button

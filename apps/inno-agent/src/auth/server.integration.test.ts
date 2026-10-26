@@ -220,9 +220,8 @@ describe("server authentication boundary", () => {
 			headers: { "Content-Type": "application/json", Cookie: cookie, Origin: origin },
 			body: JSON.stringify({ sessionId: terminalSession.id }),
 		});
-		expect(terminal.status).toBe(201);
-		const terminalBody = await terminal.json() as { id: string };
-		const wsPath = `/api/terminal/sessions/${terminalBody.id}/ws`;
+		expect(terminal.status).toBe(409);
+		const wsPath = "/api/terminal/sessions/host-terminal-disabled/ws";
 
 		const anonymousStatus = await new Promise<number>((resolveStatus, reject) => {
 			const ws = new WebSocket(`${origin.replace("http", "ws")}${wsPath}`, { headers: { Origin: origin } });
@@ -232,18 +231,15 @@ describe("server authentication boundary", () => {
 		});
 		expect(anonymousStatus).toBe(401);
 
-		const ready = await new Promise<Record<string, unknown>>((resolveReady, reject) => {
+		const authenticatedStatus = await new Promise<number>((resolveStatus, reject) => {
 			const ws = new WebSocket(`${origin.replace("http", "ws")}${wsPath}`, {
 				headers: { Cookie: cookie, Origin: origin },
 			});
-			ws.once("message", (data) => {
-				const event = JSON.parse(data.toString()) as Record<string, unknown>;
-				ws.close();
-				resolveReady(event);
-			});
-			ws.once("error", reject);
+			ws.once("unexpected-response", (_req, res) => resolveStatus(res.statusCode!));
+			ws.once("open", () => { ws.terminate(); reject(new Error("Authenticated host WebSocket connected")); });
+			ws.once("error", () => {});
 		});
-		expect(ready.type).toBe("ready");
+		expect(authenticatedStatus).toBe(409);
 
 		const crossOriginStatus = await new Promise<number>((resolveStatus) => {
 			const ws = new WebSocket(`${origin.replace("http", "ws")}${wsPath}`, {
@@ -319,23 +315,20 @@ describe("session and workspace tenant isolation", () => {
 		const terminalResponse = await api(cookieA, "/api/terminal/sessions", {
 			method: "POST", body: JSON.stringify({ sessionId: sessionA.id }),
 		});
-		expect(terminalResponse.status).toBe(201);
-		const terminalA = await terminalResponse.json() as { id: string };
+		expect(terminalResponse.status).toBe(409);
 		expect((await api(cookieB, "/api/terminal/sessions", {
 			method: "POST", body: JSON.stringify({ sessionId: sessionA.id }),
-		})).status).toBe(404);
-		expect((await api(cookieB, `/api/terminal/sessions/${terminalA.id}/close`, { method: "POST" })).status).toBe(404);
+		})).status).toBe(409);
 		expect((await api(cookieB, `/api/runs?sessionId=${sessionA.id}`)).status).toBe(404);
-		const crossTenantWsStatus = await new Promise<number>((resolveStatus, reject) => {
-			const ws = new WebSocket(`${origin.replace("http", "ws")}/api/terminal/sessions/${terminalA.id}/ws`, {
+		const authenticatedWsStatus = await new Promise<number>((resolveStatus, reject) => {
+			const ws = new WebSocket(`${origin.replace("http", "ws")}/api/terminal/sessions/host-terminal-disabled/ws`, {
 				headers: { Cookie: cookieB, Origin: origin },
 			});
 			ws.once("unexpected-response", (_req, res) => resolveStatus(res.statusCode!));
-			ws.once("open", () => { ws.terminate(); reject(new Error("Cross-tenant WebSocket connected")); });
+			ws.once("open", () => { ws.terminate(); reject(new Error("Authenticated host WebSocket connected")); });
 			ws.once("error", () => {});
 		});
-		expect(crossTenantWsStatus).toBe(404);
-		expect((await api(cookieA, `/api/terminal/sessions/${terminalA.id}/close`, { method: "POST" })).status).toBe(200);
+		expect(authenticatedWsStatus).toBe(409);
 		expect((await api(cookieB, `/api/workspace/file?workspaceId=${workspaceA.id}&path=private.txt`)).status).toBe(404);
 		expect((await api(cookieB, "/api/workspace/file", {
 			method: "PUT", body: JSON.stringify({ workspaceId: workspaceA.id, path: "private.txt", content: "stolen" }),

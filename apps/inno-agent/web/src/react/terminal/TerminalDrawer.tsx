@@ -57,6 +57,7 @@ export function TerminalDrawer() {
 		cwd: terminalStore.cwd,
 		error: terminalStore.error,
 		lastCommand: terminalStore.lastCommand,
+		hostTerminalDisabled: terminalStore.hostTerminalDisabled,
 	}));
 	const sess = useStoreSnapshot(sessionsStore, () => ({
 		currentSessionId: sessionsStore.currentSessionId,
@@ -82,6 +83,8 @@ export function TerminalDrawer() {
 		await terminalStore.disconnect();
 		await terminalStore.connect(sess.currentSessionId, ws.activeWorkspaceId ?? undefined);
 	}, [sess.currentSessionId, ws.activeWorkspaceId]);
+
+	if (term.hostTerminalDisabled) return null;
 
 	return (
 		<AnimatePresence>

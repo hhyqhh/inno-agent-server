@@ -25,6 +25,7 @@ import { ensureWebAccessConfig, resolvePiAiJitiAliases } from "./web-access-conf
 import { ensurePermissionSystemConfig, INNO_WEB_AUTHORIZER_NAME, resolvePluginFile, writePermissionPolicyConfig } from "./permission-system-config.js";
 import { permissionBridge, type PermissionAskDetails } from "./permission-bridge.js";
 import { checkWorkspaceMutationPath } from "./workspace-path-guard.js";
+import { filterActiveToolsForMode, isHostExecutionTool } from "./host-execution-policy.js";
 import { INNO_SYSTEM_PROMPT, ONBOARDING_GUIDE, WEB_ACCESS_PROMPT_HINT } from "./system-prompt.js";
 import { syncProvidersForSubagents } from "./provider-sync.js";
 import { questionBridge } from "./question-bridge.js";
@@ -343,6 +344,7 @@ export function createInnoExtension(
 			isL2Enabled,
 			resolveL2Memory,
 			() => resolveActiveWorkspaceDir(paths, deps),
+			deps?.sharedExtensionsDisabled,
 		);
 		for (const tool of l2Tools) {
 			pi.registerTool(tool);
@@ -367,7 +369,7 @@ export function createInnoExtension(
 		void l3Memory.backfill();
 
 		// 4b. Register document parsing tools
-		const documentTools = createDocumentTools();
+		const documentTools = createDocumentTools({ restrictToWorkspace: deps?.sharedExtensionsDisabled });
 		for (const tool of documentTools) {
 			pi.registerTool(tool);
 		}
@@ -375,7 +377,7 @@ export function createInnoExtension(
 		// 4c. Register OCR tool (Baidu PaddleOCR-VL). Used when the configured
 		// chat model cannot natively recognize images. Reads credentials live
 		// from configHolder so settings changes take effect without restart.
-		const ocrTools = createOcrTools(configHolder);
+		const ocrTools = createOcrTools(configHolder, { restrictToWorkspace: deps?.sharedExtensionsDisabled });
 		for (const tool of ocrTools) {
 			pi.registerTool(tool);
 		}
@@ -392,13 +394,28 @@ export function createInnoExtension(
 			const practiceTools = createPracticeTools({
 				registry: deps.workspaceRegistry,
 				getCurrentSessionId: deps.getCurrentSessionId,
+				restrictToWorkspace: deps.sharedExtensionsDisabled,
 			});
 			for (const tool of practiceTools) {
 				pi.registerTool(tool);
 			}
 		}
 
-		// 5. Keep built-in file mutations inside the workspace bound to the
+		// 5. Authenticated multi-user execution must not inherit the server
+		// process's host filesystem access. Filter the tool list each turn and
+		// keep a dispatch-time deny guard in case a stale tool call arrives.
+		if (deps?.sharedExtensionsDisabled) {
+			pi.on("tool_call", async (event) => {
+				if (!isHostExecutionTool(event.toolName)) return undefined;
+				logger.warn({ toolName: event.toolName }, "blocked host execution tool in authenticated mode");
+				return {
+					block: true,
+					reason: "认证多用户模式已禁用宿主机命令和文件工具。请使用当前工作区提供的学习、文档和实践工具。",
+				};
+			});
+		}
+
+		// 5a. Keep local built-in file mutations inside the workspace bound to the
 		// active session. PI accepts absolute paths, so cwd alone is not a
 		// sufficient boundary when the model emits a stale parent path.
 		pi.on("tool_call", async (event) => {
@@ -463,6 +480,7 @@ export function createInnoExtension(
 
 			// 6. Inject L1 context and custom system prompt before each agent turn
 			pi.on("before_agent_start", async (event, ctx) => {
+				pi.setActiveTools(filterActiveToolsForMode(pi.getActiveTools(), Boolean(deps?.sharedExtensionsDisabled)));
 				const sections: string[] = [INNO_SYSTEM_PROMPT];
 				try { await resolveL2Memory().backfill(); } catch { /* retrieval remains best-effort */ }
 				const learnerDataDir = resolveCurrentTenantDataDir(paths.dataDir, "learner");

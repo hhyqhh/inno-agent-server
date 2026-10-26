@@ -153,7 +153,11 @@ function WorkspacePanelContent({ mode, width, onModeChange, onWidthChange, onPre
 	const [hasOpenedWorkspace, setHasOpenedWorkspace] = useState(mode !== "collapsed");
 	const retryContent = useCallback(() => setContentRetryKey((key) => key + 1), []);
 
-	const terminalOpen = useStoreSnapshot(terminalStore, () => terminalStore.isOpen);
+	const terminalState = useStoreSnapshot(terminalStore, () => ({
+		isOpen: terminalStore.isOpen,
+		hostTerminalDisabled: terminalStore.hostTerminalDisabled,
+	}));
+	const terminalOpen = terminalState.isOpen;
 	const fileCount = useStoreSnapshot(workspaceStore, () => countTreeFiles(workspaceStore.tree?.children));
 
 	const commitResize = useCallback(async (nextWidth: number) => {
@@ -338,15 +342,17 @@ function WorkspacePanelContent({ mode, width, onModeChange, onWidthChange, onPre
 					<span className="whitespace-nowrap text-[11.5px] text-[var(--inno-text-subtle)]">{t("workspace.fileCount", { count: fileCount })}</span>
 				</div>
 				<div className="inno-workspace-header-actions">
-					<button
-						type="button"
-						className={`inno-workspace-header-button ${terminalOpen ? "is-active" : ""}`}
-						title={(terminalOpen ? t("terminal.collapse") : t("terminal.expand")) ?? ""}
-						aria-label={(terminalOpen ? t("terminal.collapse") : t("terminal.expand")) ?? ""}
-						onClick={() => terminalStore.setOpen(!terminalOpen)}
-					>
-						<TerminalIcon size={15} strokeWidth={1.8} />
-					</button>
+					{terminalState.hostTerminalDisabled ? null : (
+						<button
+							type="button"
+							className={`inno-workspace-header-button ${terminalOpen ? "is-active" : ""}`}
+							title={(terminalOpen ? t("terminal.collapse") : t("terminal.expand")) ?? ""}
+							aria-label={(terminalOpen ? t("terminal.collapse") : t("terminal.expand")) ?? ""}
+							onClick={() => terminalStore.setOpen(!terminalOpen)}
+						>
+							<TerminalIcon size={15} strokeWidth={1.8} />
+						</button>
+					)}
 					<button
 						type="button"
 						className={`inno-workspace-header-button ${mode === "full" ? "is-active" : ""} max-[960px]:hidden`}

@@ -4,11 +4,16 @@ import { existsSync } from "node:fs";
 import { resolve, isAbsolute } from "node:path";
 import { parseDocument, screenshotDocument, DocumentParseError } from "../memory/l2/document-parser.js";
 import { logger } from "../logger.js";
+import { checkWorkspaceMutationPath } from "./workspace-path-guard.js";
+
+export interface DocumentToolOptions {
+	restrictToWorkspace?: boolean;
+}
 
 /**
  * Create document parsing tools for the Inno Agent.
  */
-export function createDocumentTools(): ToolDefinition[] {
+export function createDocumentTools(options: DocumentToolOptions = {}): ToolDefinition[] {
 	const parseDocumentTool = defineTool({
 		name: "parse_document",
 		label: "解析文档",
@@ -50,9 +55,19 @@ export function createDocumentTools(): ToolDefinition[] {
 			// the runtime's default workspace and can be different from the
 			// workspace bound to the current chat session.
 			const workspaceDir = ctx.cwd || process.env.INNO_WORKSPACE_DIR || process.cwd();
-			const resolvedPath = isAbsolute(typed.filePath)
-				? typed.filePath
-				: resolve(workspaceDir, typed.filePath);
+			const pathCheck = options.restrictToWorkspace
+				? checkWorkspaceMutationPath(workspaceDir, typed.filePath)
+				: {
+					allowed: true,
+					resolvedPath: isAbsolute(typed.filePath) ? typed.filePath : resolve(workspaceDir, typed.filePath),
+				};
+			if (!pathCheck.allowed || !pathCheck.resolvedPath) {
+				return {
+					content: [{ type: "text" as const, text: "文件路径必须位于当前工作区内，且不能通过符号链接指向工作区外。" }],
+					details: { error: pathCheck.reason ?? "outside_workspace", filePath: typed.filePath, pageCount: 0, textLength: 0 },
+				};
+			}
+			const resolvedPath = pathCheck.resolvedPath;
 
 			// Check file existence before attempting parse
 			reportProgress("正在检查文件", "checking");

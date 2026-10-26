@@ -19,6 +19,11 @@ import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent
 import { Type } from "typebox";
 import type { ConfigHolder } from "./inno-extension.js";
 import { logger } from "../logger.js";
+import { checkWorkspaceMutationPath } from "./workspace-path-guard.js";
+
+export interface OcrToolOptions {
+	restrictToWorkspace?: boolean;
+}
 
 /** Default endpoint for the public PaddleOCR-VL service. */
 const DEFAULT_OCR_BASE_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs";
@@ -67,7 +72,11 @@ function isHttpUrl(value: string): boolean {
  * Resolve a workspace-relative or absolute local path. Returns null for paths
  * that escape the workspace root via `..`.
  */
-function resolveLocalPath(filePath: string, workspaceDir: string): string | null {
+function resolveLocalPath(filePath: string, workspaceDir: string, restrictToWorkspace: boolean): string | null {
+	if (restrictToWorkspace) {
+		const check = checkWorkspaceMutationPath(workspaceDir, filePath);
+		return check.allowed ? check.resolvedPath ?? null : null;
+	}
 	const root = resolve(workspaceDir);
 	const cleaned = isAbsolute(filePath) ? filePath : filePath.replace(/^\/+/, "");
 	const resolved = resolve(root, cleaned);
@@ -82,6 +91,7 @@ async function submitJob(
 	filePath: string,
 	workspaceDir: string,
 	signal: AbortSignal,
+	restrictToWorkspace: boolean,
 ): Promise<string> {
 	const headers = authHeaders(cfg.token);
 	const endpoint = cfg.baseUrl;
@@ -107,7 +117,7 @@ async function submitJob(
 	}
 
 	// Local file mode — multipart/form-data with file, model, optionalPayload.
-	const localPath = resolveLocalPath(filePath, workspaceDir);
+	const localPath = resolveLocalPath(filePath, workspaceDir, restrictToWorkspace);
 	if (!localPath || !existsSync(localPath) || !statSync(localPath).isFile()) {
 		throw new Error(`找不到图片文件：${filePath}`);
 	}
@@ -192,7 +202,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
  * Create the OCR tool. Reads the API credentials live from configHolder so
  * settings changes take effect without a restart.
  */
-export function createOcrTools(configHolder: ConfigHolder): ToolDefinition[] {
+export function createOcrTools(configHolder: ConfigHolder, options: OcrToolOptions = {}): ToolDefinition[] {
 	const tool = defineTool({
 		name: "ocr_image",
 		label: "图片文字识别 (OCR)",
@@ -234,7 +244,13 @@ export function createOcrTools(configHolder: ConfigHolder): ToolDefinition[] {
 			try {
 				let jobId: string;
 				try {
-					jobId = await submitJob(cfg, filePath, ctx.cwd, AbortSignal.timeout(REQUEST_TIMEOUT_MS));
+					jobId = await submitJob(
+						cfg,
+						filePath,
+						ctx.cwd,
+						AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+						Boolean(options.restrictToWorkspace),
+					);
 				} catch (err) {
 					logger.warn({ err, filePath }, "ocr_image: submit failed");
 					const msg = err instanceof Error ? err.message : String(err);

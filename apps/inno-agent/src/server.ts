@@ -82,6 +82,7 @@ import { applyRuntimeEnvironment, parseRuntimeArgs, resolveRuntimePaths } from "
 import { createGracefulShutdownHandler, installProcessFallbacks } from "./utils/process-fallback.js";
 import { questionBridge } from "./agent/question-bridge.js";
 import { permissionBridge } from "./agent/permission-bridge.js";
+import { HOST_TERMINAL_DISABLED_ERROR } from "./agent/host-execution-policy.js";
 import { streamRegistry } from "./chat/stream-registry.js";
 import { DEFAULT_WORKSPACE_ID, WorkspaceRegistry, type WorkspaceMeta } from "./workspace/workspace-registry.js";
 import type { RemoteContentSource } from "./content-source/index.js";
@@ -1610,6 +1611,7 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 	// --- Terminal sessions + Runs (extracted to server/routes/practice.ts) ---
 	practice: (req, res, method, url) => handlePracticeRoutes(req, res, method, url, {
 		workspaceRegistry, dataDir, terminalManager, runRecordStore, tenantStore: auth.tenantStore,
+		hostTerminalDisabled: auth.mode === "better-auth",
 	}),
 
 	// --- Settings + MCP API (extracted to server/routes/settings.ts) ---
@@ -1783,6 +1785,12 @@ server.on("upgrade", (req, socket, head) => {
 		const session = auth.mode === "better-auth" ? await auth.getSession(req) : null;
 		if (auth.mode === "better-auth" && !session) {
 			socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+			socket.destroy();
+			return;
+		}
+		if (auth.mode === "better-auth") {
+			const body = JSON.stringify({ error: HOST_TERMINAL_DISABLED_ERROR });
+			socket.write(`HTTP/1.1 409 Conflict\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
 			socket.destroy();
 			return;
 		}

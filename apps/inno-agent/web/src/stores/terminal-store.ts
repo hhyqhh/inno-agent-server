@@ -26,6 +26,7 @@ class TerminalStoreImpl extends EventEmitter<TerminalStoreEvents> {
 	isOpen = false;
 	activeRunId: string | null = null;
 	lastCommand: string | null = null;
+	hostTerminalDisabled = false;
 
 	private ws: WebSocket | null = null;
 	/** Commands queued while no live socket exists. Drained on the next
@@ -38,7 +39,19 @@ class TerminalStoreImpl extends EventEmitter<TerminalStoreEvents> {
 	 * effect, so two connect() calls routinely interleave in dev. */
 	private connectGeneration = 0;
 
+	setHostTerminalDisabled(disabled: boolean): void {
+		if (this.hostTerminalDisabled === disabled) return;
+		this.hostTerminalDisabled = disabled;
+		if (disabled) {
+			this.pendingRuns = [];
+			this.isOpen = false;
+			void this.disconnect();
+		}
+		this.emit("change", undefined);
+	}
+
 	setOpen(open: boolean): void {
+		if (open && this.hostTerminalDisabled) return;
 		if (this.isOpen === open) return;
 		this.isOpen = open;
 		this.emit("change", undefined);
@@ -51,7 +64,7 @@ class TerminalStoreImpl extends EventEmitter<TerminalStoreEvents> {
 	 * re-established for the same session (queued runs ride along).
 	 */
 	handleAppResume(): void {
-		if (!this.isOpen || !this.innoSessionId) return;
+		if (this.hostTerminalDisabled || !this.isOpen || !this.innoSessionId) return;
 		if (this.status === "connecting") return;
 		if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
 		if (this.ws) {
@@ -66,6 +79,7 @@ class TerminalStoreImpl extends EventEmitter<TerminalStoreEvents> {
 	}
 
 	async connect(innoSessionId: string, workspaceId?: string, cols = 100, rows = 24): Promise<void> {
+		if (this.hostTerminalDisabled) return;
 		// If already connected to same session, no-op.
 		if (this.innoSessionId === innoSessionId && this.status === "connected" && this.ws) return;
 		// A handshake for this same session is already in flight (StrictMode
@@ -199,7 +213,7 @@ class TerminalStoreImpl extends EventEmitter<TerminalStoreEvents> {
 	}
 
 	runCommand(command: string, sourceFile?: string, content?: string): void {
-		if (!command.trim()) return;
+		if (this.hostTerminalDisabled || !command.trim()) return;
 		this.lastCommand = command;
 		this.setOpen(true);
 		// Any established session can take the command immediately — including

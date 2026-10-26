@@ -38,6 +38,7 @@ import { terminalStore } from "./terminal-store.js";
 
 beforeEach(async () => {
 	await terminalStore.disconnect();
+	terminalStore.setHostTerminalDisabled(false);
 	terminalStore.setOpen(false);
 	sent.length = 0;
 	sockets.length = 0;
@@ -50,6 +51,19 @@ afterEach(async () => {
 });
 
 describe("terminalStore code-block runs", () => {
+	it("does not open, queue, or connect when authenticated host execution is disabled", async () => {
+		terminalStore.setHostTerminalDisabled(true);
+
+		terminalStore.runCommand("python main.py", "main.py");
+		terminalStore.setOpen(true);
+		await terminalStore.connect("session-1", "workspace-1");
+
+		expect(terminalStore.isOpen).toBe(false);
+		expect(terminalStore.status).toBe("idle");
+		expect(apiMocks.create).not.toHaveBeenCalled();
+		expect(sockets).toHaveLength(0);
+	});
+
 	it("keeps a command queued while opening and connecting the Practice Lab", async () => {
 		terminalStore.runCommand("python -c \"print(42)\"", "model_reply.py");
 		expect(terminalStore.isOpen).toBe(true);

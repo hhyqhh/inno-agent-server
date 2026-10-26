@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MarkdownArtifact } from "./MarkdownArtifact.js";
+import { terminalStore } from "../stores/terminal-store.js";
 
 vi.mock("react-i18next", () => ({
 	useTranslation: () => ({
@@ -9,7 +10,10 @@ vi.mock("react-i18next", () => ({
 	}),
 }));
 
-afterEach(cleanup);
+afterEach(() => {
+	cleanup();
+	terminalStore.setHostTerminalDisabled(false);
+});
 
 if (typeof Element !== "undefined" && !Element.prototype.scrollTo) {
 	Element.prototype.scrollTo = () => { /* noop */ };
@@ -67,5 +71,16 @@ describe("code block header actions", () => {
 		expect(block?.querySelector('[data-streamdown="code-block-header"]')).not.toBeNull();
 		expect(block?.querySelector('[data-streamdown="code-block-header"] > span')?.textContent).toBe("output");
 		expect(block?.querySelector('[data-streamdown="code-block-copy-button"]')).not.toBeNull();
+	});
+
+	it("hides Python run actions when authenticated host execution is disabled", async () => {
+		terminalStore.setHostTerminalDisabled(true);
+		const content = ["```python", "print(1)", "```"].join("\n");
+		const { container, getByRole, queryByRole } = render(<MarkdownArtifact content={content} />);
+
+		await waitFor(() => expect(container.querySelector('[data-streamdown="code-block-header"]')).not.toBeNull());
+		expect(queryByRole("button", { name: "运行代码" })).toBeNull();
+		fireEvent.click(getByRole("button", { name: "更多" }));
+		expect(queryByRole("menuitem", { name: "运行代码" })).toBeNull();
 	});
 });

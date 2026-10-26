@@ -39,7 +39,7 @@ General-purpose coding agents optimize for open-ended software engineering. Educ
 Inno Agent is a **personal** agent, and the architecture deliberately reflects that:
 
 - **One process, one active agent session.** A single in-memory prompt queue serializes all work; sessions, workspaces, and channels share it. Session switching swaps session files in place — there is no per-session agent pool.
-- **No horizontal scaling.** Optional Better Auth + PostgreSQL account and tenant isolation slices are implemented, but host shell/file tools and PTY terminals are not yet confined per tenant and `INNO_MULTI_USER_ENABLED` deliberately remains unavailable. File-backed state supports one server process, not active-active replicas. Until the multi-user gate is explicitly lifted, production team deployments still require one instance per person.
+- **No horizontal scaling.** Optional Better Auth + PostgreSQL account and tenant isolation slices are implemented. Authenticated mode disables PI host shell/file tools and PTY terminals and hides their Practice Lab controls rather than offering unconfined host execution; `INNO_MULTI_USER_ENABLED` deliberately remains unavailable pending the final isolation review. File-backed state supports one server process, not active-active replicas. Until the multi-user gate is explicitly lifted, production team deployments still require one instance per person.
 - **Backpressure is a feature, not a bug.** When the queue is busy (e.g. another session's long turn or an unanswered question card), cross-session operations answer `409 session_busy` with blocker details instead of silently queueing for minutes — the UI surfaces this so you can finish or abort the blocking turn. See [issue #124](https://github.com/hhyqhh/inno-agent/issues/124) for the design discussion.
 
 These constraints keep the memory layers, scheduler, and channels simple enough to reason about — which matters more for a tool that watches how you learn than for one that serves a crowd.
@@ -52,7 +52,7 @@ These constraints keep the memory layers, scheduler, and channels simple enough 
   - **L3 session recall** — session history indexed into SQLite (FTS5) with threshold-gated cross-conversation retrieval.
 - ⏰ **Proactive scheduler** — cron jobs created in natural language, runnable from the agent, the UI, or the daemon.
 - 💬 **Personal IM channels** — Feishu (native) plus WeChat (iLink QR login or bridge mode), with a unified dispatcher for reminders.
-- 🧪 **Practice Lab** — workspace-scoped web terminal (xterm.js over WebSocket) with run records the agent can read.
+- 🧪 **Practice Lab** — workspace-scoped web terminal (xterm.js over WebSocket) with run records the agent can read. The web terminal remains available in local and Desktop server mode; host execution and its controls are disabled in Better Auth mode.
 - 🎯 **Simple Mode + presets** — one-click preset workspaces (lesson plan, PPT creation, scenario explain) for non-technical users.
 - 🧩 **Skill system + content hub** — browse and import skills/presets from a remote hub (GitHub repo or self-hosted bundle service).
 - ✏️ **Conversation branch editing** — edit a previously sent plain-text Web message and regenerate from that point without keeping the abandoned branch in the active model context.

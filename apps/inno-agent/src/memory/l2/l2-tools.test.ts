@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -448,5 +448,36 @@ describe("l2_archive", () => {
 			pages: [{ pageNumber: 1, text: "第一个知识库的资料" }],
 		});
 		await firstArchive;
+	});
+
+	it.each(["absolute", "parent"])("rejects authenticated %s archive paths outside the workspace", async (kind) => {
+		const root = makeTempDir();
+		const container = makeTempDir();
+		const workspace = join(container, "workspace");
+		mkdirSync(workspace);
+		const outsidePath = join(container, "outside.pdf");
+		writeFileSync(outsidePath, "secret");
+		const tool = createL2Tools(root, undefined, fakeMemory(root), () => workspace, true)[0];
+
+		const result = await archiveFile(tool, "call-outside", "越界文件", kind === "absolute" ? outsidePath : "../outside.pdf");
+
+		expect(result.details).toMatchObject({ error: "outside_workspace" });
+		expect(parseDocumentMock).not.toHaveBeenCalled();
+	});
+
+	it("rejects an authenticated archive symlink that escapes the workspace", async () => {
+		const root = makeTempDir();
+		const container = makeTempDir();
+		const workspace = join(container, "workspace");
+		mkdirSync(workspace);
+		const outsidePath = join(container, "outside.pdf");
+		writeFileSync(outsidePath, "secret");
+		symlinkSync(outsidePath, join(workspace, "linked.pdf"));
+		const tool = createL2Tools(root, undefined, fakeMemory(root), () => workspace, true)[0];
+
+		const result = await archiveFile(tool, "call-symlink", "越界链接", "linked.pdf");
+
+		expect(result.details).toMatchObject({ error: "outside_workspace" });
+		expect(parseDocumentMock).not.toHaveBeenCalled();
 	});
 });
