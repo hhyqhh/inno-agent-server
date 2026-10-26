@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
+import { logger } from "../logger.js";
 import { withTenantTransaction } from "./schema.js";
 
 export type ResourceKind = "session" | "workspace" | "job" | "channel" | "memory" | "terminal" | "permission";
@@ -29,6 +30,47 @@ export class ResourceOwnershipError extends Error {
 	constructor(kind: ResourceKind, resourceId: string) {
 		super(`${kind} not found: ${resourceId}`);
 		this.name = "ResourceOwnershipError";
+	}
+}
+
+export interface JobRunClaim {
+	readonly occurrenceId: string;
+	release(): Promise<void>;
+}
+
+const JOB_RUN_LEASE_MS = 5 * 60_000;
+
+/** A leased occurrence claim. Renewal and release are owner-token fenced. */
+class PostgresJobRunClaim implements JobRunClaim {
+	private readonly heartbeat: NodeJS.Timeout;
+	private released = false;
+
+	constructor(
+		private readonly pool: Pool,
+		readonly occurrenceId: string,
+		private readonly ownerToken: string,
+		leaseMs: number,
+	) {
+		this.heartbeat = setInterval(() => {
+			void this.pool.query(
+				`UPDATE job_run_claims SET expires_at = NOW() + ($2 * INTERVAL '1 millisecond')
+				 WHERE occurrence_id = $1 AND owner_token = $3`,
+				[occurrenceId, leaseMs, ownerToken],
+			).then((result) => {
+				if (result.rowCount !== 1) logger.warn({ occurrenceId }, "scheduled job claim lease was lost");
+			}).catch((error) => logger.error({ err: error, occurrenceId }, "scheduled job claim renewal failed"));
+		}, Math.max(1_000, Math.floor(leaseMs / 3)));
+		this.heartbeat.unref();
+	}
+
+	async release(): Promise<void> {
+		if (this.released) return;
+		this.released = true;
+		clearInterval(this.heartbeat);
+		await this.pool.query(
+			"DELETE FROM job_run_claims WHERE occurrence_id = $1 AND owner_token = $2",
+			[this.occurrenceId, this.ownerToken],
+		);
 	}
 }
 
@@ -118,6 +160,66 @@ export class TenantStore {
 		);
 		const row = result.rows[0];
 		return row ? { tenantId: row.tenant_id, userId: row.user_id, role: "owner" } : null;
+	}
+
+	async listResourceOwners(kind: ResourceKind): Promise<TenantContext[]> {
+		const result = await this.pool.query<{ tenant_id: string; user_id: string }>(
+			`SELECT DISTINCT ownership.tenant_id, membership.user_id
+			 FROM resource_ownership ownership
+			 JOIN tenant_memberships membership ON membership.tenant_id = ownership.tenant_id
+			 WHERE ownership.resource_type = $1`,
+			[kind],
+		);
+		return result.rows.map((row) => ({ tenantId: row.tenant_id, userId: row.user_id, role: "owner" }));
+	}
+
+	/**
+	 * Atomically claim one scheduled occurrence. A crashed owner's lease can be
+	 * taken over only after expiry; successful/failed executions release it and
+	 * rely on the job/occurrence ledgers for their durable completion state.
+	 */
+	async claimJobRun(
+		context: TenantContext,
+		jobId: string,
+		occurrenceId: string,
+		scheduledAt: string,
+		leaseMs = JOB_RUN_LEASE_MS,
+	): Promise<JobRunClaim | null> {
+		const ownerToken = randomUUID();
+		const client = await this.pool.connect();
+		try {
+			const claimed = await withTenantTransaction(client, async () => {
+				const owned = await client.query(
+					`SELECT 1 FROM resource_ownership ownership
+					 JOIN tenant_memberships membership ON membership.tenant_id = ownership.tenant_id
+					 WHERE ownership.tenant_id = $1 AND ownership.resource_type = 'job'
+					   AND ownership.resource_id = $2 AND membership.user_id = $3`,
+					[context.tenantId, jobId, context.userId],
+				);
+				if (owned.rowCount !== 1) return false;
+				const inserted = await client.query(
+					`INSERT INTO job_run_claims
+					 (occurrence_id, tenant_id, job_id, scheduled_at, owner_token, expires_at)
+					 VALUES ($1, $2, $3, $4, $5, NOW() + ($6 * INTERVAL '1 millisecond'))
+					 ON CONFLICT (occurrence_id) DO NOTHING`,
+					[occurrenceId, context.tenantId, jobId, scheduledAt, ownerToken, leaseMs],
+				);
+				if (inserted.rowCount !== 1) {
+					const taken = await client.query(
+						`UPDATE job_run_claims
+						 SET tenant_id = $2, job_id = $3, scheduled_at = $4, owner_token = $5,
+						     claimed_at = NOW(), expires_at = NOW() + ($6 * INTERVAL '1 millisecond')
+						 WHERE occurrence_id = $1 AND expires_at <= NOW()`,
+						[occurrenceId, context.tenantId, jobId, scheduledAt, ownerToken, leaseMs],
+					);
+					if (taken.rowCount !== 1) return false;
+				}
+				return true;
+			});
+			return claimed ? new PostgresJobRunClaim(this.pool, occurrenceId, ownerToken, leaseMs) : null;
+		} finally {
+			client.release();
+		}
 	}
 
 	async listResourceIds(context: TenantContext, kind: ResourceKind): Promise<Set<string>> {

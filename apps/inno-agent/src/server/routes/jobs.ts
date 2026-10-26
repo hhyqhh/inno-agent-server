@@ -11,7 +11,8 @@ import { logger } from "../../logger.js";
 import { questionBridge } from "../../agent/question-bridge.js";
 import { permissionBridge } from "../../agent/permission-bridge.js";
 import { cancelDeferredRun, isDeferredExecuting } from "../../scheduler/deferred-runs.js";
-import type { TenantStore } from "../../tenants/store.js";
+import { claimOccurrenceForExecution } from "../../scheduler/execution-claims.js";
+import type { JobRunClaim, TenantStore } from "../../tenants/store.js";
 import { claimRequestResource, getRequestTenant, ownsRequestResource, releaseRequestResource } from "../../tenants/http.js";
 
 type JobRunStreamEvent =
@@ -150,6 +151,7 @@ export async function handleJobsRoutes(
 	ctx: JobsRouteContext,
 ): Promise<boolean> {
 	const { jobStore, channelRegistry, tenantStore } = ctx;
+	let occurrenceClaim: JobRunClaim | undefined;
 	const requireSessionOwnership = async (sessionId: string): Promise<boolean> => {
 		if (await ownsRequestResource(req, tenantStore, "session", sessionId)) return true;
 		json(res, 404, { error: "Session not found" });
@@ -250,19 +252,20 @@ export async function handleJobsRoutes(
 			// A manual run takes over a fired-but-waiting slot: cancel its
 			// deferred auto-execution and reserve the slot so cron re-fires
 			// or another start cannot double-run it.
-			cancelDeferredRun(occurrenceId);
+			await cancelDeferredRun(occurrenceId);
 			if (isDeferredExecuting(occurrenceId)) {
 				json(res, 409, { error: "This slot's auto-execution already started." });
 				return true;
 			}
 			if (isLearningJob(job) && ctx.checkInStore) {
-				if (!ctx.checkInStore.claimOccurrence(occurrenceId)) {
-					json(res, 409, { error: "This slot is already being handled." });
+				const occurrence = ctx.checkInStore.resolveOccurrence(job.id, occurrenceId);
+				if (!occurrence) {
+					json(res, 409, { error: "Learning schedule slot is no longer pending." });
 					return true;
 				}
-				if (!ctx.checkInStore.resolveOccurrence(job.id, occurrenceId)) {
-					ctx.checkInStore.releaseOccurrenceClaim(occurrenceId);
-					json(res, 409, { error: "Learning schedule slot is no longer pending." });
+				occurrenceClaim = (await claimOccurrenceForExecution(ctx.checkInStore, job, occurrenceId, occurrence.scheduledAt)) ?? undefined;
+				if (!occurrenceClaim) {
+					json(res, 409, { error: "This slot is already being handled." });
 					return true;
 				}
 			}
@@ -347,13 +350,12 @@ export async function handleJobsRoutes(
 				},
 			);
 			logger.info({ jobId: job.id, sessionId, runId: result.runId, success: result.success }, "Manual job run stream finished");
-			// A fulfilled slot keeps its claim; a failed one is released so the
-			// check-in card can retry it.
-			if (occurrenceId && !result.success) ctx.checkInStore?.releaseOccurrenceClaim(occurrenceId);
+			// Tenant leases end with the attempt; local success retains its legacy claim.
+			if (occurrenceId && (!result.success || getRequestTenant(req))) await occurrenceClaim?.release();
 			if (!disconnected) writeJobStreamEvent(res, { type: "job_result", result });
 		} catch (err) {
 			logger.error({ err, jobId: job.id, sessionId }, "Manual job run stream failed");
-			if (occurrenceId) ctx.checkInStore?.releaseOccurrenceClaim(occurrenceId);
+			if (occurrenceId) await occurrenceClaim?.release();
 			if (!disconnected) {
 				writeJobStreamEvent(res, { type: "error", message: err instanceof Error ? err.message : String(err) });
 			}
@@ -386,27 +388,40 @@ export async function handleJobsRoutes(
 			return true;
 		}
 		if (sessionId) ctx.recordJobRunSession?.(sessionId);
-		if (occurrenceId && isLearningJob(job) && ctx.checkInStore) {
-			if (!ctx.checkInStore.claimOccurrence(occurrenceId)) {
-				json(res, 409, { error: "This slot is already being handled." });
-				return true;
-			}
-			if (!ctx.checkInStore.resolveOccurrence(job.id, occurrenceId)) {
-				ctx.checkInStore.releaseOccurrenceClaim(occurrenceId);
-				json(res, 409, { error: "Learning schedule slot is no longer pending." });
+		if (occurrenceId) {
+			await cancelDeferredRun(occurrenceId);
+			if (isDeferredExecuting(occurrenceId)) {
+				json(res, 409, { error: "This slot's auto-execution already started." });
 				return true;
 			}
 		}
-		const result = await executeJob(
-			job,
-			jobStore,
-			channelRegistry,
-			"api",
-			ctx.checkInStore,
-			sessionPath || occurrenceId ? { sessionPath: sessionPath || undefined, occurrenceId: occurrenceId || undefined } : undefined,
-		);
-		if (occurrenceId && !result.success) ctx.checkInStore?.releaseOccurrenceClaim(occurrenceId);
-		json(res, 200, result);
+		if (occurrenceId && isLearningJob(job) && ctx.checkInStore) {
+			const occurrence = ctx.checkInStore.resolveOccurrence(job.id, occurrenceId);
+			if (!occurrence) {
+				json(res, 409, { error: "Learning schedule slot is no longer pending." });
+				return true;
+			}
+			occurrenceClaim = (await claimOccurrenceForExecution(ctx.checkInStore, job, occurrenceId, occurrence.scheduledAt)) ?? undefined;
+			if (!occurrenceClaim) {
+				json(res, 409, { error: "This slot is already being handled." });
+				return true;
+			}
+		}
+		try {
+			const result = await executeJob(
+				job,
+				jobStore,
+				channelRegistry,
+				"api",
+				ctx.checkInStore,
+				sessionPath || occurrenceId ? { sessionPath: sessionPath || undefined, occurrenceId: occurrenceId || undefined } : undefined,
+			);
+			if (occurrenceId && (!result.success || getRequestTenant(req))) await occurrenceClaim?.release();
+			json(res, 200, result);
+		} catch (error) {
+			if (occurrenceId) await occurrenceClaim?.release();
+			throw error;
+		}
 		return true;
 	}
 

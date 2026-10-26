@@ -62,7 +62,7 @@ export async function handleCheckInsRoutes(
 			json(res, 404, { error: "Occurrence not found" });
 			return true;
 		}
-		const cancelled = cancelDeferredRun(occurrenceId);
+		const cancelled = await cancelDeferredRun(occurrenceId);
 		if (!cancelled) {
 			// A claim can race a completed skip (e.g. the countdown takeover in
 			// another tab). The slot is already settled, so report success and
@@ -92,7 +92,7 @@ export async function handleCheckInsRoutes(
 			json(res, 404, { error: "Occurrence not found" });
 			return true;
 		}
-		const cancelled = cancelDeferredRun(occurrenceId);
+		const cancelled = await cancelDeferredRun(occurrenceId);
 		if (!cancelled) {
 			// The response to an earlier skip can be lost after the server has
 			// already persisted the slot. Treat a repeated skip for that same

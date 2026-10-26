@@ -36,6 +36,8 @@ export interface JobExecutionOptions {
 	occurrenceId?: string;
 	/** Scheduled instant used to derive a daily plan slot. */
 	scheduledAt?: string;
+	/** Scheduled tenant jobs must not infer a channel from the shared active session. */
+	allowSessionChannelInference?: boolean;
 }
 
 /**
@@ -85,7 +87,7 @@ export async function executeJob(
 		// Continue without attaching this run to a current-day occurrence.
 	}
 
-	const inferredChannel = inferChannel(job, channelRegistry);
+	const inferredChannel = inferChannel(job, channelRegistry, options?.allowSessionChannelInference !== false);
 	if (!job.channel && inferredChannel) {
 		job.channel = inferredChannel;
 		jobStore.update(job.id, { channel: inferredChannel });
@@ -386,10 +388,10 @@ function formatCheckInReminderOutput(prompt: string): string {
 	return trimmed || "今天还有学习任务未完成。完成今日计划后，学习打卡会自动完成。";
 }
 
-function inferChannel(job: ScheduledJob, channelRegistry: ChannelRegistry): ScheduledJob["channel"] | undefined {
+function inferChannel(job: ScheduledJob, channelRegistry: ChannelRegistry, allowSessionHint: boolean): ScheduledJob["channel"] | undefined {
 	if (job.channel) return job.channel;
 	if (job.taskType === "push_reminder") {
-		const hinted = getCurrentSessionChannelHint();
+		const hinted = allowSessionHint ? getCurrentSessionChannelHint() : "unknown";
 		if (hinted !== "unknown" && hinted !== "web" && hinted !== "cli" && hinted !== "scheduler") {
 			const ch = hinted as ScheduledJob["channel"];
 			if (ch && channelRegistry.get(ch)) return ch;

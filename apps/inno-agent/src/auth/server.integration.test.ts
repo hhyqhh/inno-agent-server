@@ -62,9 +62,9 @@ async function api(cookie: string, path: string, init: RequestInit = {}): Promis
 	});
 }
 
-async function waitFor(condition: () => boolean, description: string): Promise<void> {
-	const deadline = Date.now() + 10_000;
-	while (!condition()) {
+async function waitFor(condition: () => boolean | Promise<boolean>, description: string, timeoutMs = 10_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!(await condition())) {
 		if (Date.now() > deadline) throw new Error(`Timed out waiting for ${description}: ${output.slice(-8_000)}`);
 		await new Promise((resolveWait) => setTimeout(resolveWait, 50));
 	}
@@ -744,6 +744,110 @@ describe("channel runtime isolation", () => {
 		await waitFor(() => sidecarRequests.some((request) => request.path === "/push" && request.body.includes("tenant stub response") && request.body.includes("chat-a")), "manual tenant job push");
 		expect(providerRequests.find((request) => request.body.includes("channel-job-a"))?.authorization).toBe("Bearer channel-a-secret");
 		expect(sidecarRequests.some((request) => request.sidecar === "b" && request.body.includes("channel-job-a"))).toBe(false);
+		expect(await readFile(join(home, "config", "config.json"), "utf-8")).toBe(globalConfigBefore);
+	}, 90_000);
+});
+
+describe("tenant background execution", () => {
+	it("restores tenant model, session, workspace and channel context for deferred jobs", async () => {
+		const [cookieA, cookieB] = await Promise.all([
+			registerUser("background-a@example.com"),
+			registerUser("background-b@example.com"),
+		]);
+		const globalConfigBefore = await readFile(join(home, "config", "config.json"), "utf-8");
+		const configure = async (cookie: string, apiKey: string, token: string, sidecarBaseUrl: string, chatId: string) => {
+			expect((await api(cookie, "/api/settings/providers", {
+				method: "PUT",
+				body: JSON.stringify({
+					providerId: "shared", baseUrl: providerOrigin, apiKey, api: "openai-completions",
+					makeDefault: true, models: [{ id: "tenant-model", name: "Tenant stub" }],
+				}),
+			})).status).toBe(200);
+			expect((await api(cookie, "/api/settings/channels", {
+				method: "PUT",
+				body: JSON.stringify({
+					bridge: { token },
+					channels: { qq: { enabled: true, mode: "bridge", sidecarBaseUrl } },
+				}),
+			})).status).toBe(200);
+			expect((await api(cookie, "/api/channels/qq/default-target", {
+				method: "POST", body: JSON.stringify({ chatId }),
+			})).status).toBe(200);
+		};
+		await Promise.all([
+			configure(cookieA, "background-a-secret", "background-token-a", sidecarOriginA, "background-chat-a"),
+			configure(cookieB, "background-b-secret", "background-token-b", sidecarOriginB, "background-chat-b"),
+		]);
+		const createJob = async (cookie: string, name: string, prompt: string) => {
+			const response = await api(cookie, "/api/jobs", {
+				method: "POST",
+				body: JSON.stringify({
+					name, cron: "* * * * *", timezone: "UTC", enabled: true,
+					taskType: "custom_prompt", prompt, channel: "qq",
+				}),
+			});
+			expect(response.status).toBe(201);
+			return response.json() as Promise<{ id: string }>;
+		};
+		const [jobA, jobB] = await Promise.all([
+			createJob(cookieA, "background A", "background-a-prompt"),
+			createJob(cookieB, "background B", "background-b-prompt"),
+		]);
+		await waitFor(() => ["background-a-prompt", "background-b-prompt"].every((prompt) =>
+			providerRequests.some((request) => request.body.includes(prompt)),
+		), "deferred tenant model executions", 45_000);
+		expect(providerRequests.find((request) => request.body.includes("background-a-prompt"))?.authorization).toBe("Bearer background-a-secret");
+		expect(providerRequests.find((request) => request.body.includes("background-b-prompt"))?.authorization).toBe("Bearer background-b-secret");
+		expect((await api(cookieA, `/api/jobs/${jobA.id}`, {
+			method: "PATCH", body: JSON.stringify({ enabled: false }),
+		})).status).toBe(200);
+		expect((await api(cookieB, `/api/jobs/${jobB.id}`, {
+			method: "PATCH", body: JSON.stringify({ enabled: false }),
+		})).status).toBe(200);
+		await waitFor(async () => {
+			for (const [cookie, jobId] of [[cookieA, jobA.id], [cookieB, jobB.id]] as const) {
+				const runs = await (await api(cookie, "/api/jobs/runs")).json() as Array<{ jobId: string; status: string }>;
+				if (!runs.some((run) => run.jobId === jobId && run.status === "success")) return false;
+			}
+			return true;
+		}, "tenant background run ledgers");
+		await waitFor(() => ["background-chat-a", "background-chat-b"].every((chatId) =>
+			sidecarRequests.some((request) => request.path === "/push" && request.body.includes(chatId) && request.body.includes("tenant stub response")),
+		), "tenant background channel delivery");
+		const pushA = sidecarRequests.find((request) => request.path === "/push" && request.body.includes("background-chat-a") && request.body.includes("tenant stub response"));
+		const pushB = sidecarRequests.find((request) => request.path === "/push" && request.body.includes("background-chat-b") && request.body.includes("tenant stub response"));
+		expect(pushA).toMatchObject({ sidecar: "a", authorization: "Bearer background-token-a" });
+		expect(pushB).toMatchObject({ sidecar: "b", authorization: "Bearer background-token-b" });
+
+		const sessionsA = await (await api(cookieA, "/api/sessions")).json() as Array<{ id: string }>;
+		const sessionsB = await (await api(cookieB, "/api/sessions")).json() as Array<{ id: string }>;
+		expect(sessionsA).toHaveLength(1);
+		expect(sessionsB).toHaveLength(1);
+		expect(sessionsA[0].id).not.toBe(sessionsB[0].id);
+		expect((await api(cookieB, `/api/sessions/${sessionsA[0].id}`)).status).toBe(404);
+
+		const pool = new Pool({ connectionString: postgres.databaseUrl });
+		try {
+			const tenantRows = await pool.query<{ id: string; email: string }>(
+				`SELECT tenant.id, account.email FROM tenants tenant JOIN "user" account ON account.id = tenant.owner_user_id
+				 WHERE account.email IN ('background-a@example.com', 'background-b@example.com')`,
+			);
+			const tenantA = tenantRows.rows.find((row) => row.email === "background-a@example.com")!.id;
+			const tenantB = tenantRows.rows.find((row) => row.email === "background-b@example.com")!.id;
+			const workspacesA = await (await api(cookieA, "/api/workspaces")).json() as Array<{ id: string }>;
+			const workspacesB = await (await api(cookieB, "/api/workspaces")).json() as Array<{ id: string }>;
+			expect(workspacesA.map((workspace) => workspace.id)).toContain(`channel-scheduler-${tenantA}`);
+			expect(workspacesB.map((workspace) => workspace.id)).toContain(`channel-scheduler-${tenantB}`);
+			await waitFor(async () => {
+				const claims = await pool.query<{ count: number }>(
+					"SELECT COUNT(*)::int AS count FROM job_run_claims WHERE job_id = ANY($1)",
+					[[jobA.id, jobB.id]],
+				);
+				return claims.rows[0].count === 0;
+			}, "background claim cleanup");
+		} finally {
+			await pool.end();
+		}
 		expect(await readFile(join(home, "config", "config.json"), "utf-8")).toBe(globalConfigBefore);
 	}, 90_000);
 });

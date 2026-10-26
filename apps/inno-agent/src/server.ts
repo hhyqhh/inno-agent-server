@@ -26,7 +26,7 @@ import {
 	setWorkspaceCwdResolver,
 } from "./agent/pi-runner.js";
 import { completePromptOnce, runPromptSerialized, runPromptStreamingInSession, runPromptInSession, abortPromptForTurnToken, abortJobPromptInSession } from "./agent/pi-runner.js";
-import { configureDeferredRuns } from "./scheduler/deferred-runs.js";
+import { closeDeferredRuns, configureDeferredRuns } from "./scheduler/deferred-runs.js";
 import { ChannelRegistry } from "./channels/channel.js";
 import type { ChannelStreamEvent } from "./channels/channel.js";
 import { FeishuChannel } from "./channels/feishu/feishu-channel.js";
@@ -40,6 +40,7 @@ import { ScopedJobStore } from "./scheduler/scoped-job-store.js";
 import { CheckInStore } from "./checkins/check-in-store.js";
 import { seedManagedMcpConfig } from "./mcp/mcp-config-store.js";
 import { CronScheduler } from "./scheduler/cron-scheduler.js";
+import { TenantCronScheduler } from "./scheduler/tenant-cron-scheduler.js";
 import { HttpError, json } from "./server/http-helpers.js";
 import { serveStatic } from "./server/static-serve.js";
 import { createRouteDispatcher } from "./server/route-dispatch.js";
@@ -156,6 +157,7 @@ let feishuChannel: FeishuChannel | null = null;
 let wechatChannel: WeChatChannel | null = null;
 let dispatcher: PersonalChannelDispatcher | null = null;
 let tenantChannelManager: TenantChannelManager | null = null;
+let scheduler: CronScheduler | TenantCronScheduler | null = null;
 
 let bootstrapped = false;
 let bootstrapPromise: Promise<void> | null = null;
@@ -428,30 +430,42 @@ async function ensureBootstrapped(): Promise<void> {
 			}
 		}
 
-		if (auth.mode === "local") {
-			const scheduler = new CronScheduler(jobStore, channelRegistry, checkInStore);
-			configureDeferredRuns({
-				jobStore,
-				channelRegistry,
-				checkInStore,
-				// Deferred auto-execution always runs in a fresh, scheduler-born
-				// conversation so it never lands in the user's active chat.
-				createSession: async () => {
-					try {
-						const id = await createNewSession({});
-						recordCurrentSessionChannel("scheduler", id, { setOriginIfEmpty: true });
-						const sessionPath = sessionFileFromId(paths.sessionDir, id);
-						return sessionPath && existsSync(sessionPath) ? sessionPath : null;
-					} catch (err) {
-						logger.error({ err }, "deferred run session creation failed");
-						return null;
-					}
-				},
-			});
-			scheduler.start();
-		} else {
-			logger.warn("[scheduler] automatic and deferred runs are disabled until background tenant isolation lands");
+		async function createScheduledSession(): Promise<string | null> {
+			try {
+				const id = await createNewSession({});
+				const tenant = getCurrentTenant();
+				if (tenant) {
+					const store = getCurrentTenantStore();
+					if (!store) throw new Error("Scheduled session creation requires a tenant store");
+					await store.claimResource(tenant, "session", id);
+					const ws = workspaceRegistry.ensureChannelWorkspace("scheduler", tenant.tenantId);
+					await store.claimResource(tenant, "workspace", ws.id);
+					workspaceRegistry.bindSession(id, ws.id);
+				}
+				recordCurrentSessionChannel("scheduler", id, { setOriginIfEmpty: true });
+				const sessionPath = sessionFileFromId(paths.sessionDir, id);
+				return sessionPath && existsSync(sessionPath) ? sessionPath : null;
+			} catch (err) {
+				logger.error({ err }, "scheduled run session creation failed");
+				return null;
+			}
 		}
+
+		configureDeferredRuns({
+			jobStore,
+			channelRegistry,
+			checkInStore,
+			createSession: createScheduledSession,
+			durableClaims: auth.mode === "better-auth",
+		});
+		if (auth.mode === "local") {
+			scheduler = new CronScheduler(jobStore, channelRegistry, checkInStore);
+		} else {
+			scheduler = new TenantCronScheduler(auth.tenantStore!, jobStore, channelRegistry, checkInStore, {
+				createSession: createScheduledSession,
+			});
+		}
+		scheduler.start();
 
 		logger.info({ channels: auth.mode === "local" ? channelRegistry.all().map((c) => c.name).join(", ") || "none" : "tenant-scoped" }, "[inno-server] channels");
 		logger.info({ jobCount: jobStore.list().length }, "[inno-server] jobs loaded");
@@ -1917,6 +1931,8 @@ const gracefulShutdown = createGracefulShutdownHandler({
 	wss,
 	exit: (code) => process.exit(code),
 	onClose: async () => {
+		scheduler?.stop();
+		await closeDeferredRuns();
 		await tenantChannelManager?.close();
 		await auth.close();
 	},

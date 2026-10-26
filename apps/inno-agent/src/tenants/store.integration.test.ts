@@ -70,6 +70,32 @@ describe("personal tenant store", () => {
 		expect(await store.findResourceOwner("channel", "bridge:test-token-hash")).toEqual(b);
 	});
 
+	it("atomically fences scheduled occurrence claims and recovers expired leases", async () => {
+		const a = await store.ensurePersonalTenant("user-a");
+		const b = await store.ensurePersonalTenant("user-b");
+		await store.claimResource(a, "job", "background-job-a");
+		await store.claimResource(b, "job", "background-job-b");
+		expect((await store.listResourceOwners("job")).map((owner) => owner.tenantId).sort()).toEqual([a.tenantId, b.tenantId].sort());
+
+		const first = await store.claimJobRun(a, "background-job-a", "background-job-a:slot-1", "2026-10-26T01:00:00.000Z");
+		expect(first).not.toBeNull();
+		const competitors = await Promise.all(Array.from({ length: 8 }, () =>
+			store.claimJobRun(a, "background-job-a", "background-job-a:slot-1", "2026-10-26T01:00:00.000Z"),
+		));
+		expect(competitors.every((claim) => claim === null)).toBe(true);
+		expect(await store.claimJobRun(b, "background-job-a", "background-job-a:other-slot", "2026-10-26T01:00:00.000Z")).toBeNull();
+
+		await pool.query("UPDATE job_run_claims SET expires_at = NOW() - INTERVAL '1 second' WHERE occurrence_id = 'background-job-a:slot-1'");
+		const recovered = await store.claimJobRun(a, "background-job-a", "background-job-a:slot-1", "2026-10-26T01:00:00.000Z");
+		expect(recovered).not.toBeNull();
+		await first!.release();
+		expect(await store.claimJobRun(a, "background-job-a", "background-job-a:slot-1", "2026-10-26T01:00:00.000Z")).toBeNull();
+		await recovered!.release();
+		const afterRelease = await store.claimJobRun(a, "background-job-a", "background-job-a:slot-1", "2026-10-26T01:00:00.000Z");
+		expect(afterRelease).not.toBeNull();
+		await afterRelease!.release();
+	});
+
 	it("supports non-writing dry runs, idempotent backfill and ownership conflicts", async () => {
 		const resources = { sessions: ["legacy-session"], workspaces: ["legacy-workspace"] };
 		const dry = await store.migrateLegacyResources("user-c", resources, true);

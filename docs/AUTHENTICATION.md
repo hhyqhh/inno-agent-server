@@ -40,14 +40,14 @@ compose application retains the explicit insecure local-mode override because
 its port is published; use Better Auth for non-local deployments.
 
 > **Isolation boundary:** account authentication and the current tenant/ownership
-> slices do not yet make all application data tenant-safe. Automatic/deferred
-> background execution and parts of the singleton agent runtime are still shared
-> until each domain's authorization migration lands. `INNO_MULTI_USER_ENABLED=true`
-> deliberately fails at startup until resource ownership and cross-tenant
-> isolation are implemented. Do not treat this stage as a safe multi-user
-> production deployment. Public registration additionally requires rate
-> limiting, email verification, and account recovery before an internet-facing
-> launch.
+> slices do not yet make all application data tenant-safe. Parts of the singleton
+> agent runtime are still shared until each domain's authorization migration
+> lands, and file-backed runtimes are not cross-process active-active.
+> `INNO_MULTI_USER_ENABLED=true` deliberately fails at startup until resource
+> ownership and cross-tenant isolation are implemented. Do not treat this stage
+> as a safe multi-user production deployment. Public registration additionally
+> requires rate limiting, email verification, and account recovery before an
+> internet-facing launch.
 
 ## Personal tenant foundation (stage 2A)
 
@@ -212,11 +212,40 @@ agent file sends cannot fall back to the deployment workspace and reject
 symlink escapes from the resolved session workspace.
 
 Channel-backed jobs may use the current tenant's default target for explicit,
-request-scoped manual runs into an owned session. Automatic cron/deferred
-execution remains local-only, and agent-initiated job execution without an
-explicit session still returns `scoped_runtime_unavailable`. Background
-execution and remaining singleton runtime state still require migration;
-`INNO_MULTI_USER_ENABLED` remains unavailable.
+request-scoped manual runs into an owned session. At this stage automatic cron/
+deferred execution remains local-only; stage 2I later adds tenant background
+execution. Agent-initiated job execution without an explicit session still
+returns `scoped_runtime_unavailable`. `INNO_MULTI_USER_ENABLED` remains
+unavailable.
+
+## Tenant background execution (stage 2I)
+
+`auth:migrate` now also creates `job_run_claims`. Authenticated scheduling uses
+`TenantCronScheduler` to enumerate job owners from PostgreSQL and restore each
+owner's tenant context for storage, model, memory, and channel access. Legacy
+global jobs remain invisible, and every automatic run creates and claims an
+explicit scheduler session and workspace instead of using the shared active
+session or inferring a channel from it.
+
+Cron, deferred auto-execution, and manual learning-occurrence runs use an atomic
+occurrence lease. The lease has a random owner token, a five-minute expiry, and
+heartbeat renewal; release and renewal are fenced by that token. Concurrent
+claims have one winner, another tenant cannot claim the job, and an expired lease
+can be taken over after a crash. Claims are released after an attempt, while the
+job and check-in ledgers persist completion. This is at-least-once recovery, not
+exactly-once model execution or channel delivery: a crash between an external
+side effect and the ledger update can repeat that side effect.
+
+Deferred countdown state is keyed by tenant and captures its verified context
+for the timer callback. Cancellation, manual takeover, and graceful shutdown
+release pending claims. The visible countdown list remains process-local rather
+than a cross-process durable queue; after a crash, cron re-arms work from the
+persistent job/check-in state once the old lease expires. Local mode retains its
+original in-memory occurrence claims and scheduler behavior.
+
+Agent-initiated runs without an explicit session remain rejected. Remaining
+singleton runtime state and file-backed active-active execution still require
+migration; `INNO_MULTI_USER_ENABLED` remains unavailable.
 
 
 ## Tests

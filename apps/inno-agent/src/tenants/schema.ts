@@ -28,6 +28,19 @@ CREATE TABLE IF NOT EXISTS resource_ownership (
 
 CREATE INDEX IF NOT EXISTS resource_ownership_tenant_type_idx
 	ON resource_ownership (tenant_id, resource_type);
+
+CREATE TABLE IF NOT EXISTS job_run_claims (
+	occurrence_id text PRIMARY KEY,
+	tenant_id text NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
+	job_id text NOT NULL,
+	scheduled_at timestamptz NOT NULL,
+	owner_token text NOT NULL,
+	claimed_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	expires_at timestamptz NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS job_run_claims_tenant_job_idx
+	ON job_run_claims (tenant_id, job_id);
 `;
 
 export async function migrateTenantDatabase(pool: Pool): Promise<void> {
