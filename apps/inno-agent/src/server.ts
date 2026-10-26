@@ -27,6 +27,7 @@ import {
 } from "./agent/pi-runner.js";
 import { completePromptOnce, runPromptSerialized, runPromptStreamingInSession, runPromptInSession, abortPromptForTurnToken, abortJobPromptInSession } from "./agent/pi-runner.js";
 import { closeDeferredRuns, configureDeferredRuns } from "./scheduler/deferred-runs.js";
+import { DurableSessionService } from "./agent/durable-session-service.js";
 import { ChannelRegistry } from "./channels/channel.js";
 import type { ChannelStreamEvent } from "./channels/channel.js";
 import { FeishuChannel } from "./channels/feishu/feishu-channel.js";
@@ -1503,6 +1504,15 @@ async function runQueueOpWithTimeout<T>(
 	}
 }
 
+const durableSessions = new DurableSessionService({
+	dataDir,
+	getLocalConfig: () => config,
+	enabled: process.env.INNO_DURABLE_ENABLED === "true",
+	resolveWorkspaceDir: (sessionId, fallbackWorkspaceId) => workspaceRegistry.resolveWorkspaceDir(
+		workspaceRegistry.getSessionWorkspaceId(sessionId) || fallbackWorkspaceId,
+	) ?? undefined,
+});
+
 const { dispatch: dispatchRoutes } = createRouteDispatcher({
 	// --- Check-ins API ---
 	checkins: (req, res, method, url) => handleCheckInsRoutes(req, res, method, url, { checkInStore, tenantStore: auth.tenantStore }),
@@ -1581,7 +1591,7 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 
 	// --- Sessions API (extracted to server/routes/sessions.ts) ---
 	sessions: (req, res, method, url) => handleSessionsRoutes(req, res, method, url, {
-		workspaceRegistry, dataDir, paths, getContentSource, tenantStore: auth.tenantStore,
+		workspaceRegistry, dataDir, paths, getContentSource, tenantStore: auth.tenantStore, durableSessions,
 		getCachedPresetAvailability: (presetId) => contentHubCatalog.getCachedPresetAvailability(presetId),
 		parseSessionFile, sessionRevision,
 		readSessionChannelMetadata, sessionChannelMetadataPath,
@@ -1637,7 +1647,7 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 
 	// --- Chat API (extracted to server/routes/chat.ts) ---
 	chat: (req, res, method, url) => handleChatRoutes(req, res, method, url, {
-		workspaceRegistry, dataDir, paths, tenantStore: auth.tenantStore,
+		workspaceRegistry, dataDir, paths, tenantStore: auth.tenantStore, durableSessions,
 		sessionFileFromId, releaseQueueFromQuestionBlockedTurn,
 		readSessionQuestionMetadata, writeSessionQuestionMetadata,
 		recordCurrentSessionChannel, maybeAutoGenerateTopic,
@@ -1942,6 +1952,7 @@ const gracefulShutdown = createGracefulShutdownHandler({
 	onClose: async () => {
 		scheduler?.stop();
 		await closeDeferredRuns();
+		await durableSessions.close();
 		await tenantChannelManager?.close();
 		await auth.close();
 	},

@@ -99,8 +99,11 @@ beforeAll(async () => {
 		let body = "";
 		req.setEncoding("utf-8");
 		req.on("data", (chunk) => { body += chunk; });
-		req.on("end", () => {
+		req.on("end", async () => {
 			providerRequests.push({ authorization: req.headers.authorization ?? "", body });
+			if (body.includes("durable-reconnect")) {
+				await new Promise((resolveDelay) => setTimeout(resolveDelay, 400));
+			}
 			res.writeHead(200, { "Content-Type": "text/event-stream" });
 			res.end([
 				`data: ${JSON.stringify({
@@ -156,6 +159,7 @@ beforeAll(async () => {
 			INNO_HOST: "127.0.0.1",
 			INNO_AUTH_MODE: "better-auth",
 			INNO_MULTI_USER_ENABLED: "true",
+			INNO_DURABLE_ENABLED: "true",
 			DATABASE_URL: postgres.databaseUrl,
 			BETTER_AUTH_SECRET: SECRET,
 			BETTER_AUTH_URL: origin,
@@ -959,4 +963,105 @@ describe("tenant background execution", () => {
 		}
 		expect(await readFile(join(home, "config", "config.json"), "utf-8")).toBe(globalConfigBefore);
 	}, 90_000);
+});
+
+describe("durable session HTTP boundary", () => {
+	it("isolates tenants, deduplicates request IDs, and replays SSE after disconnect", async () => {
+		const [cookieA, cookieB] = await Promise.all([
+			registerUser("durable-a@example.com"),
+			registerUser("durable-b@example.com"),
+		]);
+		const configure = async (cookie: string, apiKey: string) => {
+			const response = await api(cookie, "/api/settings/providers", {
+				method: "PUT",
+				body: JSON.stringify({
+					providerId: "shared",
+					baseUrl: providerOrigin,
+					apiKey,
+					api: "openai-completions",
+					models: [{ id: "tenant-model", name: "Tenant model", contextWindow: 32_000, maxTokens: 2_000 }],
+				}),
+			});
+			expect(response.status).toBe(200);
+		};
+		await Promise.all([configure(cookieA, "durable-a-secret"), configure(cookieB, "durable-b-secret")]);
+		const createDurable = async (cookie: string) => {
+			const response = await api(cookie, "/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ runtime: "durable" }),
+			});
+			expect(response.status).toBe(201);
+			return response.json() as Promise<{ id: string; runtime: string; workspaceId: string }>;
+		};
+		const [sessionA, sessionB] = await Promise.all([createDurable(cookieA), createDurable(cookieB)]);
+		expect(sessionA.id).toMatch(/^durable-/);
+		expect(sessionB.id).toMatch(/^durable-/);
+		expect(sessionA.runtime).toBe("durable");
+		expect((await api(cookieB, `/api/sessions/${sessionA.id}`)).status).toBe(404);
+		expect((await api(cookieB, "/api/chat/stream", {
+			method: "POST",
+			body: JSON.stringify({ sessionId: sessionA.id, prompt: "cross-tenant-durable", clientRequestId: "denied" }),
+		})).status).toBe(404);
+
+		const stream = async (cookie: string, sessionId: string, prompt: string, clientRequestId: string) => {
+			const response = await api(cookie, "/api/chat/stream", {
+				method: "POST",
+				body: JSON.stringify({ sessionId, prompt, clientRequestId }),
+			});
+			expect(response.status).toBe(200);
+			const text = await response.text();
+			expect(text).toContain('"type":"done"');
+			expect(text).toContain('"persisted":true');
+			return text;
+		};
+		await Promise.all([
+			stream(cookieA, sessionA.id, "durable-a-main-prompt", "durable-a-request"),
+			stream(cookieB, sessionB.id, "durable-b-main-prompt", "durable-b-request"),
+		]);
+		expect(providerRequests.find((request) => request.body.includes("durable-a-main-prompt"))?.authorization).toBe("Bearer durable-a-secret");
+		expect(providerRequests.find((request) => request.body.includes("durable-b-main-prompt"))?.authorization).toBe("Bearer durable-b-secret");
+		const countA = providerRequests.filter((request) => request.body.includes("durable-a-main-prompt")).length;
+		await stream(cookieA, sessionA.id, "durable-a-main-prompt", "durable-a-request");
+		expect(providerRequests.filter((request) => request.body.includes("durable-a-main-prompt"))).toHaveLength(countA);
+
+		const detailA = await (await api(cookieA, `/api/sessions/${sessionA.id}`)).json() as {
+			runtime: string;
+			messages: Array<{ role: string; content: string }>;
+		};
+		expect(detailA.runtime).toBe("durable");
+		expect(detailA.messages.filter((message) => message.role === "user" && message.content === "durable-a-main-prompt")).toHaveLength(1);
+		const listB = await (await api(cookieB, "/api/sessions")).json() as Array<{ id: string }>;
+		expect(listB.some((session) => session.id === sessionA.id)).toBe(false);
+		expect(existsSync(join(home, "data", "sessions", `${sessionA.id}.jsonl`))).toBe(false);
+
+		const disconnected = await api(cookieA, "/api/chat/stream", {
+			method: "POST",
+			body: JSON.stringify({ sessionId: sessionA.id, prompt: "durable-reconnect", clientRequestId: "durable-reconnect-request" }),
+		});
+		expect(disconnected.status).toBe(200);
+		const reader = disconnected.body!.getReader();
+		const decoder = new TextDecoder();
+		let initial = "";
+		while (!initial.includes('"status":"running"')) {
+			const chunk = await reader.read();
+			if (chunk.done) break;
+			initial += decoder.decode(chunk.value, { stream: true });
+		}
+		expect(initial).toContain('"status":"running"');
+		await reader.cancel();
+		const status = await (await api(cookieA, `/api/chat/status/${sessionA.id}`)).json() as {
+			stream: { turnId: string; clientRequestId: string };
+		};
+		expect(status.stream.clientRequestId).toBe("durable-reconnect-request");
+		const replay = await api(cookieA, `/api/chat/events/${sessionA.id}?turnId=${status.stream.turnId}&after=0`);
+		expect(replay.status).toBe(200);
+		const replayText = await replay.text();
+		expect(replayText).toContain('"type":"done"');
+		expect(replayText).toContain('"persisted":true');
+		const recovered = await (await api(cookieA, `/api/sessions/${sessionA.id}`)).json() as {
+			messages: Array<{ role: string; content: string }>;
+		};
+		expect(recovered.messages.some((message) => message.role === "user" && message.content === "durable-reconnect")).toBe(true);
+		expect(recovered.messages.some((message) => message.role === "assistant" && message.content === "tenant stub response")).toBe(true);
+	}, 60_000);
 });

@@ -14,6 +14,7 @@ export interface SessionMeta {
 	channels: SessionChannel[];
 	/** Immutable birthplace of the session (web/cli/feishu/wechat/scheduler). */
 	origin?: SessionChannel;
+	runtime?: "legacy" | "durable";
 	archived?: boolean;
 	/** True once a topic (manual or auto-generated) has been recorded server-side. */
 	hasTopic?: boolean;
@@ -47,9 +48,12 @@ export interface NewSessionResult {
 	id: string;
 	active: boolean;
 	workspaceId?: string;
+	runtime?: "legacy" | "durable";
 }
 
 export interface CreateSessionInput {
+	/** Explicit engine selection; omitted keeps the legacy default. */
+	runtime?: "legacy" | "durable";
 	workspaceId?: string;
 	newWorkspace?: {
 		name?: string;

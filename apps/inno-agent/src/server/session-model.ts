@@ -58,6 +58,9 @@ export interface SessionSummary {
 	channels: SessionChannel[];
 	/** Immutable birthplace of the session (web/cli/feishu/wechat/scheduler). */
 	origin?: SessionChannel;
+	/** Storage/execution engine. Absent on historical responses means legacy. */
+	runtime?: "legacy" | "durable";
+	archived?: boolean;
 	/** True once a topic (manual or auto-generated) has been recorded. */
 	hasTopic?: boolean;
 	/** True while an auto-generated preview is waiting for its richer summary. */

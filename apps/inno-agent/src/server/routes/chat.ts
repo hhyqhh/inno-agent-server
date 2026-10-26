@@ -43,6 +43,7 @@ import {
 	recordWorkspaceFileAccess,
 } from "../workspace-activity-store.js";
 import { WORKSPACE_IGNORES } from "../file-helpers.js";
+import { handleDurableChatRoutes, type DurableHttpContext } from "../durable-routes.js";
 import { json, matchRoute, readBody } from "../http-helpers.js";
 import type {
 	SessionChannel,
@@ -61,6 +62,7 @@ export interface ChatRouteContext {
 	dataDir: string;
 	paths: RuntimePaths;
 	tenantStore?: TenantStore | null;
+	durableSessions?: DurableHttpContext["service"];
 	sessionFileFromId: (sessionDir: string, id: string) => string | null;
 	releaseQueueFromQuestionBlockedTurn: (sessionId: string) => void;
 	readSessionQuestionMetadata: () => SessionQuestionMetadata;
@@ -508,10 +510,12 @@ export async function handleChatRoutes(
 		parseSessionFile,
 		sessionRevision,
 		tenantStore,
+		durableSessions,
 	} = ctx;
 
 	const ownsSession = (sessionId: string) => ownsRequestResource(req, tenantStore, "session", sessionId);
 	const denySession = () => { json(res, 404, { error: "Session not found" }); return true; };
+	const durableContext = durableSessions ? { service: durableSessions, workspaceRegistry, tenantStore } : null;
 	const pathSessionId = matchRoute("GET", method, url, "/api/chat/status/:sessionId")?.sessionId
 		?? matchRoute("GET", method, url, "/api/chat/events/:id")?.id
 		?? matchRoute("POST", method, url, "/api/chat/:sessionId/:turnId/abort")?.sessionId;
@@ -542,6 +546,9 @@ export async function handleChatRoutes(
 			return true;
 		}
 		if (requestedSessionId && !await ownsSession(requestedSessionId)) return denySession();
+		if (requestedSessionId && durableContext?.service.get(req, requestedSessionId)) {
+			return handleDurableChatRoutes(req, res, method, url, durableContext, body);
+		}
 		const imageSessionId = requestedSessionId || getCurrentSessionId();
 		const imageWorkspace = await resolveSessionWorkspace(imageSessionId);
 		if (!imageWorkspace) { json(res, 404, { error: "Session workspace not found" }); return true; }
@@ -671,6 +678,10 @@ export async function handleChatRoutes(
 			json(res, 404, { error: "Chat turn not found" });
 			return true;
 		}
+		if (durableContext?.service.get(req, state.sessionId)) {
+			json(res, 409, { error: "Durable turn cancellation is not enabled in this migration slice" });
+			return true;
+		}
 		if (state.status !== "queued" && state.status !== "running") {
 			json(res, 200, { status: state.status, cancelRequested: state.cancelRequested });
 			return true;
@@ -759,6 +770,9 @@ export async function handleChatRoutes(
 			return true;
 		}
 		if (!await ownsSession(requestedSessionId)) return denySession();
+		if (durableContext?.service.get(req, requestedSessionId)) {
+			return handleDurableChatRoutes(req, res, method, url, durableContext, body);
+		}
 		if (streamRegistry.getActiveForSession(requestedSessionId)) {
 			json(res, 409, { error: "Session already has an active chat turn" });
 			return true;

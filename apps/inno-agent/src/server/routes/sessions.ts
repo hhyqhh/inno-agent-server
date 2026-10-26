@@ -46,6 +46,7 @@ import { clearSessionBtw } from "../btw-store.js";
 import { contentDispositionAttachment } from "../file-helpers.js";
 import { clearWorkspaceActivity } from "../workspace-activity-store.js";
 import { HttpError, decodeRouteParam, json, matchRoute, readBody } from "../http-helpers.js";
+import { handleDurableSessionResourceRoutes, type DurableHttpContext } from "../durable-routes.js";
 import {
 	mergeChannels,
 	TOPIC_UPGRADE_MESSAGE_THRESHOLD,
@@ -68,6 +69,7 @@ export interface SessionsRouteContext {
 	dataDir: string;
 	paths: RuntimePaths;
 	tenantStore?: TenantStore | null;
+	durableSessions?: DurableHttpContext["service"];
 	getContentSource: () => RemoteContentSource;
 	getCachedPresetAvailability?: (presetId: string) => boolean | null;
 	parseSessionFile: (filePath: string) => { summary: SessionSummary; messages: SessionMessageSummary[] } | null;
@@ -288,6 +290,7 @@ export async function handleSessionsRoutes(
 		releaseQueueFromQuestionBlockedTurn,
 		runQueueOpWithTimeout,
 		tenantStore,
+		durableSessions,
 	} = ctx;
 
 	// Every session subresource is protected before any file or metadata access.
@@ -297,6 +300,13 @@ export async function handleSessionsRoutes(
 		if (!await ownsRequestResource(req, tenantStore, "session", id)) {
 			json(res, 404, { error: "Session not found" });
 			return true;
+		}
+		if (durableSessions?.get(req, id)) {
+			return handleDurableSessionResourceRoutes(req, res, method, url, id, {
+				service: durableSessions,
+				workspaceRegistry,
+				tenantStore,
+			});
 		}
 	}
 
@@ -328,7 +338,7 @@ export async function handleSessionsRoutes(
 		const tenant = getRequestTenant(req);
 		if (!tenantStore && tenant) throw new Error("Tenant store is required for an authenticated request");
 		const ownedSessionIds = tenant ? await tenantStore!.listResourceIds(tenant, "session") : null;
-		const sessions = existsSync(sessionDir)
+		const legacySessions = existsSync(sessionDir)
 			? readdirSync(sessionDir)
 					.filter((file) => file.endsWith(".jsonl"))
 					.map((file) => parseSessionFile(join(sessionDir, file))?.summary)
@@ -341,6 +351,10 @@ export async function handleSessionsRoutes(
 					.filter((summary) => summary.messageCount > 0 || (summary.id === currentSessionId && summary.origin === "web"))
 					.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
 			: [];
+		const durable = (durableSessions?.list(req) ?? [])
+			.filter((summary) => !ownedSessionIds || ownedSessionIds.has(summary.id));
+		const sessions = [...legacySessions, ...durable]
+			.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 		json(res, 200, sessions);
 		return true;
 	}
@@ -616,6 +630,40 @@ export async function handleSessionsRoutes(
 		if (explicitWorkspaceId && explicitWorkspaceId !== TEMP_WORKSPACE_ID
 			&& !await ownsRequestResource(req, tenantStore, "workspace", explicitWorkspaceId)) {
 			json(res, 404, { error: "Workspace not found" });
+			return true;
+		}
+
+		if (body.runtime !== undefined && body.runtime !== "durable" && body.runtime !== "legacy") {
+			json(res, 400, { error: "runtime must be legacy or durable" });
+			return true;
+		}
+		if (body.runtime === "durable") {
+			if (!durableSessions) { json(res, 503, { error: "Durable session service is unavailable" }); return true; }
+			if (presetId || newWorkspaceSpec) {
+				json(res, 400, { error: "Durable session creation does not yet support presets or newWorkspace" });
+				return true;
+			}
+			const workspace = await resolveRequestWorkspace(req, workspaceRegistry, tenantStore, explicitWorkspaceId || TEMP_WORKSPACE_ID);
+			if (!workspace) { json(res, 404, { error: "Workspace not found" }); return true; }
+			let createdId = "";
+			let claimed = false;
+			try {
+				const summary = durableSessions.create(req, { workspaceId: workspace.id });
+				createdId = summary.id;
+				if (!workspaceRegistry.bindSession(summary.id, workspace.id)) throw new Error("Workspace not found");
+				await claimRequestResource(req, tenantStore, "session", summary.id);
+				claimed = true;
+				json(res, 201, { id: summary.id, active: true, workspaceId: workspace.id, runtime: "durable" });
+			} catch (error) {
+				if (createdId) {
+					await durableSessions.delete(req, createdId).catch(() => undefined);
+					workspaceRegistry.unbindSession(createdId);
+					if (claimed) await releaseRequestResource(req, tenantStore, "session", createdId).catch(() => undefined);
+				}
+				json(res, error instanceof Error && error.name === "DurableRuntimeDisabledError" ? 400 : 500, {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
 			return true;
 		}
 
