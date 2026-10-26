@@ -49,6 +49,26 @@ its port is published; use Better Auth for non-local deployments.
 > requires rate limiting, email verification, and account recovery before an
 > internet-facing launch.
 
+## File-backed deployment boundary
+
+The current server is a **single-process, single-replica** runtime even when
+Better Auth and PostgreSQL are enabled. PostgreSQL owns account, tenant,
+resource-ownership, and job-occurrence claim metadata; it does not make PI
+session files, tenant L1/L2/L3 files, workspaces, terminals, in-memory prompt
+queues, SSE buffers, or deferred countdowns shareable between processes.
+
+- Run exactly one application process against a data/workspace root. Do not
+  mount the same root into active-active replicas or share it through NFS.
+- During an upgrade, stop the old process and wait for graceful shutdown before
+  starting its replacement against the same files. A rolling two-replica
+  deployment is not supported by this runtime.
+- The job lease prevents concurrent occurrence claims and permits takeover
+  after expiry. It is not a general storage lock, a durable deferred queue, or
+  an exactly-once boundary around model calls and channel delivery.
+- Multiple accounts may share the process only after the remaining singleton
+  runtime audit is complete and `INNO_MULTI_USER_ENABLED` is explicitly made
+  available. Better Auth alone is not production multi-user approval.
+
 ## Personal tenant foundation (stage 2A)
 
 `auth:migrate` also creates personal tenants, owner memberships, and a global

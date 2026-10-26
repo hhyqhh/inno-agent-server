@@ -1,4 +1,6 @@
 services:
+  # File-backed runtime: keep exactly one replica and stop it before replacement.
+  # PostgreSQL metadata does not make the data/workspace volumes shareable.
   inno-agent:
     build: .
     ports:
