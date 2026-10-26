@@ -39,6 +39,8 @@ export interface CaseSpec {
 export interface ShowcaseExportPaths {
 	sessionsDir: string;
 	dataDir: string;
+	/** L1 root for this export; defaults to <dataDir>/learner for local/CLI callers. */
+	learnerDataDir?: string;
 	/** The cases dir: <id>.json, index.json and <id>/assets/ go here. */
 	outDir: string;
 }
@@ -56,6 +58,12 @@ export interface ShowcaseCaseIndexEntry {
 /** `<file>.jsonl` → `<date>-<uuid8>`, e.g. `2026-06-05-019e9839`. */
 export function deriveCaseId(sessionFile: string): string {
 	return `${sessionFile.slice(0, 10)}-${sessionFile.match(/_([0-9a-f]{8})/)?.[1] ?? "session"}`;
+}
+
+/** Case IDs name both JSON files and asset directories; keep them single-component. */
+export function isValidCaseId(id: string): boolean {
+	return id !== "." && id !== ".." && id.toLowerCase() !== "index"
+		&& /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id);
 }
 
 // --- Sanitization ------------------------------------------------------------
@@ -637,7 +645,7 @@ function extractWikiKeyframes(messages: ShowcaseMessage[], rewrites: Array<[RegE
 /** Profile events + a sanitized snapshot of the current learner profile. */
 function extractProfilePanel(
 	messages: ShowcaseMessage[],
-	dataDir: string,
+	learnerDataDir: string,
 	rewrites: Array<[RegExp, string]>,
 ): CasePanels["profile"] {
 	const events: ProfileEvent[] = [];
@@ -655,7 +663,7 @@ function extractProfilePanel(
 	});
 	let profile: unknown | null = null;
 	if (events.length > 0) {
-		const profilePath = join(dataDir, "learner", "profile.json");
+		const profilePath = join(learnerDataDir, "profile.json");
 		if (existsSync(profilePath)) {
 			const raw = JSON.parse(readFileSync(profilePath, "utf-8")) as Record<string, unknown>;
 			raw.learner_id = "demo-learner";
@@ -756,6 +764,7 @@ export function exportShowcaseCase(
 	paths: ShowcaseExportPaths,
 	baseRewrites: Array<[RegExp, string]>,
 ): ShowcaseCaseIndexEntry | null {
+	if (!isValidCaseId(spec.id)) throw new Error(`Invalid showcase case id: ${spec.id}`);
 	const sessionPath = join(paths.sessionsDir, spec.sessionFile);
 	if (!existsSync(sessionPath)) return null;
 	mkdirSync(paths.outDir, { recursive: true });
@@ -812,7 +821,7 @@ export function exportShowcaseCase(
 		};
 	}
 	const wikiPanel = { keyframes: extractWikiKeyframes(rawMessages, rewrites) };
-	const profilePanel = extractProfilePanel(rawMessages, paths.dataDir, rewrites);
+	const profilePanel = extractProfilePanel(rawMessages, paths.learnerDataDir ?? join(paths.dataDir, "learner"), rewrites);
 
 	const messages = polishMessages(rawMessages, rewrites);
 

@@ -46,8 +46,12 @@ describe("auth runtime config", () => {
 		expect(() => readAuthRuntimeConfig(authEnv({ BETTER_AUTH_SECRET: "short" }))).toThrow("at least 32");
 	});
 
-	it("does not expose unfinished multi-user mode", () => {
-		expect(() => readAuthRuntimeConfig({ INNO_MULTI_USER_ENABLED: "true" })).toThrow("not available");
+	it("allows the explicit multi-user gate only with Better Auth", () => {
+		expect(readAuthRuntimeConfig(authEnv({ INNO_MULTI_USER_ENABLED: "true" }))).toMatchObject({
+			mode: "better-auth",
+			multiUserEnabled: true,
+		});
+		expect(() => readAuthRuntimeConfig({ INNO_MULTI_USER_ENABLED: "true" })).toThrow("requires INNO_AUTH_MODE=better-auth");
 	});
 
 	it("rejects invalid mode and boolean values", () => {

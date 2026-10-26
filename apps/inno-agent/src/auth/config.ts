@@ -40,8 +40,8 @@ export function readAuthRuntimeConfig(env: NodeJS.ProcessEnv): AuthRuntimeConfig
 		throw new Error(`Invalid INNO_AUTH_MODE: ${rawMode}`);
 	}
 	const multiUserEnabled = readBoolean(env.INNO_MULTI_USER_ENABLED);
-	if (multiUserEnabled) {
-		throw new Error("INNO_MULTI_USER_ENABLED is not available until tenant isolation is complete");
+	if (multiUserEnabled && rawMode !== "better-auth") {
+		throw new Error("INNO_MULTI_USER_ENABLED requires INNO_AUTH_MODE=better-auth");
 	}
 	if (rawMode === "local") {
 		return {

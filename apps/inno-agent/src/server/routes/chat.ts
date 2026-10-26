@@ -624,11 +624,11 @@ export async function handleChatRoutes(
 			// tell the client to resubmit the answer as a fresh chat turn — the
 			// agent then picks the answer up from the session history.
 			const questionMeta = readSessionQuestionMetadata();
-			const persistedEntry = Object.entries(questionMeta).find(([, q]) => q.questionId === questionId);
-			if (persistedEntry) {
-				delete questionMeta[persistedEntry[0]];
+			const persisted = questionMeta[sessionId];
+			if (persisted?.sessionId === sessionId && persisted.questionId === questionId && persisted.turnId === turnId) {
+				delete questionMeta[sessionId];
 				writeSessionQuestionMetadata(questionMeta);
-				json(res, 200, { accepted: true, expired: true, sessionId: persistedEntry[0] });
+				json(res, 200, { accepted: true, expired: true, sessionId });
 				return true;
 			}
 		}

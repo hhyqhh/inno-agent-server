@@ -25,6 +25,7 @@ import {
 	buildPathRewrites,
 	deriveCaseId,
 	exportShowcaseCase,
+	isValidCaseId,
 	readSessionCwd,
 	upsertShowcaseIndex,
 	type CaseSpec,
@@ -34,6 +35,7 @@ import { TEMP_WORKSPACE_ID, type WorkspaceRegistry } from "../../workspace/works
 import type { TenantStore } from "../../tenants/store.js";
 import { claimRequestResource, getRequestTenant, ownsRequestResource, releaseRequestResource } from "../../tenants/http.js";
 import { resolveRequestWorkspace } from "../../tenants/workspaces.js";
+import { resolveRequestTenantDataRoot } from "../../tenants/paths.js";
 import {
 	clearSessionAttachments,
 	mergeSessionAttachments,
@@ -409,9 +411,18 @@ export async function handleSessionsRoutes(
 		const rewrites = buildPathRewrites({
 			workspaceContainers: sessionInfo ? [dirname(sessionInfo.cwd)] : [],
 		});
-		const outDir = join(dataDir, "showcase-exports", "cases");
+		const outDir = join(resolveRequestTenantDataRoot(req, dataDir), "showcase-exports", "cases");
+		if (!isValidCaseId(spec.id)) {
+			json(res, 400, { error: `Invalid showcase case id: ${spec.id}` });
+			return true;
+		}
 		try {
-			const entry = exportShowcaseCase(spec, { sessionsDir, dataDir, outDir }, rewrites);
+			const entry = exportShowcaseCase(spec, {
+				sessionsDir,
+				dataDir,
+				learnerDataDir: join(resolveRequestTenantDataRoot(req, dataDir), "learner"),
+				outDir,
+			}, rewrites);
 			if (!entry) {
 				json(res, 422, { error: "Unable to export session" });
 				return true;
@@ -759,7 +770,7 @@ export async function handleSessionsRoutes(
 			clearSessionAttachments(dataDir, sessionId);
 			clearSessionAgentCommands(dataDir, sessionId);
 			clearSessionTraces(dataDir, sessionId);
-			clearSessionBtw(dataDir, sessionId);
+			clearSessionBtw(resolveRequestTenantDataRoot(req, dataDir), sessionId);
 			clearWorkspaceActivity(dataDir, sessionId);
 			workspaceRegistry.unbindSession(sessionId);
 			if (shouldDropTempWorkspace) {

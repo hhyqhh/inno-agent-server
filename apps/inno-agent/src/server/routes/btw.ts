@@ -7,6 +7,7 @@ import { logger } from "../../logger.js";
 import type { SessionMessageSummary } from "../session-model.js";
 import type { TenantStore } from "../../tenants/store.js";
 import { ownsRequestResource } from "../../tenants/http.js";
+import { resolveRequestTenantDataRoot } from "../../tenants/paths.js";
 import {
 	readBtwState,
 	writeBtwState,
@@ -202,8 +203,9 @@ export async function handleBtwRoutes(
 			json(res, 404, { error: "Session not found" });
 			return true;
 		}
+		const stateDataRoot = resolveRequestTenantDataRoot(req, ctx.dataDir);
 		if (method === "GET") {
-			json(res, 200, readBtwState(ctx.dataDir, sessionId));
+			json(res, 200, readBtwState(stateDataRoot, sessionId));
 			return true;
 		}
 		const body = await readBody(req);
@@ -212,7 +214,7 @@ export async function handleBtwRoutes(
 			json(res, 400, { error: "Malformed btw state" });
 			return true;
 		}
-		json(res, 200, writeBtwState(ctx.dataDir, sessionId, parsed));
+		json(res, 200, writeBtwState(stateDataRoot, sessionId, parsed));
 		return true;
 	}
 

@@ -43,8 +43,8 @@ npm run server -- --home ./runtime --workspace ./workspace --port 3000
 
 1. 打开 Inno Agent 界面,左侧会话列表**悬停**要导出的那条会话;
 2. 在动作栏点**场记板图标**「导出为回放案例」(在「导出为 Markdown」图标旁边);
-3. 弹窗显示案例标题和导出目录(`runtime/data/showcase-exports/cases/`),点确定即可。
-   多次导出自动合并到同一个 index,不用管命名和覆盖。
+3. 弹窗显示案例标题和导出目录(local 模式为 `runtime/data/showcase-exports/cases/`;Better Auth 模式为 `runtime/data/tenants/<tenantId>/showcase-exports/cases/`),点确定即可。
+   多次导出自动合并到同一 tenant 的 index,不用管命名和覆盖。认证模式只读取当前 tenant 的 L1 画像。
 
 标题默认取会话名(你改过名或自动生成过标题就用它),否则用首条用户消息。
 
@@ -80,7 +80,7 @@ npm run showcase:view
 |---|---|---|
 | `--session <子串>` | 要导出的 session 文件名子串(必填) | — |
 | `--out <dir>` | 案例输出目录 | `apps/showcase/public/cases`(**注意**:这是发布目录,本地自看请指到 `runtime/data/showcase-exports/cases`) |
-| `--id <id>` | 案例 id(URL 路由用) | `<日期>-<uuid前8位>` |
+| `--id <id>` | 案例 id(URL 路由用);仅限字母、数字、`.`、`_`、`-`,最长 128 字符,不能是 `index` 或路径 | `<日期>-<uuid前8位>` |
 | `--title` / `--title-en` | 案例标题(中/英) | 首条用户消息前 40 字 |
 | `--description` | 案例描述 | 空 |
 | `--tags a,b` | 标签 | 空 |

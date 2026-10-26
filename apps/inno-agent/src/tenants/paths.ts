@@ -3,6 +3,12 @@ import { join } from "node:path";
 import { getRequestTenant } from "./http.js";
 import { getCurrentTenant } from "./current.js";
 
+/** Resolve private HTTP state without trusting client-provided tenant paths. */
+export function resolveRequestTenantDataRoot(req: IncomingMessage, dataDir: string): string {
+	const tenant = getRequestTenant(req);
+	return tenant ? join(dataDir, "tenants", tenant.tenantId) : dataDir;
+}
+
 /** Resolve a domain directory without trusting client-provided path segments. */
 export function resolveTenantDataDir(
 	req: IncomingMessage,

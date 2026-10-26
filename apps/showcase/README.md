@@ -23,7 +23,7 @@ npm run showcase:build    # 类型检查 + 构建静态产物到 apps/showcase/d
 
 详细操作手册见 **[EXPORTING.md](./EXPORTING.md)**(导出内容、参数参考、脱敏规则、限制与排查)。三种方式速览:
 
-**方式一:产品内一键导出(推荐)**——会话列表悬停某条会话 → 点场记板图标「导出为回放案例」,案例写入 `runtime/data/showcase-exports/cases/`。然后:
+**方式一:产品内一键导出(推荐)**——会话列表悬停某条会话 → 点场记板图标「导出为回放案例」,local 模式案例写入 `runtime/data/showcase-exports/cases/`;Better Auth 模式写入对应 tenant 的 `showcase-exports/cases/`。然后:
 
 ```bash
 npm run showcase:view     # 起本地服务直接看回放,自动开浏览器(:4175)

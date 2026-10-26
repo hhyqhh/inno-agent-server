@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -155,6 +155,7 @@ beforeAll(async () => {
 			INNO_PORT: String(port),
 			INNO_HOST: "127.0.0.1",
 			INNO_AUTH_MODE: "better-auth",
+			INNO_MULTI_USER_ENABLED: "true",
 			DATABASE_URL: postgres.databaseUrl,
 			BETTER_AUTH_SECRET: SECRET,
 			BETTER_AUTH_URL: origin,
@@ -250,6 +251,116 @@ describe("server authentication boundary", () => {
 		});
 		expect(crossOriginStatus).toBe(403);
 	});
+});
+
+describe("session sidecar and showcase tenant isolation", () => {
+	it("scopes expired questions, BTW geometry and showcase exports without legacy profile leakage", async () => {
+		const [cookieA, cookieB] = await Promise.all([
+			registerUser("sidecars-a@example.com"),
+			registerUser("sidecars-b@example.com"),
+		]);
+		const createSession = async (cookie: string) => {
+			const response = await api(cookie, "/api/sessions", {
+				method: "POST", body: JSON.stringify({ newWorkspace: { isTemp: true } }),
+			});
+			expect(response.status).toBe(201);
+			return (await response.json() as { id: string }).id;
+		};
+		const [sessionA, sessionB] = await Promise.all([createSession(cookieA), createSession(cookieB)]);
+		const pool = new Pool({ connectionString: postgres.databaseUrl });
+		let tenantA: string;
+		let tenantB: string;
+		try {
+			const tenantRows = await pool.query<{ id: string; email: string }>(
+				`SELECT tenant.id, account.email FROM tenants tenant JOIN "user" account ON account.id = tenant.owner_user_id
+				 WHERE account.email IN ('sidecars-a@example.com', 'sidecars-b@example.com')`,
+			);
+			tenantA = tenantRows.rows.find((row) => row.email === "sidecars-a@example.com")!.id;
+			tenantB = tenantRows.rows.find((row) => row.email === "sidecars-b@example.com")!.id;
+		} finally {
+			await pool.end();
+		}
+
+		const stateA = await (await api(cookieA, `/api/btw/state/${sessionA}`)).json() as Record<string, unknown>;
+		const stateB = await (await api(cookieB, `/api/btw/state/${sessionB}`)).json() as Record<string, unknown>;
+		expect((await api(cookieA, `/api/btw/state/${sessionA}`, {
+			method: "PUT",
+			body: JSON.stringify({ ...stateA, window: { x: 11, y: 12, width: 520, height: 420 }, windowInitialized: true, minimized: true }),
+		})).status).toBe(200);
+		expect((await api(cookieB, `/api/btw/state/${sessionB}`, {
+			method: "PUT",
+			body: JSON.stringify({ ...stateB, window: { x: 21, y: 22, width: 620, height: 480 }, windowInitialized: true, minimized: false }),
+		})).status).toBe(200);
+		expect(await (await api(cookieA, `/api/btw/state/${sessionA}`)).json()).toMatchObject({
+			window: { x: 11, y: 12, width: 520, height: 420 }, minimized: true,
+		});
+		expect(await (await api(cookieB, `/api/btw/state/${sessionB}`)).json()).toMatchObject({
+			window: { x: 21, y: 22, width: 620, height: 480 }, minimized: false,
+		});
+		expect(existsSync(join(home, "data", "sessions", "btw.json"))).toBe(false);
+		expect(existsSync(join(home, "data", "tenants", tenantA, "sessions", "btw.json"))).toBe(true);
+		expect(existsSync(join(home, "data", "tenants", tenantB, "sessions", "btw.json"))).toBe(true);
+
+		const questionsPath = join(home, "data", "sessions", "questions.json");
+		const questionFixture = {
+			[sessionA]: { questionId: "victim-question", sessionId: sessionA, turnId: "victim-turn", params: {}, createdAt: new Date().toISOString() },
+			[sessionB]: { questionId: "other-question", sessionId: sessionB, turnId: "other-turn", params: {}, createdAt: new Date().toISOString() },
+		};
+		await writeFile(questionsPath, JSON.stringify(questionFixture));
+		const expiredResponse = (sessionId: string, turnId: string, questionId: string) => api(cookieB, "/api/chat/question-response", {
+			method: "POST",
+			body: JSON.stringify({ sessionId, turnId, questionId, result: { answers: [], cancelled: true } }),
+		});
+		expect((await expiredResponse(sessionB, "victim-turn", "victim-question")).status).toBe(404);
+		expect(JSON.parse(await readFile(questionsPath, "utf-8"))).toEqual(questionFixture);
+		expect((await api(cookieA, "/api/chat/question-response", {
+			method: "POST",
+			body: JSON.stringify({ sessionId: sessionA, turnId: "victim-turn", questionId: "victim-question", result: { answers: [], cancelled: true } }),
+		})).status).toBe(200);
+		expect(JSON.parse(await readFile(questionsPath, "utf-8"))).toEqual({ [sessionB]: questionFixture[sessionB] });
+
+		const probePath = join(home, "data", "sessions", "gate-probe.json");
+		await writeFile(probePath, "do-not-overwrite");
+		expect((await api(cookieA, `/api/sessions/${sessionA}/showcase-export`, {
+			method: "POST", body: JSON.stringify({ id: "../../sessions/gate-probe" }),
+		})).status).toBe(400);
+		expect((await api(cookieA, `/api/sessions/${sessionA}/showcase-export`, {
+			method: "POST", body: JSON.stringify({ id: "index" }),
+		})).status).toBe(400);
+		expect(await readFile(probePath, "utf-8")).toBe("do-not-overwrite");
+
+		await mkdir(join(home, "data", "learner"), { recursive: true });
+		await mkdir(join(home, "data", "tenants", tenantA, "learner"), { recursive: true });
+		await writeFile(join(home, "data", "learner", "profile.json"), JSON.stringify({ profile_summary: "legacy-global-secret" }));
+		await writeFile(join(home, "data", "tenants", tenantA, "learner", "profile.json"), JSON.stringify({ profile_summary: "tenant-a-profile-secret" }));
+		await appendFile(join(home, "data", "sessions", sessionA), `${JSON.stringify({
+			type: "message",
+			timestamp: "2026-10-27T00:00:00.000Z",
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "learning-call", name: "record_learning_event", arguments: { payload: { topic: "private milestone" } } }],
+				stopReason: "stop",
+			},
+		})}\n`);
+		for (const [cookie, sessionId, title] of [[cookieA, sessionA, "Tenant A case"], [cookieB, sessionB, "Tenant B case"]] as const) {
+			const response = await api(cookie, `/api/sessions/${sessionId}/showcase-export`, {
+				method: "POST", body: JSON.stringify({ id: "shared-case", title }),
+			});
+			expect(response.status).toBe(200);
+		}
+		const casesA = join(home, "data", "tenants", tenantA, "showcase-exports", "cases");
+		const casesB = join(home, "data", "tenants", tenantB, "showcase-exports", "cases");
+		const exportedA = await readFile(join(casesA, "shared-case.json"), "utf-8");
+		const exportedB = await readFile(join(casesB, "shared-case.json"), "utf-8");
+		expect(exportedA).toContain("Tenant A case");
+		expect(exportedA).toContain("tenant-a-profile-secret");
+		expect(exportedA).not.toContain("legacy-global-secret");
+		expect(exportedB).toContain("Tenant B case");
+		expect(exportedB).not.toContain("Tenant A case");
+		expect(await readFile(join(casesA, "index.json"), "utf-8")).toContain("Tenant A case");
+		expect(await readFile(join(casesB, "index.json"), "utf-8")).toContain("Tenant B case");
+		expect(existsSync(join(home, "data", "showcase-exports", "cases"))).toBe(false);
+	}, 30_000);
 });
 
 describe("session and workspace tenant isolation", () => {

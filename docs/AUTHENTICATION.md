@@ -39,12 +39,11 @@ For local development, `docker compose up postgres` starts PostgreSQL. The
 compose application retains the explicit insecure local-mode override because
 its port is published; use Better Auth for non-local deployments.
 
-> **Isolation boundary:** account authentication and the current tenant/ownership
-> slices do not yet constitute production multi-user approval. Better Auth mode
+> **Isolation boundary:** the restricted multi-user runtime requires Better Auth
+> and the explicit `INNO_MULTI_USER_ENABLED=true` opt-in. Better Auth mode
 > disables PI host shell/file tools and PTY terminals, and confines retained
-> custom path tools to the owned session workspace. File-backed runtimes are not
-> cross-process active-active. `INNO_MULTI_USER_ENABLED=true` deliberately fails
-> at startup until the remaining isolation review is complete. Public registration
+> custom path tools to the owned session workspace. File-backed runtimes remain
+> single-process and are not cross-process active-active. Public registration
 > additionally requires rate limiting, email verification, and account recovery
 > before an internet-facing launch.
 
@@ -64,9 +63,9 @@ queues, SSE buffers, or deferred countdowns shareable between processes.
 - The job lease prevents concurrent occurrence claims and permits takeover
   after expiry. It is not a general storage lock, a durable deferred queue, or
   an exactly-once boundary around model calls and channel delivery.
-- Multiple accounts may share the process only after the remaining isolation
-  review is complete and `INNO_MULTI_USER_ENABLED` is explicitly made available.
-  Better Auth alone is not production multi-user approval.
+- Multiple accounts may share exactly one application process in the restricted
+  Better Auth runtime when `INNO_MULTI_USER_ENABLED=true`. The flag is rejected
+  in local mode and does not make file-backed state shareable between processes.
 
 ## Personal tenant foundation (stage 2A)
 
@@ -314,6 +313,29 @@ This is a deliberate capability reduction, not an OS-level tenant sandbox or a
 claim that arbitrary host execution is confined. `INNO_MULTI_USER_ENABLED`
 remains unavailable pending the final isolation review; public registration and
 single-process deployment requirements are unchanged.
+
+## Final sidecar isolation and restricted gate (stage 2L)
+
+Expired question fallback now consumes a persisted card only when the owned
+session ID, turn ID, and question ID all match. A question UUID from another
+session returns 404 without deleting the card or disclosing its session ID.
+Authenticated BTW exchanges and window geometry live under
+`<dataDir>/tenants/<tenantId>/sessions/btw.json`; local mode retains the shared
+local window and original sidecar path.
+
+Showcase case IDs are validated as single path components in both HTTP and CLI
+exports, rejecting traversal and the reserved `index` manifest name. Better
+Auth exports write cases, assets, and the manifest under
+`<dataDir>/tenants/<tenantId>/showcase-exports/cases` and read L1 only from that
+tenant's learner root. They never overwrite another tenant's case namespace or
+mix in the legacy global profile. Local and CLI exports retain their original
+output and profile defaults.
+
+With these final shared-state fixes, `INNO_MULTI_USER_ENABLED=true` is accepted
+only together with `INNO_AUTH_MODE=better-auth`; local mode rejects it. This is
+an explicitly restricted, single-process multi-user runtime, not horizontal
+scaling or an internet-facing account-security sign-off. Public registration
+still requires rate limiting, email verification, and account recovery.
 
 ## Tests
 

@@ -39,7 +39,7 @@ General-purpose coding agents optimize for open-ended software engineering. Educ
 Inno Agent is a **personal** agent, and the architecture deliberately reflects that:
 
 - **One process, one active agent session.** A single in-memory prompt queue serializes all work; sessions, workspaces, and channels share it. Session switching swaps session files in place — there is no per-session agent pool.
-- **No horizontal scaling.** Optional Better Auth + PostgreSQL account and tenant isolation slices are implemented. Authenticated mode disables PI host shell/file tools and PTY terminals and hides their Practice Lab controls rather than offering unconfined host execution; `INNO_MULTI_USER_ENABLED` deliberately remains unavailable pending the final isolation review. File-backed state supports one server process, not active-active replicas. Until the multi-user gate is explicitly lifted, production team deployments still require one instance per person.
+- **No horizontal scaling.** Better Auth + PostgreSQL provides account and tenant isolation for a restricted, explicitly enabled (`INNO_MULTI_USER_ENABLED=true`) single-process multi-user runtime. Authenticated mode disables PI host shell/file tools and PTY terminals and hides their Practice Lab controls rather than offering unconfined host execution. File-backed state supports one server process, not active-active replicas; scaling out requires the later durable/sharded architecture.
 - **Backpressure is a feature, not a bug.** When the queue is busy (e.g. another session's long turn or an unanswered question card), cross-session operations answer `409 session_busy` with blocker details instead of silently queueing for minutes — the UI surfaces this so you can finish or abort the blocking turn. See [issue #124](https://github.com/hhyqhh/inno-agent/issues/124) for the design discussion.
 
 These constraints keep the memory layers, scheduler, and channels simple enough to reason about — which matters more for a tool that watches how you learn than for one that serves a crowd.
@@ -244,7 +244,7 @@ npm run showcase:export -- --session <substring>   # pick one recorded session
 npm run showcase:view                              # build + serve + open the replay site
 ```
 
-Exported cases land in `runtime/data/showcase-exports/cases/` with automatic path/username/secret sanitization; the viewer overlays them on top of the published cases without a rebuild.
+Exported cases land in `runtime/data/showcase-exports/cases/` in local/CLI mode, or `runtime/data/tenants/<tenantId>/showcase-exports/cases/` in Better Auth mode, with automatic path/username/secret sanitization. Case IDs are restricted to safe single path components, and authenticated exports read only the current tenant's L1 profile. The local viewer overlays local exports on top of the published cases without a rebuild; use `--cases <dir>` to view another export directory.
 
 - [apps/showcase/README.md](./apps/showcase/README.md) — architecture, mock backend, and the constraints for keeping the replay UI in sync with product code.
 - [apps/showcase/EXPORTING.md](./apps/showcase/EXPORTING.md) — full export handbook (中文): button flow, CLI reference, sanitization rules, troubleshooting.
