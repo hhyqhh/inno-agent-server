@@ -22,7 +22,7 @@ import { createDocumentTools } from "./document-tools.js";
 import { createOcrTools } from "./ocr-tools.js";
 import { createTavilyTools } from "./tavily-tools.js";
 import { ensureWebAccessConfig, resolvePiAiJitiAliases } from "./web-access-config.js";
-import { ensurePermissionSystemConfig, INNO_WEB_AUTHORIZER_NAME, resolvePluginFile } from "./permission-system-config.js";
+import { ensurePermissionSystemConfig, INNO_WEB_AUTHORIZER_NAME, resolvePluginFile, writePermissionPolicyConfig } from "./permission-system-config.js";
 import { permissionBridge, type PermissionAskDetails } from "./permission-bridge.js";
 import { checkWorkspaceMutationPath } from "./workspace-path-guard.js";
 import { INNO_SYSTEM_PROMPT, ONBOARDING_GUIDE, WEB_ACCESS_PROMPT_HINT } from "./system-prompt.js";
@@ -35,6 +35,8 @@ import type { RuntimePaths } from "../runtime.js";
 import type { WorkspaceRegistry } from "../workspace/workspace-registry.js";
 import type { RunRecordStore } from "../terminal/run-record-store.js";
 import { resolveCurrentTenantDataDir, resolveCurrentTenantDataRoot } from "../tenants/paths.js";
+import { getCurrentTenant } from "../tenants/current.js";
+import { saveTenantConfig } from "../tenants/config.js";
 
 const INNO_VERSION = "0.0.1";
 
@@ -59,6 +61,8 @@ export interface InnoExtensionDeps {
 	getCurrentSessionId?: () => string;
 	/** Tag the active session as having interacted with a channel (file send, etc.). */
 	recordChannelInteraction?: (channel: ChannelName) => void;
+	/** Authenticated mode disables extensions with process-global config or credentials. */
+	sharedExtensionsDisabled?: boolean;
 }
 
 /** File name for per-workspace agent context, loaded into the prompt each turn. */
@@ -265,7 +269,11 @@ export function createInnoExtension(
 			const cfg = configHolder.current;
 			if (!cfg.providers[event.model.provider]) return;
 			try {
-				configHolder.current = saveConfig(paths.configPath, setDefaultModel(cfg, event.model.provider, event.model.id));
+				const next = setDefaultModel(cfg, event.model.provider, event.model.id);
+				const tenant = getCurrentTenant();
+				configHolder.current = tenant
+					? saveTenantConfig(paths.dataDir, tenant.tenantId, next)
+					: saveConfig(paths.configPath, next);
 			} catch (err) {
 				// The selected model may be a runtime-only model; leave persisted config unchanged.
 				logger.warn({ err, provider: event.model.provider, modelId: event.model.id }, "model_select: failed to persist default model to config");
@@ -483,7 +491,7 @@ export function createInnoExtension(
 
 				// Mention the pi-web-access fetch tools only when the plugin is
 				// actually loaded (mirrors the registration gate in section 10).
-				if (configHolder.current.plugins?.webAccess?.enabled !== false) {
+				if (!deps?.sharedExtensionsDisabled && configHolder.current.plugins?.webAccess?.enabled !== false) {
 					sections.push(WEB_ACCESS_PROMPT_HINT);
 				}
 
@@ -579,7 +587,7 @@ export function createInnoExtension(
 		});
 
 		// 8. Register pi-subagents extension (when enabled)
-		if (config.subagents?.enabled) {
+		if (config.subagents?.enabled && !deps?.sharedExtensionsDisabled) {
 			try {
 				syncProvidersForSubagents(config);
 				const { createJiti } = await import("jiti/static");
@@ -700,7 +708,7 @@ export function createInnoExtension(
 			}
 		}
 
-		if (configHolder.current.plugins?.webAccess?.enabled !== false) {
+		if (!deps?.sharedExtensionsDisabled && configHolder.current.plugins?.webAccess?.enabled !== false) {
 			try {
 				// Must run before the import: pi-web-access reads web-search.json
 				// (from $PI_CODING_AGENT_DIR = paths.configDir) at extension init to
@@ -743,11 +751,15 @@ export function createInnoExtension(
 		// The service registry lives behind globalThis[Symbol.for(...)], so the
 		// jiti-loaded plugin and this module share it despite separate module
 		// instances. Default ON; `plugins.permissionSystem.enabled: false` opts out.
-		if (configHolder.current.plugins?.permissionSystem?.enabled !== false) {
+		if (deps?.sharedExtensionsDisabled || configHolder.current.plugins?.permissionSystem?.enabled !== false) {
 			try {
 				// Must run before the import: the plugin reads its config at
 				// extension init from $PI_CODING_AGENT_DIR (= paths.configDir).
-				ensurePermissionSystemConfig(paths.configDir);
+				// Authenticated mode keeps one managed default policy with its deny
+				// floor; tenant auto/yolo overrides stay disabled until the policy
+				// loader itself is tenant-scoped.
+				if (deps?.sharedExtensionsDisabled) writePermissionPolicyConfig(paths.configDir, "default");
+				else ensurePermissionSystemConfig(paths.configDir);
 				// The package's exports map only exposes "." (→ src/service.ts)
 				// and blocks every other subpath, so both entry points are
 				// imported by absolute file path — jiti enforces the exports
@@ -819,7 +831,7 @@ export function createInnoExtension(
 		// interactive setup; each tool lazily runs ensureReady on first use,
 		// and a missing macOS permission grant surfaces as a tool error
 		// carrying grant instructions.
-		if (isComputerUseEnabled(configHolder.current)) {
+		if (!deps?.sharedExtensionsDisabled && isComputerUseEnabled(configHolder.current)) {
 			try {
 				const { createJiti: createJitiCU } = await import("jiti/static");
 				const jitiCU = createJitiCU(import.meta.url, { moduleCache: false });

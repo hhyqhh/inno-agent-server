@@ -29,6 +29,8 @@ import type { RuntimePaths } from "../runtime.js";
 import { ensureDir } from "../storage/file-store.js";
 import type { ChannelRegistry } from "../channels/channel.js";
 import { logger } from "../logger.js";
+import { getCurrentTenant } from "../tenants/current.js";
+import { resolveCurrentTenantConfig } from "../tenants/config.js";
 
 let _runtime: AgentSessionRuntime | null = null;
 let _queue: Promise<void> = Promise.resolve();
@@ -262,7 +264,12 @@ export async function initSession(
 	config: InnoConfig,
 	paths: RuntimePaths,
 	channelRegistry?: ChannelRegistry,
-	options?: { sandbox?: boolean; extensionDeps?: InnoExtensionDeps },
+	options?: {
+		sandbox?: boolean;
+		extensionDeps?: InnoExtensionDeps;
+		/** Disable extensions whose config/processes are still process-global. */
+		authenticated?: boolean;
+	},
 ): Promise<AgentSession> {
 	ensureDir(paths.sessionDir);
 	ensureDir(paths.learnerDataDir);
@@ -271,8 +278,21 @@ export async function initSession(
 
 	const cwd = paths.workspaceDir;
 	const agentDir = getAgentDir();
-	const configHolder: ConfigHolder = { current: config };
-	const innoExtension = createInnoExtension(configHolder, paths, channelRegistry, options?.extensionDeps);
+	let localConfig = config;
+	const configHolder: ConfigHolder = {
+		get current() {
+			return resolveCurrentTenantConfig(paths.dataDir, localConfig);
+		},
+		set current(next) {
+			// Tenant writes are persisted through their tenant config path. Never let
+			// an authenticated execution replace the process-wide local fallback.
+			if (!getCurrentTenant()) localConfig = next;
+		},
+	};
+	const innoExtension = createInnoExtension(configHolder, paths, channelRegistry, {
+		...options?.extensionDeps,
+		sharedExtensionsDisabled: options?.authenticated === true,
+	});
 
 	// Build extension factories list
 	const observabilityExtension = createObservabilityExtension();
@@ -280,13 +300,13 @@ export async function initSession(
 	// MCP: the status bridge subscribes before the adapter so no snapshot is
 	// missed; the adapter itself only loads when `mcp.enabled` is set.
 	extensionFactories.push(createMcpStatusExtension());
-	const mcpAdapter = await loadMcpAdapterExtension(config, paths);
+	const mcpAdapter = options?.authenticated ? null : await loadMcpAdapterExtension(config, paths);
 	if (mcpAdapter) extensionFactories.push(mcpAdapter);
 	// Codemode (PI built-in, opt-in via plugins.codemode.enabled): in server
 	// mode the SDK loads no built-in extensions, so the factory is added
 	// here; CLI mode gets it from main()'s built-in list. Activation is
 	// handled by syncCodemodeDefaultTools via settings.json defaultTools.
-	if (isCodemodeEnabled(config)) {
+	if (!options?.authenticated && isCodemodeEnabled(config)) {
 		extensionFactories.push(createCodemodeExtension());
 	}
 	if (options?.sandbox) {
@@ -322,7 +342,7 @@ export async function initSession(
 
 	// Sync the codemode activation entry before SettingsManager is created so
 	// the loadout picks it up for every session (boot + replacements).
-	syncCodemodeDefaultTools(agentDir, isCodemodeEnabled(config));
+	syncCodemodeDefaultTools(agentDir, !options?.authenticated && isCodemodeEnabled(config));
 
 	// Re-create settingsManager so it picks up any defaults we just wrote.
 	const settingsManager = SettingsManager.create(cwd, agentDir);
@@ -474,7 +494,10 @@ function modelConfigToProviderModel(model: InnoConfig["providers"][string]["mode
  * Bypasses the enqueue queue — this is pure in-memory registry work and must
  * not block on a running prompt.
  */
-export async function refreshConfiguredProviders(config: InnoConfig): Promise<void> {
+export async function refreshConfiguredProviders(
+	config: InnoConfig,
+	options?: { quiet?: boolean },
+): Promise<void> {
 	if (!_runtime) throw new Error("Session not initialized. Call initSession() first.");
 	if (_configHolder) _configHolder.current = config;
 
@@ -507,10 +530,39 @@ export async function refreshConfiguredProviders(config: InnoConfig): Promise<vo
 		modelCount += providerConfig.models.length;
 	}
 	await registry.refresh();
-	logger.info({ providerIds, modelCount }, "Providers refreshed");
+	if (!options?.quiet) logger.info({ providerIds, modelCount }, "Providers refreshed");
+}
+
+/**
+ * Rebind the active session to the current tenant's default model inside the
+ * shared prompt queue. Provider IDs are user-local namespaces, so the registry
+ * must be refreshed before every tenant prompt; another tenant may have used
+ * the same ID with a different endpoint and credential in the previous run.
+ */
+async function prepareCurrentTenantModel(): Promise<void> {
+	if (!getCurrentTenant()) return;
+	if (!_runtime || !_configHolder) throw new Error("Session not initialized. Call initSession() first.");
+	const config = _configHolder.current;
+	if (!config.defaultProvider || !config.defaultModel || !config.providers[config.defaultProvider]) {
+		throw new Error("No model configured for this account. Add a provider in Settings first.");
+	}
+	await refreshConfiguredProviders(config, { quiet: true });
+	const model = registryOf(_runtime.session).find(config.defaultProvider, config.defaultModel);
+	if (!model) throw new Error(`Model ${config.defaultProvider}/${config.defaultModel} not found in tenant config`);
+	const current = _runtime.session.model;
+	const unchanged = current?.provider === model.provider
+		&& current.id === model.id
+		&& current.baseUrl === model.baseUrl
+		&& current.name === model.name
+		&& current.reasoning === model.reasoning
+		&& current.contextWindow === model.contextWindow
+		&& current.maxTokens === model.maxTokens
+		&& JSON.stringify(current.input) === JSON.stringify(model.input);
+	if (!unchanged) await _runtime.session.setModel(model);
 }
 
 export function syncConfig(config: InnoConfig): void {
+	if (getCurrentTenant()) return;
 	if (_configHolder) _configHolder.current = config;
 }
 
@@ -1421,7 +1473,12 @@ export function runPromptSerialized(
 	imageFallbackPrompt?: string,
 	attachmentContext?: string,
 ): Promise<string> {
-	return enqueue(() => runPrompt(prompt, images, imageFallbackPrompt, attachmentContext));
+	return enqueue(async () => {
+		if (getCurrentTenant()) {
+			throw new Error("Authenticated prompts must target an owned session explicitly");
+		}
+		return runPrompt(prompt, images, imageFallbackPrompt, attachmentContext);
+	});
 }
 
 /**
@@ -1438,8 +1495,50 @@ export function runPromptInSession(
 ): Promise<string> {
 	return enqueue(async () => {
 		await switchToSession(sessionPath);
+		await prepareCurrentTenantModel();
 		return runPrompt(prompt, images, imageFallbackPrompt, attachmentContext);
 	});
+}
+
+interface CompletionTarget {
+	model: Model<any>;
+	apiKey: string;
+	headers?: Record<string, string | null>;
+}
+
+/**
+ * Side-channel completions do not use the shared prompt queue. In tenant scope
+ * they therefore bypass the mutable global registry entirely and authenticate
+ * directly from the current tenant config.
+ */
+async function resolveCompletionTarget(session: AgentSession): Promise<CompletionTarget | null> {
+	if (getCurrentTenant()) {
+		const config = _configHolder?.current;
+		if (!config) return null;
+		const provider = config.providers[config.defaultProvider];
+		const modelConfig = provider?.models.find((candidate) => candidate.id === config.defaultModel);
+		if (!provider || !modelConfig) return null;
+		const apiKey = provider.apiKey || "local";
+		const headers = {
+			...provider.headers,
+			...(provider.authHeader ? { Authorization: `Bearer ${apiKey}` } : {}),
+		};
+		return {
+			model: {
+				...modelConfigToProviderModel(modelConfig),
+				provider: config.defaultProvider,
+				api: provider.api ?? "openai-completions",
+				baseUrl: provider.baseUrl,
+			} as Model<any>,
+			apiKey,
+			headers: Object.keys(headers).length > 0 ? headers : undefined,
+		};
+	}
+	const model = session.model;
+	if (!model) return null;
+	const auth = await registryOf(session).getApiKeyAndHeaders(model);
+	if (!auth.ok || !auth.apiKey) return null;
+	return { model, apiKey: auth.apiKey, headers: auth.headers };
 }
 
 /**
@@ -1456,11 +1555,9 @@ export function runPromptInSession(
 export async function completePromptOnce(prompt: string, maxTokens = 64, timeoutMs = 20_000): Promise<string> {
 	if (!_runtime) return "";
 	const session = _runtime.session;
-	const model = session.model;
-	if (!model) return "";
-
-	const auth = await registryOf(session).getApiKeyAndHeaders(model);
-	if (!auth.ok || !auth.apiKey) return "";
+	const target = await resolveCompletionTarget(session);
+	if (!target) return "";
+	const { model, apiKey, headers } = target;
 
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -1478,8 +1575,8 @@ export async function completePromptOnce(prompt: string, maxTokens = 64, timeout
 				],
 			},
 			{
-				apiKey: auth.apiKey,
-				headers: auth.headers,
+				apiKey,
+				headers,
 				maxTokens,
 				signal: controller.signal,
 				timeoutMs,
@@ -1527,11 +1624,9 @@ export async function completeSideQuestion(input: {
 	if (!_runtime) return "";
 	if (input.signal?.aborted) return "";
 	const session = _runtime.session;
-	const model = session.model;
-	if (!model) return "";
-
-	const auth = await registryOf(session).getApiKeyAndHeaders(model);
-	if (!auth.ok || !auth.apiKey) return "";
+	const target = await resolveCompletionTarget(session);
+	if (!target) return "";
+	const { model, apiKey, headers } = target;
 
 	const timeoutMs = input.timeoutMs ?? 60_000;
 	const controller = new AbortController();
@@ -1582,8 +1677,8 @@ export async function completeSideQuestion(input: {
 				messages,
 			},
 			{
-				apiKey: auth.apiKey,
-				headers: auth.headers,
+				apiKey,
+				headers,
 				maxTokens: input.maxTokens ?? 2048,
 				signal: controller.signal,
 				timeoutMs,
@@ -1628,6 +1723,9 @@ export function runPromptStreaming(
 	prompt = expandInnoSlashCommand(prompt) ?? prompt;
 	if (imageFallbackPrompt) imageFallbackPrompt = expandInnoSlashCommand(imageFallbackPrompt) ?? imageFallbackPrompt;
 	return enqueue(async () => {
+		if (getCurrentTenant()) {
+			throw new Error("Authenticated prompts must target an owned session explicitly");
+		}
 		const session = getSession();
 		let output = "";
 		let streamError: string | undefined;
@@ -1744,6 +1842,7 @@ export function runPromptStreamingInSession(
 		let outcome: PromptRunOutcome = { type: "error", error: new Error("Prompt did not start") };
 		try {
 			await switchToSession(sessionPath, { cwdOverride });
+			await prepareCurrentTenantModel();
 			if (lifecycle?.shouldStart && !(await lifecycle.shouldStart())) {
 				outcome = { type: "aborted", reason: "cancelled_before_start", fullText: "" };
 			} else {

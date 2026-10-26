@@ -303,6 +303,7 @@ async function ensureBootstrapped(): Promise<void> {
 		logger.info("[inno-server] initializing agent session...");
 		await initSession(config, paths, channelRegistry, {
 			sandbox: parsed.options.sandbox,
+			authenticated: auth.mode === "better-auth",
 			extensionDeps: {
 				workspaceRegistry,
 				runRecordStore,

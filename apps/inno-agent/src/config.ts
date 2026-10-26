@@ -535,7 +535,15 @@ export function normalizeContentHubConfig(
 	};
 }
 
-export function normalizeConfig(config: LegacyInnoConfig): InnoConfig {
+export interface ConfigNormalizationOptions {
+	/** Tenant accounts may be created before their first provider is configured. */
+	allowEmptyProviders?: boolean;
+}
+
+export function normalizeConfig(
+	config: LegacyInnoConfig,
+	options: ConfigNormalizationOptions = {},
+): InnoConfig {
 	const providers: Record<string, InnoProviderConfig> = {};
 	for (const [providerId, providerConfig] of Object.entries(config.providers ?? {})) {
 		const id = providerId.trim();
@@ -547,21 +555,21 @@ export function normalizeConfig(config: LegacyInnoConfig): InnoConfig {
 		providers[LEGACY_OPENAI_PROVIDER_ID] = normalizeProviderConfig(config.openai);
 	}
 
-	if (Object.keys(providers).length === 0) {
+	if (Object.keys(providers).length === 0 && !options.allowEmptyProviders) {
 		throw new Error("Config must define at least one provider in providers");
 	}
 
 	const fallback = firstConfiguredModel(providers);
-	if (!fallback) throw new Error("Config must define at least one model");
+	if (!fallback && !options.allowEmptyProviders) throw new Error("Config must define at least one model");
 
-	const defaultProvider = config.defaultProvider?.trim() || fallback.provider;
-	const defaultModel = config.defaultModel?.trim() || fallback.model;
+	const defaultProvider = config.defaultProvider?.trim() || fallback?.provider || "";
+	const defaultModel = config.defaultModel?.trim() || fallback?.model || "";
 	const defaultProviderConfig = providers[defaultProvider];
 	const hasDefaultModel = defaultProviderConfig?.models.some((model) => model.id === defaultModel);
 
 	return {
-		defaultProvider: hasDefaultModel ? defaultProvider : fallback.provider,
-		defaultModel: hasDefaultModel ? defaultModel : fallback.model,
+		defaultProvider: hasDefaultModel ? defaultProvider : fallback?.provider || "",
+		defaultModel: hasDefaultModel ? defaultModel : fallback?.model || "",
 		providers,
 		server: config.server,
 		feishu: config.feishu,
@@ -584,7 +592,10 @@ export function normalizeConfig(config: LegacyInnoConfig): InnoConfig {
 /**
  * Load the inno-agent config from the resolved runtime config path.
  */
-export function loadConfig(configPathOrDir: string): InnoConfig {
+export function loadConfig(
+	configPathOrDir: string,
+	options: ConfigNormalizationOptions = {},
+): InnoConfig {
 	const configPath = configPathOrDir.endsWith(".json")
 		? configPathOrDir
 		: join(configPathOrDir, "config.json");
@@ -598,7 +609,7 @@ export function loadConfig(configPathOrDir: string): InnoConfig {
 		} catch {
 			// read-only FS / Windows — permissions are best-effort
 		}
-		return normalizeConfig(JSON.parse(raw) as LegacyInnoConfig);
+		return normalizeConfig(JSON.parse(raw) as LegacyInnoConfig, options);
 	} catch (error) {
 		throw new Error(
 			`Failed to load Inno config from ${configPath}: ${error instanceof Error ? error.message : String(error)}`,
@@ -606,11 +617,15 @@ export function loadConfig(configPathOrDir: string): InnoConfig {
 	}
 }
 
-export function saveConfig(configPathOrDir: string, config: InnoConfig): InnoConfig {
+export function saveConfig(
+	configPathOrDir: string,
+	config: InnoConfig,
+	options: ConfigNormalizationOptions = {},
+): InnoConfig {
 	const configPath = configPathOrDir.endsWith(".json")
 		? configPathOrDir
 		: join(configPathOrDir, "config.json");
-	const normalized = normalizeConfig(config);
+	const normalized = normalizeConfig(config, options);
 	// Atomic write (tmp + rename): a crash mid-write must not leave a truncated
 	// config.json — the server hot-rewrites this file on every model switch.
 	// 0o600: the file carries plaintext provider API keys and the bridge token.

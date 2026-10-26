@@ -1,4 +1,5 @@
 import type { IncomingMessage as HttpReq, ServerResponse } from "node:http";
+import { join } from "node:path";
 import { probeProviderModels } from "../../agent/model-probe.js";
 import {
 	getAvailableModels,
@@ -38,6 +39,12 @@ import {
 } from "../../mcp/mcp-config-store.js";
 import type { RuntimePaths } from "../../runtime.js";
 import { applyProviderProxyBypass } from "../../utils/proxy-bypass.js";
+import { getRequestTenant } from "../../tenants/http.js";
+import {
+	loadTenantConfig,
+	saveTenantConfig,
+	tenantConfigDir,
+} from "../../tenants/config.js";
 import { json, matchRoute, readBody } from "../http-helpers.js";
 
 /**
@@ -75,13 +82,14 @@ function providerModelToRuntimeModel(model: InnoModelConfig, provider: string, b
 	};
 }
 
-function buildSafeSettings(config: InnoConfig) {
-	const session = getSession();
-	const currentModel = session.model;
+function buildSafeSettings(config: InnoConfig, tenantScoped = false) {
+	// The singleton session may currently belong to another tenant. Authenticated
+	// views are derived only from this tenant's persisted config.
+	const currentModel = tenantScoped ? null : getSession().model;
 	const configuredModels = Object.entries(config.providers).flatMap(([providerId, providerConfig]) =>
 		providerConfig.models.map((model) => providerModelToRuntimeModel(model, providerId, providerConfig.baseUrl)),
 	);
-	const availableModels = getAvailableModels().map((model) => ({
+	const availableModels = tenantScoped ? configuredModels : getAvailableModels().map((model) => ({
 		id: model.id,
 		name: model.name,
 		provider: model.provider,
@@ -226,16 +234,31 @@ export async function handleSettingsRoutes(
 	ctx: SettingsRouteContext,
 ): Promise<boolean> {
 	const { paths } = ctx;
-	// Per-request view of the mutable config; every save mirrors back via
-	// ctx.setConfig so subsequent requests (and other domains) see the write.
-	let config = ctx.getConfig();
+	const tenant = getRequestTenant(req);
+	const tenantScoped = tenant !== null;
+	// Per-request view of local or tenant config. Tenant files start empty and
+	// never inherit deployment-owner credentials from the legacy global file.
+	let config = tenant ? loadTenantConfig(paths.dataDir, tenant.tenantId) : ctx.getConfig();
 	const save = (next: InnoConfig): void => {
-		config = next;
-		ctx.setConfig(next);
+		config = tenant
+			? saveTenantConfig(paths.dataDir, tenant.tenantId, next)
+			: saveConfig(paths.configPath, next);
+		if (!tenant) ctx.setConfig(config);
+	};
+	const sync = (): void => {
+		if (!tenantScoped) syncConfig(config);
+	};
+	const refreshProviders = async (): Promise<void> => {
+		if (!tenantScoped) await refreshConfiguredProviders(config);
+	};
+	const safeSettings = () => buildSafeSettings(config, tenantScoped);
+	const rejectSharedRuntime = (feature: string): true => {
+		json(res, 409, { error: `${feature} is unavailable until its runtime is tenant-scoped` });
+		return true;
 	};
 
 	if (method === "GET" && url === "/api/settings") {
-		json(res, 200, buildSafeSettings(config));
+		json(res, 200, safeSettings());
 		return true;
 	}
 
@@ -248,10 +271,10 @@ export async function handleSettingsRoutes(
 			return true;
 		}
 
-		await switchModel(provider, model);
-		save(saveConfig(paths.configPath, setDefaultModel(config, provider, model)));
-		syncConfig(config);
-		const currentModel = getSession().model;
+		if (!tenantScoped) await switchModel(provider, model);
+		save(setDefaultModel(config, provider, model));
+		sync();
+		const currentModel = tenantScoped ? null : getSession().model;
 		json(res, 200, {
 			defaultProvider: currentModel?.provider ?? provider,
 			defaultModel: currentModel?.id ?? model,
@@ -262,21 +285,22 @@ export async function handleSettingsRoutes(
 	if ((method === "PUT" || method === "POST" || method === "PATCH") && url === "/api/settings/providers") {
 		const body = (await readBody(req)) as Record<string, unknown>;
 		const payload = parseProviderPayload(body);
-		save(saveConfig(
-			paths.configPath,
-			upsertProvider(config, payload.providerId, payload.provider, {
-				makeDefault: payload.makeDefault,
-				preserveApiKey: payload.preserveApiKey,
-				preserveHeaders: payload.preserveHeaders,
-			}),
-		));
-		applyProviderProxyBypass(config);
-		await refreshConfiguredProviders(config);
-		if (payload.makeDefault) {
-			await switchModel(config.defaultProvider, config.defaultModel);
-			save(saveConfig(paths.configPath, setDefaultModel(config, config.defaultProvider, config.defaultModel)));
+		if (tenantScoped && payload.provider.bypassProxy) {
+			json(res, 400, { error: "bypassProxy is process-global and unavailable for tenant providers" });
+			return true;
 		}
-		json(res, 200, buildSafeSettings(config));
+		save(upsertProvider(config, payload.providerId, payload.provider, {
+			makeDefault: payload.makeDefault,
+			preserveApiKey: payload.preserveApiKey,
+			preserveHeaders: payload.preserveHeaders,
+		}));
+		if (!tenantScoped) applyProviderProxyBypass(config);
+		await refreshProviders();
+		if (payload.makeDefault && !tenantScoped) {
+			await switchModel(config.defaultProvider, config.defaultModel);
+			save(setDefaultModel(config, config.defaultProvider, config.defaultModel));
+		}
+		json(res, 200, safeSettings());
 		return true;
 	}
 
@@ -313,14 +337,14 @@ export async function handleSettingsRoutes(
 			return true;
 		}
 		try {
-			save(saveConfig(paths.configPath, deleteModel(config, providerId, modelId)));
-			await refreshConfiguredProviders(config);
+			save(deleteModel(config, providerId, modelId));
+			await refreshProviders();
 		} catch (err) {
 			logger.error({ err, providerId, modelId }, "failed to delete model");
 			json(res, 400, { error: err instanceof Error ? err.message : String(err) });
 			return true;
 		}
-		json(res, 200, buildSafeSettings(config));
+		json(res, 200, safeSettings());
 		return true;
 	}
 
@@ -331,19 +355,20 @@ export async function handleSettingsRoutes(
 			return true;
 		}
 		try {
-			save(saveConfig(paths.configPath, deleteProvider(config, providerId)));
-			await refreshConfiguredProviders(config);
+			save(deleteProvider(config, providerId));
+			await refreshProviders();
 		} catch (err) {
 			logger.error({ err }, "failed to update channel settings");
 			json(res, 400, { error: err instanceof Error ? err.message : String(err) });
 			return true;
 		}
-		json(res, 200, buildSafeSettings(config));
+		json(res, 200, safeSettings());
 		return true;
 	}
 
 	// --- Channels Settings ---
 	if (method === "PUT" && url === "/api/settings/channels") {
+		if (tenantScoped) return rejectSharedRuntime("Channel settings");
 		const body = (await readBody(req)) as Record<string, unknown>;
 		try {
 			// Update feishu config
@@ -387,7 +412,7 @@ export async function handleSettingsRoutes(
 					// preserve existing
 				}
 			}
-			save(saveConfig(paths.configPath, config));
+			save(config);
 		} catch (err) {
 			logger.warn({ err }, "failed to update channel settings");
 			json(res, 400, { error: err instanceof Error ? err.message : String(err) });
@@ -401,7 +426,7 @@ export async function handleSettingsRoutes(
 			logger.warn({ err }, "feishu channel hot-reload failed");
 		}
 
-		json(res, 200, buildSafeSettings(config));
+		json(res, 200, safeSettings());
 		return true;
 	}
 
@@ -427,9 +452,9 @@ export async function handleSettingsRoutes(
 			l2Enabled: typeof body.l2Enabled === "boolean" ? body.l2Enabled : current.l2Enabled,
 			l3Enabled: typeof body.l3Enabled === "boolean" ? body.l3Enabled : current.l3Enabled,
 		};
-		save(saveConfig(paths.configPath, config));
-		syncConfig(config);
-		json(res, 200, buildSafeSettings(config));
+		save(config);
+		sync();
+		json(res, 200, safeSettings());
 		return true;
 	}
 
@@ -438,15 +463,16 @@ export async function handleSettingsRoutes(
 	// runs at session init), so the change only takes effect on the next
 	// server restart — the response flags this so the UI can say so. ---
 	if (method === "PUT" && url === "/api/settings/computer-use") {
+		if (tenantScoped) return rejectSharedRuntime("Computer use");
 		const body = (await readBody(req)) as Record<string, unknown>;
 		if (typeof body.enabled !== "boolean") {
 			json(res, 400, { error: "enabled must be a boolean" });
 			return true;
 		}
 		config.plugins = { ...config.plugins, computerUse: { enabled: body.enabled } };
-		save(saveConfig(paths.configPath, config));
-		syncConfig(config);
-		json(res, 200, buildSafeSettings(config));
+		save(config);
+		sync();
+		json(res, 200, safeSettings());
 		return true;
 	}
 
@@ -454,15 +480,16 @@ export async function handleSettingsRoutes(
 	// semantics as computer use: the extension registers at session init and
 	// the defaultTools activation entry syncs at bootstrap. ---
 	if (method === "PUT" && url === "/api/settings/codemode") {
+		if (tenantScoped) return rejectSharedRuntime("Codemode");
 		const body = (await readBody(req)) as Record<string, unknown>;
 		if (typeof body.enabled !== "boolean") {
 			json(res, 400, { error: "enabled must be a boolean" });
 			return true;
 		}
 		config.plugins = { ...config.plugins, codemode: { enabled: body.enabled } };
-		save(saveConfig(paths.configPath, config));
-		syncConfig(config);
-		json(res, 200, buildSafeSettings(config));
+		save(config);
+		sync();
+		json(res, 200, safeSettings());
 		return true;
 	}
 
@@ -471,6 +498,7 @@ export async function handleSettingsRoutes(
 	// the plugin re-reads its config on resources_discover, so the switch takes
 	// effect without a server restart. ---
 	if (method === "PUT" && url === "/api/settings/permissions") {
+		if (tenantScoped) return rejectSharedRuntime("Permission policy overrides");
 		const body = (await readBody(req)) as Record<string, unknown>;
 		const mode = body.mode;
 		if (mode !== "default" && mode !== "auto" && mode !== "yolo") {
@@ -481,7 +509,7 @@ export async function handleSettingsRoutes(
 			...config.plugins,
 			permissionSystem: { ...config.plugins?.permissionSystem, mode },
 		};
-		save(saveConfig(paths.configPath, config));
+		save(config);
 		try {
 			writePermissionPolicyConfig(paths.configDir, mode);
 		} catch (err) {
@@ -490,8 +518,8 @@ export async function handleSettingsRoutes(
 			return true;
 		}
 		ctx.scheduleSkillsReload();
-		syncConfig(config);
-		json(res, 200, buildSafeSettings(config));
+		sync();
+		json(res, 200, safeSettings());
 		return true;
 	}
 
@@ -504,9 +532,9 @@ export async function handleSettingsRoutes(
 		const body = (await readBody(req)) as Record<string, unknown>;
 		const next = normalizeSmartInputConfig(body as Partial<InnoSmartInputConfig>);
 		config.smartInput = next;
-		save(saveConfig(paths.configPath, config));
-		syncConfig(config);
-		json(res, 200, buildSafeSettings(config));
+		save(config);
+		sync();
+		json(res, 200, safeSettings());
 		return true;
 	}
 
@@ -516,26 +544,38 @@ export async function handleSettingsRoutes(
 	// `mcp.enabled` (config) against GET /api/mcp's `adapterLoaded`
 	// (runtime) to surface the restart hint.
 	if (method === "PUT" && url === "/api/settings/mcp") {
+		if (tenantScoped) return rejectSharedRuntime("MCP");
 		const body = (await readBody(req)) as Record<string, unknown>;
 		if (typeof body.enabled !== "boolean") {
 			json(res, 400, { error: "enabled must be a boolean" });
 			return true;
 		}
 		config.mcp = { enabled: body.enabled };
-		save(saveConfig(paths.configPath, config));
-		syncConfig(config);
-		json(res, 200, buildSafeSettings(config));
+		save(config);
+		sync();
+		json(res, 200, safeSettings());
 		return true;
 	}
 
 	// --- MCP server management (managed file: <configDir>/mcp-adapter.json) ---
 	if (method === "GET" && url === "/api/mcp") {
-		json(res, 200, getMcpOverview(config, paths));
+		if (tenant) {
+			json(res, 200, {
+				enabled: false,
+				adapterLoaded: false,
+				configPath: join(tenantConfigDir(paths.dataDir, tenant.tenantId), "mcp-adapter.json"),
+				servers: [],
+				status: null,
+			});
+		} else {
+			json(res, 200, getMcpOverview(config, paths));
+		}
 		return true;
 	}
 
 	const mcpServerPutMatch = matchRoute("PUT", method, url, "/api/mcp/servers/:name");
 	if (mcpServerPutMatch) {
+		if (tenantScoped) return rejectSharedRuntime("MCP server settings");
 		const name = mcpServerPutMatch.name;
 		const body = (await readBody(req)) as McpServerEntry;
 		try {
@@ -553,6 +593,7 @@ export async function handleSettingsRoutes(
 
 	const mcpServerPatchMatch = matchRoute("PATCH", method, url, "/api/mcp/servers/:name");
 	if (mcpServerPatchMatch) {
+		if (tenantScoped) return rejectSharedRuntime("MCP server settings");
 		const body = (await readBody(req)) as Record<string, unknown>;
 		if (typeof body.disabled !== "boolean") {
 			json(res, 400, { error: "disabled must be a boolean" });
@@ -569,6 +610,7 @@ export async function handleSettingsRoutes(
 
 	const mcpServerDeleteMatch = matchRoute("DELETE", method, url, "/api/mcp/servers/:name");
 	if (mcpServerDeleteMatch) {
+		if (tenantScoped) return rejectSharedRuntime("MCP server settings");
 		if (!deleteManagedServer(paths, mcpServerDeleteMatch.name)) {
 			json(res, 404, { error: "Server not found in managed config (it may come from an external config file)" });
 			return true;
@@ -579,6 +621,7 @@ export async function handleSettingsRoutes(
 	}
 
 	if (method === "PUT" && url === "/api/settings/github") {
+		if (tenantScoped) return rejectSharedRuntime("Content Hub credentials");
 		const body = (await readBody(req)) as Record<string, unknown>;
 		if (typeof body.token !== "string") {
 			json(res, 400, { error: "Missing token (string)" });
@@ -588,11 +631,11 @@ export async function handleSettingsRoutes(
 		// A masked value (e.g. "****abcd") means "keep the existing token".
 		const token = incoming.startsWith("****") ? (config.github?.token ?? "") : incoming;
 		config.github = token ? { token } : undefined;
-		save(saveConfig(paths.configPath, config));
-		syncConfig(config);
+		save(config);
+		sync();
 		// Rebuild the content source so the new auth (and higher limit) applies.
 		ctx.invalidateContentSource();
-		json(res, 200, buildSafeSettings(config));
+		json(res, 200, safeSettings());
 		return true;
 	}
 
@@ -617,9 +660,9 @@ export async function handleSettingsRoutes(
 				baseUrl: baseUrl || undefined,
 			};
 		}
-		save(saveConfig(paths.configPath, config));
-		syncConfig(config);
-		json(res, 200, buildSafeSettings(config));
+		save(config);
+		sync();
+		json(res, 200, safeSettings());
 		return true;
 	}
 
@@ -638,19 +681,21 @@ export async function handleSettingsRoutes(
 		} else {
 			config.tavily = { apiKey };
 		}
-		save(saveConfig(paths.configPath, config));
-		syncConfig(config);
-		json(res, 200, buildSafeSettings(config));
+		save(config);
+		sync();
+		json(res, 200, safeSettings());
 		return true;
 	}
 
 	// --- Web research settings (pi-web-access providers: web_research / source_check / fetch_content) ---
 	if (method === "GET" && url === "/api/settings/web-access") {
-		json(res, 200, getWebAccessSettingsView(paths.configDir));
+		const configDir = tenant ? tenantConfigDir(paths.dataDir, tenant.tenantId) : paths.configDir;
+		json(res, 200, getWebAccessSettingsView(configDir));
 		return true;
 	}
 
 	if (method === "PUT" && url === "/api/settings/web-access") {
+		if (tenantScoped) return rejectSharedRuntime("Web-access provider settings");
 		const body = (await readBody(req)) as Record<string, unknown>;
 		if (body.provider !== undefined && typeof body.provider !== "string") {
 			json(res, 400, { error: "provider must be a string" });
@@ -670,6 +715,7 @@ export async function handleSettingsRoutes(
 
 	// --- Content Hub settings (source for skill library + presets) ---
 	if (method === "PUT" && url === "/api/settings/content-hub") {
+		if (tenantScoped) return rejectSharedRuntime("Content Hub settings");
 		const body = (await readBody(req)) as Record<string, unknown>;
 		const current = config.contentHub ?? normalizeContentHubConfig(undefined, config.github?.token);
 		const str = (key: string, fallback: string): string =>
@@ -687,11 +733,11 @@ export async function handleSettingsRoutes(
 			baseUrl: str("baseUrl", current.baseUrl),
 			token,
 		});
-		save(saveConfig(paths.configPath, config));
-		syncConfig(config);
+		save(config);
+		sync();
 		// Rebuild the content source so the new hub takes effect immediately.
 		ctx.invalidateContentSource();
-		json(res, 200, buildSafeSettings(config));
+		json(res, 200, safeSettings());
 		return true;
 	}
 
@@ -707,8 +753,8 @@ export async function handleSettingsRoutes(
 			return true;
 		}
 		config.ui = { ...normalizeUiConfig(config.ui), theme };
-		save(saveConfig(paths.configPath, config));
-		json(res, 200, buildSafeSettings(config));
+		save(config);
+		json(res, 200, safeSettings());
 		return true;
 	}
 
@@ -724,8 +770,8 @@ export async function handleSettingsRoutes(
 			...normalizeUiConfig(config.ui),
 			closeBehavior,
 		};
-		save(saveConfig(paths.configPath, config));
-		json(res, 200, buildSafeSettings(config));
+		save(config);
+		json(res, 200, safeSettings());
 		return true;
 	}
 
@@ -740,8 +786,8 @@ export async function handleSettingsRoutes(
 			...normalizeUiConfig(config.ui),
 			mathSingleDollar: body.mathSingleDollar,
 		};
-		save(saveConfig(paths.configPath, config));
-		json(res, 200, buildSafeSettings(config));
+		save(config);
+		json(res, 200, safeSettings());
 		return true;
 	}
 

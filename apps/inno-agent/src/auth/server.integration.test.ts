@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
+import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,9 @@ let child: ChildProcess;
 let home: string;
 let origin: string;
 let output = "";
+let providerServer: HttpServer;
+let providerOrigin = "";
+const providerRequests: Array<{ authorization: string; body: string }> = [];
 
 async function freePort(): Promise<number> {
 	const listener = createServer();
@@ -56,6 +60,32 @@ async function api(cookie: string, path: string, init: RequestInit = {}): Promis
 beforeAll(async () => {
 	postgres = await startTemporaryPostgres();
 	home = await mkdtemp(join(tmpdir(), "inno-server-auth-"));
+	providerServer = createHttpServer((req, res) => {
+		let body = "";
+		req.setEncoding("utf-8");
+		req.on("data", (chunk) => { body += chunk; });
+		req.on("end", () => {
+			providerRequests.push({ authorization: req.headers.authorization ?? "", body });
+			res.writeHead(200, { "Content-Type": "text/event-stream" });
+			res.end([
+				`data: ${JSON.stringify({
+					id: "tenant-stub", object: "chat.completion.chunk", created: 0, model: "tenant-model",
+					choices: [{ index: 0, delta: { role: "assistant", content: "tenant stub response" }, finish_reason: null }],
+				})}`,
+				"",
+				`data: ${JSON.stringify({
+					id: "tenant-stub", object: "chat.completion.chunk", created: 0, model: "tenant-model",
+					choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+				})}`,
+				"",
+				"data: [DONE]",
+				"",
+				"",
+			].join("\n"));
+		});
+	});
+	await new Promise<void>((resolveListen) => providerServer.listen(0, "127.0.0.1", resolveListen));
+	providerOrigin = `http://127.0.0.1:${(providerServer.address() as AddressInfo).port}`;
 	const port = await freePort();
 	origin = `http://127.0.0.1:${port}`;
 	await mkdir(join(home, "config"), { recursive: true });
@@ -112,6 +142,10 @@ afterAll(async () => {
 	if (child?.exitCode === null) {
 		child.kill("SIGTERM");
 		await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
+	}
+	if (providerServer) {
+		providerServer.closeAllConnections();
+		await new Promise<void>((resolveClose) => providerServer.close(() => resolveClose()));
 	}
 	await postgres?.close();
 	if (home) await rm(home, { recursive: true, force: true });
@@ -403,4 +437,127 @@ describe("L1 and L2 tenant storage", () => {
 		expect((await api(cookieB, "/api/wiki/page?path=private.md", { method: "DELETE" })).status).toBe(200);
 		expect(await (await api(cookieA, "/api/wiki/page?path=private.md")).json()).toMatchObject({ content: "tenant-a-wiki" });
 	});
+});
+
+describe("settings and model credential isolation", () => {
+	it("uses tenant-local config and credentials for prompts and side-channel completions", async () => {
+		const [cookieA, cookieB] = await Promise.all([
+			registerUser("settings-a@example.com"),
+			registerUser("settings-b@example.com"),
+		]);
+		const globalConfigBefore = await readFile(join(home, "config", "config.json"), "utf-8");
+
+		const initial = await (await api(cookieA, "/api/settings")).json() as {
+			providers: Record<string, unknown>;
+			defaultProvider: string;
+			availableModels: unknown[];
+		};
+		expect(initial.providers).toEqual({});
+		expect(initial.defaultProvider).toBe("");
+		expect(initial.availableModels).toEqual([]);
+
+		const configureProvider = async (cookie: string, apiKey: string, providerId = "shared", modelId = "tenant-model") => {
+			const response = await api(cookie, "/api/settings/providers", {
+				method: "PUT",
+				body: JSON.stringify({
+					providerId,
+					baseUrl: providerOrigin,
+					apiKey,
+					api: "openai-completions",
+					makeDefault: true,
+					models: [{ id: modelId, name: "Tenant stub" }],
+				}),
+			});
+			expect(response.status).toBe(200);
+			return response.json() as Promise<{ providers: Record<string, { apiKey: string }> }>;
+		};
+		const settingsA = await configureProvider(cookieA, "tenant-a-secret");
+		expect(settingsA.providers.shared.apiKey).toBe("****cret");
+		expect((await (await api(cookieB, "/api/settings")).json() as { providers: Record<string, unknown> }).providers).toEqual({});
+		const settingsB = await configureProvider(cookieB, "tenant-b-secret");
+		expect(settingsB.providers.shared.apiKey).toBe("****cret");
+
+		expect((await api(cookieB, "/api/settings/memory", {
+			method: "PUT", body: JSON.stringify({ l1Enabled: false, l2Enabled: false }),
+		})).status).toBe(200);
+		expect((await api(cookieB, "/api/settings/theme", {
+			method: "PUT", body: JSON.stringify({ theme: "ocean" }),
+		})).status).toBe(200);
+		const independentA = await (await api(cookieA, "/api/settings")).json() as {
+			memory: { l1Enabled: boolean; l2Enabled: boolean };
+			ui: { theme: string };
+			providers: Record<string, { apiKey: string }>;
+		};
+		expect(independentA.memory).toMatchObject({ l1Enabled: true, l2Enabled: true });
+		expect(independentA.ui.theme).toBe("light");
+		expect(independentA.providers.shared.apiKey).toBe("****cret");
+		expect(await readFile(join(home, "config", "config.json"), "utf-8")).toBe(globalConfigBefore);
+
+		const createSession = async (cookie: string) => {
+			const response = await api(cookie, "/api/sessions", {
+				method: "POST", body: JSON.stringify({ newWorkspace: { isTemp: true } }),
+			});
+			expect(response.status).toBe(201);
+			return (await response.json() as { id: string }).id;
+		};
+		const [sessionA, sessionB] = await Promise.all([createSession(cookieA), createSession(cookieB)]);
+		const unconfiguredCookie = await registerUser("settings-unconfigured@example.com");
+		const unconfiguredSession = await createSession(unconfiguredCookie);
+		const requestsBeforeUnconfigured = providerRequests.length;
+		expect((await api(unconfiguredCookie, "/api/chat", {
+			method: "POST", body: JSON.stringify({ sessionId: unconfiguredSession, prompt: "must not inherit the global key" }),
+		})).status).toBe(500);
+		expect(providerRequests).toHaveLength(requestsBeforeUnconfigured);
+
+		for (const [cookie, sessionId, prompt] of [
+			[cookieA, sessionA, "tenant-a-main-prompt"],
+			[cookieB, sessionB, "tenant-b-main-prompt"],
+		] as const) {
+			const response = await api(cookie, "/api/chat", {
+				method: "POST", body: JSON.stringify({ sessionId, prompt }),
+			});
+			const responseBody = await response.json();
+			expect(response.status, JSON.stringify({ responseBody, serverLog: output.slice(-12_000) })).toBe(200);
+			expect(responseBody).toMatchObject({ response: "tenant stub response" });
+		}
+		expect(providerRequests.find((request) => request.body.includes("tenant-a-main-prompt"))?.authorization).toBe("Bearer tenant-a-secret");
+		expect(providerRequests.find((request) => request.body.includes("tenant-b-main-prompt"))?.authorization).toBe("Bearer tenant-b-secret");
+
+		const sideQuestions = await Promise.all([
+			api(cookieA, "/api/btw/ask", {
+				method: "POST", body: JSON.stringify({ sessionId: sessionA, question: "tenant-a-side-question", thread: [] }),
+			}),
+			api(cookieB, "/api/btw/ask", {
+				method: "POST", body: JSON.stringify({ sessionId: sessionB, question: "tenant-b-side-question", thread: [] }),
+			}),
+		]);
+		for (const response of sideQuestions) {
+			expect(response.status).toBe(200);
+			expect(await response.json()).toMatchObject({ answer: "tenant stub response" });
+		}
+		expect(providerRequests.find((request) => request.body.includes("tenant-a-side-question"))?.authorization).toBe("Bearer tenant-a-secret");
+		expect(providerRequests.find((request) => request.body.includes("tenant-b-side-question"))?.authorization).toBe("Bearer tenant-b-secret");
+
+		for (const [path, body] of [
+			["/api/settings/permissions", { mode: "yolo" }],
+			["/api/settings/channels", { channels: { feishu: { enabled: true } } }],
+			["/api/settings/mcp", { enabled: true }],
+			["/api/settings/computer-use", { enabled: true }],
+			["/api/settings/codemode", { enabled: true }],
+			["/api/settings/web-access", { values: { tavily: "must-not-be-shared" } }],
+			["/api/settings/content-hub", { token: "must-not-be-shared" }],
+			["/api/settings/github", { token: "must-not-be-shared" }],
+			["/api/mcp/servers/shared", { command: "node", args: ["server.js"] }],
+		] as const) {
+			const response = await api(cookieA, path, { method: "PUT", body: JSON.stringify(body) });
+			expect(response.status, path).toBe(409);
+		}
+		expect((await api(cookieA, "/api/mcp")).status).toBe(200);
+		expect(await (await api(cookieA, "/api/mcp")).json()).toMatchObject({ enabled: false, adapterLoaded: false, servers: [] });
+
+		await configureProvider(cookieB, "tenant-b-secondary", "extra", "extra-model");
+		expect((await api(cookieB, "/api/settings/providers/shared", { method: "DELETE" })).status).toBe(200);
+		expect((await (await api(cookieA, "/api/settings")).json() as { defaultModel: string }).defaultModel).toBe("tenant-model");
+		expect(await readFile(join(home, "config", "config.json"), "utf-8")).toBe(globalConfigBefore);
+	}, 90_000);
 });

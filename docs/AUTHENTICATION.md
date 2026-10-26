@@ -40,9 +40,9 @@ compose application retains the explicit insecure local-mode override because
 its port is published; use Better Auth for non-local deployments.
 
 > **Isolation boundary:** account authentication and the current tenant/ownership
-> slices do not yet make all application data tenant-safe. Background memory
-> access and execution, channels, settings, permissions, and the singleton agent runtime
-> are still shared until each domain's authorization migration lands. `INNO_MULTI_USER_ENABLED=true`
+> slices do not yet make all application data tenant-safe. Channels, automatic/
+> deferred background execution, and parts of the singleton agent runtime are
+> still shared until each domain's authorization migration lands. `INNO_MULTI_USER_ENABLED=true`
 > deliberately fails at startup until resource ownership and cross-tenant
 > isolation are implemented. Do not treat this stage as a safe multi-user
 > production deployment. Public registration additionally requires rate
@@ -152,8 +152,38 @@ and normalized command/path. Cached approvals require a currently bound turn;
 they never authorize a headless/no-UI request. Changing any tenant, session, or
 run requires a new approval. Pending responses remain bound to the exact
 session/turn/request, and chat permission-response routes retain their session
-ownership checks. The global permission policy settings themselves still need
-tenant runtime isolation.
+ownership checks. Authenticated mode now forces the managed default permission
+policy rather than allowing tenants to change process-global `auto`/`yolo`
+settings; see stage 2G.
+
+## Settings and model credential isolation (stage 2G)
+
+Authenticated settings use `<dataDir>/tenants/<tenantId>/config/config.json`.
+New accounts start with no providers and do not inherit provider, OCR, Tavily,
+or integration credentials from the legacy/global config. The local global
+configuration still requires at least one provider, and local/CLI/Desktop
+behavior is unchanged.
+
+Providers/default model, L1/L2/L3 memory flags, OCR/Tavily, smart input, and UI
+preferences persist per tenant. Provider IDs are tenant-local namespaces: the
+main prompt path refreshes and binds the current tenant's endpoint and model
+inside the serialized prompt queue, so equal provider IDs in two accounts do
+not share credentials. Accounts without a configured model fail before making
+a provider request. Side questions and automatic-title completions bypass the
+shared queue and therefore construct their model/auth target directly from the
+current tenant config instead of reading another tenant's registry state.
+`model_select` persistence likewise targets the current tenant file.
+
+Authenticated mode disables MCP, subagents, pi-web-access, codemode, and
+computer-use because those extensions still load process-global configuration.
+Their settings writes, channel settings, content-hub credentials/settings, and
+permission-policy overrides return 409 rather than pretending to be isolated.
+Permission policy is always managed `default`, preserving the deny floor;
+process-global `bypassProxy` is rejected for tenant providers.
+
+Channels, automatic/deferred background execution, and remaining singleton
+runtime state still require migration. `INNO_MULTI_USER_ENABLED` remains
+unavailable.
 
 
 ## Tests
