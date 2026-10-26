@@ -593,6 +593,11 @@ describe("settings and model credential isolation", () => {
 		}
 		expect((await api(cookieA, "/api/mcp")).status).toBe(200);
 		expect(await (await api(cookieA, "/api/mcp")).json()).toMatchObject({ enabled: false, adapterLoaded: false, servers: [] });
+		expect((await api(cookieA, "/api/skills")).status).toBe(200);
+		expect((await api(cookieA, "/api/skills/reload", { method: "POST" })).status).toBe(409);
+		expect((await api(cookieA, "/api/skills/upload", {
+			method: "POST", body: JSON.stringify({ fileName: "tenant.md", dataBase64: Buffer.from("---\nname: tenant\n---\n").toString("base64") }),
+		})).status).toBe(409);
 
 		await configureProvider(cookieB, "tenant-b-secondary", "extra", "extra-model");
 		expect((await api(cookieB, "/api/settings/providers/shared", { method: "DELETE" })).status).toBe(200);

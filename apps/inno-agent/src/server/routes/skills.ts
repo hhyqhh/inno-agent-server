@@ -25,6 +25,8 @@ import { json, matchRoute, readBody, UPLOAD_MAX_BODY_BYTES } from "../http-helpe
  */
 export interface SkillsRouteContext {
 	skillsDir: string;
+	/** Authenticated tenants share the admin-managed skill directory read-only. */
+	sharedSkillsReadOnly?: boolean;
 	scheduleSkillsReload: () => void;
 	listProjectSkills: () => unknown[];
 	setSkillEnabled: (name: string, enabled: boolean) => void;
@@ -47,6 +49,15 @@ export async function handleSkillsRoutes(
 	ctx: SkillsRouteContext,
 ): Promise<boolean> {
 	const { skillsDir } = ctx;
+
+	// The PI resource loader has one process-global skill directory. Tenant
+	// writes would change every account's future prompts, so authenticated mode
+	// exposes the admin-managed catalog read-only. Workspace-private .skills
+	// remain available through the owned workspace routes.
+	if (ctx.sharedSkillsReadOnly && method !== "GET") {
+		json(res, 409, { error: "Shared skill management is read-only in authenticated mode" });
+		return true;
+	}
 
 	if (method === "GET" && url === "/api/skills") {
 		// Do not call reloadResources() here — it is queued behind the agent

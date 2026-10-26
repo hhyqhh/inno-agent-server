@@ -1568,6 +1568,7 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 	// --- Skills API ---
 	skills: (req, res, method, url) => handleSkillsRoutes(req, res, method, url, {
 		skillsDir,
+		sharedSkillsReadOnly: auth.mode === "better-auth",
 		scheduleSkillsReload,
 		listProjectSkills,
 		setSkillEnabled,

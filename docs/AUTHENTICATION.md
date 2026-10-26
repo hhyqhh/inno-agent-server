@@ -40,9 +40,9 @@ compose application retains the explicit insecure local-mode override because
 its port is published; use Better Auth for non-local deployments.
 
 > **Isolation boundary:** account authentication and the current tenant/ownership
-> slices do not yet make all application data tenant-safe. Parts of the singleton
-> agent runtime are still shared until each domain's authorization migration
-> lands, and file-backed runtimes are not cross-process active-active.
+> slices do not yet make all application data tenant-safe. Host shell/file tools
+> and PTY terminals still inherit the server process's filesystem permissions,
+> and file-backed runtimes are not cross-process active-active.
 > `INNO_MULTI_USER_ENABLED=true` deliberately fails at startup until resource
 > ownership and cross-tenant isolation are implemented. Do not treat this stage
 > as a safe multi-user production deployment. Public registration additionally
@@ -65,9 +65,9 @@ queues, SSE buffers, or deferred countdowns shareable between processes.
 - The job lease prevents concurrent occurrence claims and permits takeover
   after expiry. It is not a general storage lock, a durable deferred queue, or
   an exactly-once boundary around model calls and channel delivery.
-- Multiple accounts may share the process only after the remaining singleton
-  runtime audit is complete and `INNO_MULTI_USER_ENABLED` is explicitly made
-  available. Better Auth alone is not production multi-user approval.
+- Multiple accounts may share the process only after host execution is
+  tenant-confined and `INNO_MULTI_USER_ENABLED` is explicitly made available.
+  Better Auth alone is not production multi-user approval.
 
 ## Personal tenant foundation (stage 2A)
 
@@ -263,10 +263,39 @@ than a cross-process durable queue; after a crash, cron re-arms work from the
 persistent job/check-in state once the old lease expires. Local mode retains its
 original in-memory occurrence claims and scheduler behavior.
 
-Agent-initiated runs without an explicit session remain rejected. Remaining
-singleton runtime state and file-backed active-active execution still require
-migration; `INNO_MULTI_USER_ENABLED` remains unavailable.
+Agent-initiated runs without an explicit session remain rejected. The shared
+runtime audit and remaining host-execution boundary are covered by stage 2J;
+`INNO_MULTI_USER_ENABLED` remains unavailable.
 
+## Shared-runtime audit (stage 2J)
+
+The process-global skill directory is now admin-managed and read-only in Better
+Auth mode. Authenticated uploads, imports, edits, enable/disable, deletion, and
+reload requests return 409 before touching shared files or the PI resource
+loader. The shared catalog remains readable, and workspace-private `.skills`
+continue through the owned workspace routes. Local mode retains full skill
+management.
+
+The remaining singleton `AgentSession` is an intentional serialized runtime,
+not a per-tenant session pool. Authenticated prompts must name an owned session;
+session switching, prompt execution, tenant provider/model binding, and prompt
+finalization occupy the same queue slot. Side-channel completions derive their
+model credentials directly from the current tenant config instead of reading
+the mutable registry. Question and permission waits are bound to the exact
+session/turn, stream replay requires session ownership, and the bundled todo
+tool partitions live state by PI session id. Process-global read-only skill and
+preset catalogs are shared deliberately.
+
+A separate production blocker remains outside the in-memory singleton audit:
+PI file/shell tools and node-pty terminals execute with the host process's
+filesystem permissions. Workspace ownership checks do not stop a shell or an
+unconfined path-capable tool from reaching another tenant's files. Before the
+multi-user gate can open, authenticated multi-user execution needs enforced
+OS-level tenant confinement or must disable those host capabilities; approval
+cards alone are not a filesystem boundary. Public sign-up also still requires
+rate limiting, verification, and recovery for an internet-facing launch.
+`INNO_MULTI_USER_ENABLED` therefore remains unavailable, and the single-process
+file-backed deployment boundary above still applies.
 
 ## Tests
 
