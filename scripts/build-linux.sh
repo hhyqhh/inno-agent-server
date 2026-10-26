@@ -9,7 +9,7 @@
 #   ./scripts/build-linux.sh --bump patch      # 先升版本号再打包（patch/minor/major）
 #   ./scripts/build-linux.sh --open            # 打包完自动打开产物目录
 #
-# 依赖：Node >= 20.6.0、npm；架构自动识别（aarch64 / x86_64）。
+# 依赖：Node >= 22.19.0、npm；架构自动识别（aarch64 / x86_64）。
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 

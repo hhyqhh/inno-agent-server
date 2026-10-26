@@ -524,7 +524,12 @@ export function createInnoExtension(
 						const sessionFile = ctx.sessionManager.getSessionFile?.();
 						if (sessionFile) currentSessionId = sessionFile.split(/[\\/]/).pop() ?? "";
 						if (!currentSessionId && deps?.getCurrentSessionId) currentSessionId = deps.getCurrentSessionId();
-						const recalled = await l3Memory.recall(event.prompt, currentSessionId || undefined);
+						const prompt = event.messageType === "user"
+							? event.prompt
+							: typeof event.message.content === "string"
+								? event.message.content
+								: event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+						const recalled = await l3Memory.recall(prompt, currentSessionId || undefined);
 						const recallSection = formatRecallForPrompt(recalled);
 						if (recallSection) sections.push(recallSection);
 					} catch(err) {

@@ -3,7 +3,7 @@
 > An open-source **personal learning agent** with layered memory, a proactive scheduler, multi-channel messaging, and a workspace-scoped Practice Lab — built on the [Pi coding-agent SDK](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) **without modifying its kernel**.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D20.6.0-brightgreen.svg)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.19.0-brightgreen.svg)](https://nodejs.org)
 [![Release](https://img.shields.io/github/v/release/hhyqhh/inno-agent.svg)](https://github.com/hhyqhh/inno-agent/releases)
 [![Website](https://img.shields.io/badge/Website-Inno%20Agent-ff6b35.svg)](https://hhyqhh.github.io/inno-agent-website/)
 

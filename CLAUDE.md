@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Layout
 
-This is an npm workspaces monorepo (Node.js >=20.6.0, ES modules) for **Inno Agent**, a personal learning agent built on the PI SDK.
+This is an npm workspaces monorepo (Node.js >=22.19.0, ES modules) for **Inno Agent**, a personal learning agent built on the PI SDK.
 
 - `apps/inno-agent/` — backend (CLI + HTTP server), TypeScript, compiles to `dist/`.
 - `apps/inno-agent/web/` — frontend (React 19 + Lit + Tailwind 4 + Vite), workspace `inno-agent-web`.
@@ -15,11 +15,11 @@ This is an npm workspaces monorepo (Node.js >=20.6.0, ES modules) for **Inno Age
 - `runtime/` — local runtime state (config, data, skills); gitignored. Mapped to `INNO_*` env vars.
 - `workspace/` — default agent working directory; gitignored.
 
-PI SDK packages (`@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-web-ui`) are pulled from npm.
+PI SDK packages (`@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-durable`, `@earendil-works/pi-web-ui`) are pulled from npm. Backend PI/Durable packages are pinned to `1.4.0`; the root still keeps the older `pi-ai` required by `pi-web-ui`, so inspect backend-resolved declarations under `apps/inno-agent/node_modules/` when working on server integration.
 
 Key dependencies: `ws` (WebSocket), `node-pty` (PTY terminal), `cron-parser` (scheduler), `@larksuiteoapi/node-sdk` (Feishu), `typebox` (validation), `undici` (HTTP client), `@juicesharp/rpiv-ask-user-question` (bridges agent `ask_user_question` tool calls to the web UI), `@juicesharp/rpiv-todo` (`todo` task-list tool), `pi-web-access` (`fetch_content`/`get_search_content` URL/GitHub/PDF/YouTube extraction), `pi-subagents` (optional subagent support), `pi-sandbox` (optional OS-level sandboxing), `graphology` + `graphology-communities-louvain` (wiki knowledge graph), `yaml` (YAML parsing), `@llamaindex/liteparse` (document parsing).
 
-Tests run with `npm test` (`vitest run`, root script) and also execute in the test and release CI. The PostgreSQL-free suite is 117 files (898 tests), including backend chat-stream/trace persistence coverage and web chat trace/timeline coverage, while remaining skewed toward `memory/l2`; coverage for channels/scheduler/terminal/L1/L3 is tracked in `docs/quality-remediation-plan.md`. `npm run test:integration` separately exercises Better Auth with `INNO_MULTI_USER_ENABLED=true`, tenant provisioning/ownership, legacy migration, cross-tenant session/workspace and expired-question denial, tenant-scoped BTW/showcase storage without legacy L1 leakage, terminal HTTP/WS authentication and authenticated host-terminal denial, per-tenant provider credentials/model settings, channel identity/inbound/outbound isolation, atomic scheduled-run leases, and tenant background execution against a real temporary PostgreSQL instance/database, local fake model endpoints, and local fake bridge sidecars. The TypeScript build (`npm run build`) remains the primary sanity check. No ESLint or Prettier configuration exists.
+Tests run with `npm test` (`vitest run`, root script) and also execute in the test and release CI. The PostgreSQL-free suite is 120 files (908 tests), including backend chat-stream/trace persistence coverage, durable faux-model concurrency/request-dedup/SIGKILL recovery coverage, and web chat trace/timeline coverage, while remaining skewed toward `memory/l2`; coverage for channels/scheduler/terminal/L1/L3 is tracked in `docs/quality-remediation-plan.md`. `npm run test:integration` separately exercises Better Auth with `INNO_MULTI_USER_ENABLED=true`, tenant provisioning/ownership, legacy migration, cross-tenant session/workspace and expired-question denial, tenant-scoped BTW/showcase storage without legacy L1 leakage, terminal HTTP/WS authentication and authenticated host-terminal denial, per-tenant provider credentials/model settings, channel identity/inbound/outbound isolation, atomic scheduled-run leases, and tenant background execution against a real temporary PostgreSQL instance/database, local fake model endpoints, and local fake bridge sidecars. The TypeScript build (`npm run build`) remains the primary sanity check. No ESLint or Prettier configuration exists.
 
 When a PR changes the test count, the size of `server.ts`, or other structural facts stated in this file, update this file in the same PR — AI agents read it as ground truth.
 
@@ -40,6 +40,7 @@ Three tsconfig files, each self-contained (no `extends` chain):
 - **[ELECTRON_BUILD.md](./ELECTRON_BUILD.md)** — Electron packaging notes (Chinese).
 - **[apps/inno-agent/README.md](./apps/inno-agent/README.md)** — backend API route table and project structure (Chinese).
 - **[docs/SYSTEM_DEPENDENCIES.md](./docs/SYSTEM_DEPENDENCIES.md)** — full system-level dependency reference (build-time, runtime, Python environment, native modules). Essential for Docker/deployment work.
+- **[docs/DURABLE_RUNTIME.md](./docs/DURABLE_RUNTIME.md)** — opt-in pi-durable migration boundary, recovery semantics, single-owner storage rule, and SSE projection constraints.
 - **[docs/PERMISSIONS_AND_SANDBOX.md](./docs/PERMISSIONS_AND_SANDBOX.md)** — permission layer (three policy modes, approval cards, deny floor) and sandbox layer (`--sandbox`, filesystem/network policy) explained with configuration details.
 
 ## Common Commands
@@ -198,6 +199,10 @@ Key files in `apps/inno-agent/src/agent/`:
 `server.ts` (HTTP) goes through `agent/pi-runner.ts`. Both entry points import `source-map-support/register` at the top to produce readable error stacks from compiled JS, and both call `applyRuntimeEnvironment` from `runtime.ts` to resolve and export paths into `process.env` before anything else runs.
 
 The Electron main process (`electron/main.js`) spawns the server as a child process with `ELECTRON_RUN_AS_NODE=1` and passes `--server` as the first argument to ensure server mode.
+
+### Durable core (opt-in migration slice)
+
+`agent/durable-runtime.ts` is the first isolated pi-durable host: one SQLite storage per future durable session, durable `requestId` admission, submission reacquisition, close/reopen recovery, and a process-local double-open guard. `agent/durable-projection.ts` converts committed entries and durable `changes`-based events into Inno history/SSE shapes; raw `watchEvents()` is not an exact replay log. `agent/durable-env.ts` provides the optional workspace-read-only environment and fails shell/mutation operations closed. This slice is not connected to the default HTTP chat path, does not migrate legacy JSONL, and does not permit cross-process active-active storage. See `docs/DURABLE_RUNTIME.md` for the staged boundary and faux-model recovery tests.
 
 ### LLM Fetch Logger (`src/utils/fetch-logger.ts`)
 

@@ -3,7 +3,7 @@
 > 开源的**个人学习智能体**——分层记忆、主动调度、多渠道消息、工作区级练习实验室,基于 [Pi coding-agent SDK](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 构建,**不修改其内核**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D20.6.0-brightgreen.svg)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.19.0-brightgreen.svg)](https://nodejs.org)
 [![Release](https://img.shields.io/github/v/release/hhyqhh/inno-agent.svg)](https://github.com/hhyqhh/inno-agent/releases)
 [![Website](https://img.shields.io/badge/Website-Inno%20Agent-ff6b35.svg)](https://hhyqhh.github.io/inno-agent-website/)
 

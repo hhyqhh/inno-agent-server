@@ -37,7 +37,7 @@
 		"test:mac-signing": "node --test scripts/check-mac-signing.test.cjs"
 	},
 	"engines": {
-		"node": ">=20.6.0"
+		"node": ">=22.19.0"
 	},
 	"build": {
 		"appId": "com.inno.agent",

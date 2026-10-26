@@ -4,7 +4,7 @@
 
 ## 1. 前置条件
 
-- Node.js **>= 20.6.0**（`node -v` 检查）
+- Node.js **>= 22.19.0**（`node -v` 检查；pi-durable 的最低版本要求）
 - npm（随 Node 自带）
 - 一个 LLM provider 的 API key
   - Anthropic / OpenAI / DeepSeek / 任意 OpenAI-compatible 端点 / Ollama 本地都可以

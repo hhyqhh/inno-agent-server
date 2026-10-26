@@ -10,7 +10,7 @@
 
 | 依赖包 | 用途 | 备注 |
 |--------|------|------|
-| `node` (>= 20.6.0，推荐 >= 22.5) | JavaScript 运行时 | 22.5+ 内置 `node:sqlite`，支持 L3 跨对话记忆 |
+| `node` (>= 22.19.0) | JavaScript 运行时 | pi-durable 的最低版本要求；内置 `node:sqlite` 支持 L3 与 durable storage |
 | `npm` | 包管理器 | 随 Node.js 一起安装 |
 | `python3` | `node-pty` 的 `node-gyp` 编译 | node-pty 在 Linux 上可能需要从源码编译 |
 | `make` | `node-pty` 的 `node-gyp` 编译 | 同上 |
@@ -106,7 +106,7 @@ macOS 上使用系统内置工具，无需额外安装：
 
 | 依赖 | 要求 | 降级行为 |
 |------|------|----------|
-| `node:sqlite` | Node.js >= 22.5.0 | 低于 22.5 时 **L3 记忆功能自动禁用**，不影响其他功能 |
+| `node:sqlite` | 项目 Node.js >= 22.19.0 基线已包含 | 当前支持版本均可使用；不再支持低于 22.19 的运行环境 |
 
 ### 3.4 文档解析（parse_document 工具）
 
@@ -305,7 +305,7 @@ Inno Agent
 ├── [原生模块] @hyzyla/pdfium ───────── PDF 解析 (C++→WASM)
 ├── [原生模块] tesseract.js ─────────── OCR 文字识别 (C++→WASM)
 │
-├── [构建时] node >= 20.6 ───────────── TypeScript 编译 + 运行时
+├── [构建时] node >= 22.19 ──────────── TypeScript 编译 + 运行时 / pi-durable
 ├── [构建时] python3 ────────────────── node-pty node-gyp 编译
 ├── [构建时] make ───────────────────── node-pty node-gyp 编译
 ├── [构建时] g++ ────────────────────── node-pty C++ 源码编译
@@ -319,7 +319,7 @@ Inno Agent
 | 问题现象 | 可能原因 | 解决方法 |
 |----------|----------|----------|
 | PTY 终端无法连接（`posix_spawnp failed`） | `spawn-helper` 缺少可执行权限 | `chmod +x node_modules/node-pty/prebuilds/<platform>/spawn-helper` |
-| L3 记忆功能不工作 | Node.js 版本 < 22.5 | 升级到 Node.js 22.5+，或忽略（L3 功能可选） |
+| L3 记忆功能不工作 | 检查 L3 配置与 SQLite 初始化日志 | 当前 Node.js 基线为 22.19+；旧版本需先升级 Node.js |
 | 技能包上传失败 | 缺少 `unzip` 命令 | `apt-get install -y unzip` |
 | 工作区下载 ZIP 失败 | 缺少 `zip` 命令 | `apt-get install -y zip` |
 | 沙箱模式启动失败 | 缺少 `bwrap`/`socat`/`ripgrep` | `apt-get install -y bubblewrap socat ripgrep` |
