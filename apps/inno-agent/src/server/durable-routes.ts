@@ -130,8 +130,18 @@ async function streamDurableTurn(
 		});
 		stream = activeStream;
 		streamRegistry.publishStreamEvent(state, { type: "stream_state", status: "running" });
+		if (state.cancelRequested) {
+			await lease.runtime.abort();
+			streamRegistry.finishTurn(state, "aborted", {
+				type: "aborted", message: "Stopped",
+			}, { persisted: false });
+			return;
+		}
 		const submission = await lease.runtime.submit(prompt, state.clientRequestId);
 		service.noteSubmission(req, state.sessionId, prompt);
+		// Cancellation can race durable admission. Re-apply the abort after the
+		// submission commits so an admitted queued input cannot escape it.
+		if (state.cancelRequested) await lease.runtime.abort();
 		const result = await lease.runtime.waitForSubmission(submission.id);
 		await activeStream.stop();
 		stream = undefined;
@@ -153,8 +163,12 @@ async function streamDurableTurn(
 			finalMessageCount: detail.messages.length,
 			finalSessionRevision: detail.revision,
 		};
-		if (result.status === "done" && persisted) {
+		if (result.status === "done" && persisted && !state.cancelRequested) {
 			streamRegistry.finishTurn(state, "completed", { type: "done", fullText: result.text }, persistence);
+		} else if (state.cancelRequested) {
+			streamRegistry.finishTurn(state, "aborted", {
+				type: "aborted", message: "Stopped",
+			}, persistence);
 		} else if (result.status === "unanswered") {
 			streamRegistry.finishTurn(state, "error", {
 				type: "error",
@@ -172,7 +186,11 @@ async function streamDurableTurn(
 		logger.error({ err: error, sessionId: state.sessionId, turnId: state.turnId }, "durable SSE chat turn failed");
 		if (!state.terminalEventPublished) {
 			const persistence = { persisted: false };
-			if (state.status === "queued") {
+			if (state.cancelRequested) {
+				streamRegistry.finishTurn(state, "aborted", {
+					type: "aborted", message: "Stopped",
+				}, persistence);
+			} else if (state.status === "queued") {
 				streamRegistry.finishTurn(state, "aborted", {
 					type: "aborted",
 					message: error instanceof Error ? error.message : String(error),

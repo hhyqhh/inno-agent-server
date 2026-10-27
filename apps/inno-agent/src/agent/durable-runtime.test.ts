@@ -140,6 +140,39 @@ describe("DurableSessionRuntime", () => {
 		expect(durableEntriesToMessages((await runtime.snapshot()).entries).filter((message) => message.role === "user")).toHaveLength(1);
 	});
 
+	it("persists turn cancellation across close and reopen", async () => {
+		const root = tempRoot();
+		const storagePath = join(root, "abort.sqlite");
+		const provider = fauxRuntime();
+		let notifyStarted!: () => void;
+		const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+		provider.faux.setResponses([async (_context, options) => {
+			notifyStarted();
+			const signal = options?.signal;
+			if (!signal) throw new Error("Expected a model abort signal");
+			await new Promise<void>((resolve) => {
+				if (signal.aborted) { resolve(); return; }
+				signal.addEventListener("abort", () => resolve(), { once: true });
+			});
+			return fauxAssistantMessage("unreachable");
+		}]);
+		let runtime = await open({ storagePath, ...provider });
+		const submission = await runtime.submit("cancel this turn", "abort-request");
+		await started;
+		await runtime.abort();
+		expect(await runtime.waitForSubmission(submission.id)).toMatchObject({ status: "unanswered" });
+		expect(provider.faux.state.callCount).toBe(1);
+		await runtime.close();
+		openRuntimes.splice(openRuntimes.indexOf(runtime), 1);
+
+		runtime = await open({ storagePath, ...provider });
+		expect(await runtime.waitForSubmission(submission.id)).toMatchObject({ status: "unanswered" });
+		expect(provider.faux.state.callCount).toBe(1);
+		provider.faux.appendResponses([fauxAssistantMessage("next turn works")]);
+		const next = await runtime.submit("continue", "after-abort-request");
+		expect(await waitForText(runtime, next.id)).toBe("next turn works");
+	});
+
 	it("runs the optional read tool inside the workspace and records its result", async () => {
 		const root = tempRoot();
 		writeFileSync(join(root, "note.txt"), "workspace note");

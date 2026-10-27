@@ -186,6 +186,21 @@ export class DurableQuestionStore {
 			createdAt: record.createdAt,
 		};
 	}
+
+	/** Cancellation is an explicit terminal answer, not an abandoned wait: a
+	 * later reopen must not resurrect a card for the aborted turn. */
+	cancelTurn(turnId: string): number {
+		let cancelled = 0;
+		for (const record of this.records()) {
+			if (record.result || record.turnId !== turnId) continue;
+			if (this.respond({
+				turnId,
+				questionId: record.questionId,
+				result: { answers: [], cancelled: true },
+			}) === "accepted") cancelled += 1;
+		}
+		return cancelled;
+	}
 }
 
 export interface DurableQuestionToolOptions {

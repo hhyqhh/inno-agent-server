@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: recoverable question cards (3F)
+## Current stage: durable turn cancellation (3G)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -67,15 +67,17 @@ The current durable slice supports:
   snapshots, original-target recovery, and cached completion results;
 - `ask_user_question` with stable question identity, tenant-local persisted
   answers, SSE turn rebinding, and original-run recovery after restart;
+- scoped active-turn cancellation through the existing chat abort endpoint,
+  including pending-question cleanup and persisted pi-durable abort marks;
 - graceful shutdown of open durable runtimes.
 
 Shell, workspace mutations, MCP, subagents, codemode, and computer-use remain
 disabled. Direct `patch_learner_profile` and `update_learner_profile` mutations
 are not exposed on the durable path yet. Attachments, durable permissions,
-branching/editing, showcase export, generated topics, and turn cancellation are
-not implemented on this path yet; unsupported operations fail explicitly rather
-than falling back to legacy execution. The workspace `agent.md` and
-private-skill prompt context are not injected yet.
+branching/editing, showcase export, and generated topics are not implemented on
+this path yet; unsupported operations fail explicitly rather than falling back
+to legacy execution. The workspace `agent.md` and private-skill prompt context
+are not injected yet.
 
 ## Recovery and delivery semantics
 
@@ -140,6 +142,18 @@ already-pending question with 409 and resolves new asks as `no_ui`. Accepted
 question/answer records are currently retained for crash recovery;
 retention/cleanup policy is still pending.
 
+`POST /api/chat/:sessionId/:turnId/abort` now supports active durable SSE turns
+after the same ownership check as other session operations. It marks the stream
+cancellation, persists any current question as cancelled, and calls
+`Conversation.abort()`, which commits abort marks and waits for the ordinary
+run/tool scope to become idle. The SSE terminal event is `aborted`, not a
+`durable_unanswered` error. Cancellation is rechecked after durable submission
+admission to close the queued-input race. Once the abort has completed, reopen
+does not resume that submission and a later turn can use the session normally.
+Question records and pi-durable SQLite are separate commits, not a distributed
+transaction; if the process dies before an abort is acknowledged, the caller
+must retry/recheck rather than assuming both writes completed.
+
 One durable storage has **one owner at a time**. The in-process guard does not
 replace deployment routing, lease/fencing, or an ordered old-owner shutdown.
 Never mount the same SQLite database into active-active workers or share it
@@ -175,18 +189,21 @@ killed with `SIGKILL` during a delayed model response, during an interrupted
 memory tool, while a submitted OCR job is still running, after a channel send
 but before its outbox completion commit, and after a question answer is
 persisted but before its tool result commits. Recovered question answers do not
-produce a second question event. No paid model endpoint or real external
-channel is used.
+produce a second question event. Cancellation tests verify persisted abort
+marks across close/reopen, no duplicate model call, a usable following turn,
+and cancelled questions that stay resolved. No paid model endpoint or real
+external channel is used.
 
 The real-PostgreSQL integration suite additionally covers explicit HTTP
 creation, concurrent authenticated durable sessions, per-tenant provider and
 OCR Authorization headers, cross-tenant 404s, completed request-ID retries,
 lack of legacy JSONL creation, SSE disconnect/reconnect replay, tenant-local
 L1/L2/OCR writes through the authenticated HTTP boundary, original-run question
-answers with cross-tenant 404 and stale-turn 409 responses, and non-streaming
-`no_ui` question resolution.
+answers with cross-tenant 404 and stale-turn 409 responses, non-streaming
+`no_ui` question resolution, and scoped cancellation with cross-tenant abort
+denial and pending-card cleanup.
 
 Still pending: application-persisted SSE replay after restart, durable
-permissions/cancellation, workspace prompt context and attachments, direct
-durable profile patch/update, outbox and question retention/cleanup, scheduler
-integration, and sharded single-owner deployment.
+permissions, workspace prompt context and attachments, direct durable profile
+patch/update, outbox and question retention/cleanup, scheduler integration, and
+sharded single-owner deployment.

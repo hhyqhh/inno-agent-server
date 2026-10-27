@@ -1276,6 +1276,61 @@ describe("durable session HTTP boundary", () => {
 		expect(JSON.stringify(noUiDetail.messages)).toContain("User declined to answer questions");
 	}, 60_000);
 
+	it("cancels a durable question turn without allowing cross-tenant aborts", async () => {
+		const [cookieA, cookieB] = await Promise.all([
+			registerUser("durable-abort-a@example.com"),
+			registerUser("durable-abort-b@example.com"),
+		]);
+		expect((await api(cookieA, "/api/settings/providers", {
+			method: "PUT",
+			body: JSON.stringify({
+				providerId: "shared",
+				baseUrl: providerOrigin,
+				apiKey: "durable-abort-secret",
+				api: "openai-completions",
+				models: [{ id: "tenant-model", name: "Tenant model", contextWindow: 32_000, maxTokens: 2_000 }],
+			}),
+		})).status).toBe(200);
+		const session = await (await api(cookieA, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ runtime: "durable" }),
+		})).json() as { id: string };
+		const stream = await api(cookieA, "/api/chat/stream", {
+			method: "POST",
+			body: JSON.stringify({ sessionId: session.id, prompt: "durable-question", clientRequestId: "durable-abort-request" }),
+		});
+		expect(stream.status).toBe(200);
+		const reader = stream.body!.getReader();
+		const decoder = new TextDecoder();
+		let events = "";
+		while (!events.includes('"type":"question"')) {
+			const chunk = await reader.read();
+			if (chunk.done) break;
+			events += decoder.decode(chunk.value, { stream: true });
+		}
+		const status = await (await api(cookieA, `/api/chat/status/${session.id}`)).json() as {
+			stream: { turnId: string; cancelRequested: boolean };
+		};
+		const abortPath = `/api/chat/${session.id}/${status.stream.turnId}/abort`;
+		expect((await api(cookieB, abortPath, { method: "POST" })).status).toBe(404);
+		expect((await api(cookieA, abortPath, { method: "POST" })).status).toBe(202);
+		while (!events.includes('"type":"aborted"')) {
+			const chunk = await reader.read();
+			if (chunk.done) break;
+			events += decoder.decode(chunk.value, { stream: true });
+		}
+		expect(events).toContain('"type":"question_resolved"');
+		expect(events).toContain('"cancelled":true');
+		expect(events).toContain('"type":"aborted"');
+		expect(events).not.toContain("tenant stub response");
+		expect((await api(cookieA, abortPath, { method: "POST" })).status).toBe(200);
+		const detail = await (await api(cookieA, `/api/sessions/${session.id}`)).json() as {
+			messages: Array<{ role: string }>;
+			pendingQuestion?: unknown;
+		};
+		expect(detail.pendingQuestion).toBeUndefined();
+		expect(detail.messages.filter((message) => message.role === "user")).toHaveLength(1);
+	}, 60_000);
+
 	it("writes durable L1/L2/OCR state only to the authenticated tenant roots", async () => {
 		const [cookieA, cookieB] = await Promise.all([
 			registerUser("durable-memory-a@example.com"),

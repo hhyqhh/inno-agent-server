@@ -676,17 +676,26 @@ export async function handleChatRoutes(
 
 	const chatAbortMatch = matchRoute("POST", method, url, "/api/chat/:sessionId/:turnId/abort");
 	if (chatAbortMatch) {
+		if (!await ownsSession(chatAbortMatch.sessionId)) return denySession();
 		const state = streamRegistry.getByTurn(chatAbortMatch.turnId);
 		if (!state || state.sessionId !== chatAbortMatch.sessionId) {
 			json(res, 404, { error: "Chat turn not found" });
 			return true;
 		}
-		if (durableContext?.service.get(req, state.sessionId)) {
-			json(res, 409, { error: "Durable turn cancellation is not enabled in this migration slice" });
-			return true;
-		}
 		if (state.status !== "queued" && state.status !== "running") {
 			json(res, 200, { status: state.status, cancelRequested: state.cancelRequested });
+			return true;
+		}
+		if (durableContext?.service.get(req, state.sessionId)) {
+			streamRegistry.requestCancel(state);
+			try {
+				await durableContext.service.abort(req, state.sessionId, state.turnId);
+			} catch (error) {
+				logger.error({ err: error, sessionId: state.sessionId, turnId: state.turnId }, "durable chat abort failed");
+				json(res, 500, { error: error instanceof Error ? error.message : String(error) });
+				return true;
+			}
+			json(res, 202, { status: state.status, cancelRequested: true });
 			return true;
 		}
 		streamRegistry.requestCancel(state);

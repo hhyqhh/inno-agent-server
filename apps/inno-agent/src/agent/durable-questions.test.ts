@@ -56,6 +56,25 @@ describe("DurableQuestionStore", () => {
 		await expect(completed.ask("stable-call", params, new AbortController().signal)).resolves.toEqual(result);
 	});
 
+	it("persists cancellation so an aborted turn does not resurrect its card", async () => {
+		const directory = questionDir();
+		const store = new DurableQuestionStore("durable-session", directory);
+		const events: Array<Record<string, unknown>> = [];
+		store.bindTurn({ turnId: "cancel-turn", emit: (event) => events.push(event) });
+		const waiting = store.ask("cancel-call", params, new AbortController().signal);
+		expect(store.cancelTurn("wrong-turn")).toBe(0);
+		expect(store.pendingQuestion()).toBeDefined();
+		expect(store.cancelTurn("cancel-turn")).toBe(1);
+		await expect(waiting).resolves.toMatchObject({ answers: [], cancelled: true });
+		expect(store.pendingQuestion()).toBeUndefined();
+		expect(events.at(-1)).toMatchObject({ type: "question_resolved", cancelled: true });
+
+		const reopened = new DurableQuestionStore("durable-session", directory);
+		await expect(reopened.ask("cancel-call", params, new AbortController().signal))
+			.resolves.toMatchObject({ answers: [], cancelled: true });
+		expect(reopened.pendingQuestion()).toBeUndefined();
+	});
+
 	it("does not create a pending card for a non-streaming no-UI call", async () => {
 		const store = new DurableQuestionStore("durable-session", questionDir());
 		store.bindTurn({ turnId: "http-once", noUi: true });

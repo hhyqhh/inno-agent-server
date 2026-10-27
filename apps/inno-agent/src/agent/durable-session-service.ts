@@ -188,6 +188,18 @@ export class DurableSessionService {
 		}
 	}
 
+	async abort(req: IncomingMessage, id: string, turnId: string): Promise<void> {
+		const lease = await this.lease(req, id);
+		try {
+			// Resolve the application-owned card while this turn still owns the
+			// runtime, then persist pi-durable's abort marks before releasing it.
+			this.questionStore(req, id).cancelTurn(turnId);
+			await lease.runtime.abort();
+		} finally {
+			await lease.release();
+		}
+	}
+
 	private catalog(req: IncomingMessage): DurableSessionRecord[] {
 		const value = readJson<unknown>(this.catalogPath(req), []);
 		return Array.isArray(value) ? value.filter(isRecord) : [];

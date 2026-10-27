@@ -244,6 +244,12 @@ export class DurableSessionRuntime {
 		await this.rootConversation.waitForIdle(context);
 	}
 
+	/** Persist the abort marks and wait for the ordinary run/tool scope to become
+	 * idle. Reopening the storage will not resume this aborted submission. */
+	async abort(context: Context = BACKGROUND_CONTEXT): Promise<void> {
+		await this.rootConversation.abort(context);
+	}
+
 	async snapshot(): Promise<SnapshotEvent> {
 		const stream = await watchEvents(this.harness, this.rootConversation.id, BACKGROUND_CONTEXT);
 		try {
