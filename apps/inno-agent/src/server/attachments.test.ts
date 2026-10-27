@@ -258,6 +258,22 @@ describe("attachments sidecar store", () => {
 		expect(kept[0].attachments).toEqual(attachments);
 	});
 
+	it("restores durable inline images as workspace preview URLs", () => {
+		recordSessionAttachments(dataDir, "images", {
+			promptContent: "看图",
+			images: [{ mimeType: "image/png", workspacePath: ".chat-images/a.png" }],
+			workspaceId: "workspace-a",
+			timestamp: 1,
+			requestId: "image-request",
+		});
+		const merged = mergeSessionAttachments(dataDir, "images", [{ role: "user", content: "看图", timestamp: 1 }]);
+		expect(merged[0].attachments).toBeUndefined();
+		expect(merged[0].images).toEqual([{
+			mimeType: "image/png",
+			previewUrl: "/api/workspace/raw?workspaceId=workspace-a&path=.chat-images%2Fa.png",
+		}]);
+	});
+
 	it("scopes the cache by data root and deduplicates durable request IDs", () => {
 		const otherRoot = join(dataDir, "tenant-b");
 		mkdirSync(join(otherRoot, "sessions"), { recursive: true });

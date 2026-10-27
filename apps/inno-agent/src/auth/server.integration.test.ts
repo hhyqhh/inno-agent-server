@@ -1186,7 +1186,7 @@ describe("durable session HTTP boundary", () => {
 		expect(recovered.messages.some((message) => message.role === "assistant" && message.content === "tenant stub response")).toBe(true);
 	}, 60_000);
 
-	it("passes validated workspace attachments without exposing their context as user text", async () => {
+	it("passes validated attachments and inline images without exposing model-only context as user text", async () => {
 		const cookieA = await registerUser("durable-attachments@example.com");
 		expect((await api(cookieA, "/api/settings/providers", {
 			method: "PUT",
@@ -1251,14 +1251,78 @@ describe("durable session HTTP boundary", () => {
 		});
 		expect(nonStreaming.status).toBe(200);
 		expect(providerRequests.find((request) => request.body.includes("durable-nonstream-attachment"))?.body).toContain("普通附件");
-		expect((await api(cookieA, "/api/chat", {
+		const nativeImage = await api(cookieA, "/api/chat/stream", {
 			method: "POST",
 			body: JSON.stringify({
 				sessionId: session.id,
-				prompt: "durable-inline-image-still-disabled",
+				prompt: "durable-native-inline-image",
+				clientRequestId: "durable-native-inline-image-request",
 				images: [{ data: "aW1hZ2U=", mimeType: "image/png" }],
 			}),
-		})).status).toBe(400);
+		});
+		expect(nativeImage.status).toBe(200);
+		expect(await nativeImage.text()).toContain('"persisted":true');
+		const nativeProviderBody = providerRequests.find((request) => request.body.includes("durable-native-inline-image"))?.body ?? "";
+		expect(nativeProviderBody).toContain("image_url");
+		expect(nativeProviderBody).toContain("aW1hZ2U=");
+		expect(nativeProviderBody).not.toContain("用户本轮上传了");
+		const nativeRetry = await api(cookieA, "/api/chat/stream", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId: session.id,
+				prompt: "durable-native-inline-image",
+				clientRequestId: "durable-native-inline-image-request",
+				images: [{ data: "aW1hZ2U=", mimeType: "image/png" }],
+			}),
+		});
+		expect(nativeRetry.status).toBe(200);
+		expect(await nativeRetry.text()).toContain('"persisted":true');
+		expect(providerRequests.filter((request) => request.body.includes("durable-native-inline-image"))).toHaveLength(1);
+		const nativeDetail = await (await api(cookieA, `/api/sessions/${session.id}`)).json() as {
+			messages: Array<{ role: string; content: string; images?: Array<{ previewUrl: string; mimeType: string }> }>;
+		};
+		expect(nativeDetail.messages.filter((message) => message.content === "durable-native-inline-image")).toHaveLength(1);
+		const nativeUser = nativeDetail.messages.find((message) => message.content === "durable-native-inline-image");
+		expect(nativeUser?.images).toHaveLength(1);
+		expect(nativeUser?.images?.[0].previewUrl).toContain("/api/workspace/raw?");
+		expect((await api(cookieA, nativeUser!.images![0].previewUrl)).status).toBe(200);
+
+		expect((await api(cookieA, "/api/settings/providers", {
+			method: "PUT",
+			body: JSON.stringify({
+				providerId: "text-only",
+				baseUrl: providerOrigin,
+				apiKey: "durable-text-only-secret",
+				api: "openai-completions",
+				models: [{ id: "text-model", name: "Text model", input: ["text"], contextWindow: 32_000, maxTokens: 2_000 }],
+			}),
+		})).status).toBe(200);
+		expect((await api(cookieA, "/api/settings/model", {
+			method: "POST", body: JSON.stringify({ provider: "text-only", model: "text-model" }),
+		})).status).toBe(200);
+		const textSession = await (await api(cookieA, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ runtime: "durable" }),
+		})).json() as { id: string };
+		const textOnly = await api(cookieA, "/api/chat", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId: textSession.id,
+				prompt: "durable-text-only-inline-image",
+				clientRequestId: "durable-text-only-inline-image-request",
+				images: [{ data: "aW1hZ2U=", mimeType: "image/png" }],
+			}),
+		});
+		expect(textOnly.status).toBe(200);
+		const textProviderBody = providerRequests.find((request) => request.body.includes("durable-text-only-inline-image"))?.body ?? "";
+		expect(textProviderBody).not.toContain("image_url");
+		expect(textProviderBody).toContain("用户本轮上传了 1 张图片");
+		expect(textProviderBody).toContain(".chat-images/");
+		const textDetail = await (await api(cookieA, `/api/sessions/${textSession.id}`)).json() as {
+			messages: Array<{ role: string; content: string; images?: unknown[] }>;
+		};
+		const textUser = textDetail.messages.find((message) => message.role === "user");
+		expect(textUser?.content).toBe("durable-text-only-inline-image");
+		expect(textUser?.images).toHaveLength(1);
 	}, 60_000);
 
 	it("resumes the original durable run from an authenticated question answer", async () => {

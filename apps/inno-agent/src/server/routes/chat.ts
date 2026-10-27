@@ -1,5 +1,5 @@
 import type { IncomingMessage as HttpReq, ServerResponse } from "node:http";
-import { existsSync, mkdirSync, statSync, watch, writeFileSync } from "node:fs";
+import { existsSync, statSync, watch } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import {
 	abortPromptForTurnToken,
@@ -24,7 +24,6 @@ import {
 } from "../../chat/stream-registry.js";
 import { logger } from "../../logger.js";
 import type { RuntimePaths } from "../../runtime.js";
-import { resolveContainedPath } from "../../utils/path-safety.js";
 import type { WorkspaceRegistry } from "../../workspace/workspace-registry.js";
 import type { TenantStore } from "../../tenants/store.js";
 import { getRequestTenant, ownsRequestResource } from "../../tenants/http.js";
@@ -44,6 +43,7 @@ import {
 } from "../workspace-activity-store.js";
 import { WORKSPACE_IGNORES } from "../file-helpers.js";
 import { handleDurableChatRoutes, type DurableHttpContext } from "../durable-routes.js";
+import { parseInlineImages, persistInlineImages, prependImagePathsHint } from "../inline-images.js";
 import { json, matchRoute, readBody } from "../http-helpers.js";
 import type {
 	SessionChannel,
@@ -191,77 +191,6 @@ function toolCallStreamEventFromAssistantEvent(ev: any): unknown | null {
 		...(args !== undefined ? { args } : {}),
 		...(ev.type === "toolcall_delta" && typeof ev.delta === "string" ? { argsDelta: ev.delta } : {}),
 	};
-}
-
-/**
- * Persist inline chat images (base64 data URLs from the web UI) to a
- * workspace-local `.chat-images/` directory so file-path-based tools
- * (`ocr_image`, `parse_document`) can read them. Returns workspace-relative
- * paths. When the chat model cannot natively recognize images, the agent is
- * steered (via the system prompt) to call `ocr_image` with these paths.
- */
-function persistInlineImages(images: Array<{ data: string; mimeType: string }>, workspaceRoot: string): string[] {
-	if (images.length === 0) return [];
-	// `.chat-images` is agent-writable like the rest of the workspace — if it
-	// (or an ancestor) is a symlink escaping the workspace, pasted images would
-	// be written to a host directory. Fail closed and just skip persistence.
-	const chatImagesDir = resolveContainedPath(workspaceRoot, ".chat-images");
-	if (!chatImagesDir) {
-		logger.warn({ workspaceRoot }, "skipping inline image persistence: .chat-images escapes the workspace");
-		return [];
-	}
-	try {
-		if (!existsSync(chatImagesDir)) mkdirSync(chatImagesDir, { recursive: true });
-	} catch (err) {
-		logger.warn({ err }, "failed to create .chat-images dir");
-		return [];
-	}
-	const timestamp = Date.now();
-	const paths: string[] = [];
-	images.forEach((img, idx) => {
-		const ext = mimeTypeToExtension(img.mimeType);
-		const filename = `${timestamp}-${idx}${ext}`;
-		const filePath = join(chatImagesDir, filename);
-		try {
-			writeFileSync(filePath, Buffer.from(img.data, "base64"));
-			paths.push(`.chat-images/${filename}`);
-		} catch (err) {
-			logger.warn({ err, filename }, "failed to persist inline image");
-		}
-	});
-	return paths;
-}
-
-function mimeTypeToExtension(mimeType: string): string {
-	switch (mimeType) {
-		case "image/png": return ".png";
-		case "image/jpeg": return ".jpg";
-		case "image/gif": return ".gif";
-		case "image/webp": return ".webp";
-		case "image/tiff": return ".tiff";
-		case "image/bmp": return ".bmp";
-		default: return ".png";
-	}
-}
-
-/**
- * Build the fallback prompt variant carrying the saved-image path hint, so
- * the agent knows which files to pass to `ocr_image` / `parse_document`.
- * Only sent when the model can't natively see images (text-only model or a
- * rejected native payload) — vision-capable turns receive the raw prompt so
- * they aren't steered toward `ocr_image`.
- *
- * The prefix format is owned by `server/upload-prefix.ts`
- * (UPLOADED_IMAGES_PREFIX_PATTERN), which strips it back out when deriving
- * session titles — keep the two in sync when changing the format.
- */
-function prependImagePathsHint(prompt: string, imagePaths: string[]): string {
-	if (imagePaths.length === 0) return prompt;
-	const list = imagePaths.map((p) => `- ${p}`).join("\n");
-	return (
-		`[用户本轮上传了 ${imagePaths.length} 张图片，已保存到工作区：\n${list}\n` +
-		`如果需要识别图片中的文字（当前模型可能不支持图片识别），请调用 ocr_image 工具并传入上述路径。]\n\n${prompt}`
-	);
 }
 
 function recordAgentCommandIfPresent(dataDir: string, sessionId: string, prompt: string): void {
@@ -535,11 +464,7 @@ export async function handleChatRoutes(
 			json(res, 400, { error: "Missing prompt" });
 			return true;
 		}
-		const rawImages = Array.isArray(body.images) ? body.images : [];
-		const images = rawImages
-			.filter((img): img is { data: string; mimeType: string } =>
-				img && typeof img.data === "string" && typeof img.mimeType === "string")
-			.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+		const images = parseInlineImages(body.images);
 		const requestedSessionId = typeof body.sessionId === "string" ? body.sessionId : null;
 		if (getRequestTenant(req) && !requestedSessionId) {
 			json(res, 400, { error: "Missing sessionId" });
@@ -808,11 +733,7 @@ export async function handleChatRoutes(
 			json(res, 404, { error: "Session workspace not found" });
 			return true;
 		}
-		const rawImages = Array.isArray(body.images) ? body.images : [];
-		const images = rawImages
-			.filter((img): img is { data: string; mimeType: string } =>
-				img && typeof img.data === "string" && typeof img.mimeType === "string")
-			.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+		const images = parseInlineImages(body.images);
 		// Persist inline images to the workspace so file-path tools (ocr_image,
 		// parse_document) can read them when the chat model can't see images.
 		const imagePaths = persistInlineImages(images, streamWorkspaceRoot);

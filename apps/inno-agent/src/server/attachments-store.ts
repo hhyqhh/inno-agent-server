@@ -15,7 +15,10 @@ import type { SessionMessageSummary } from "./session-model.js";
 
 export interface SessionAttachmentEntry {
 	promptContent: string;
-	attachments: ChatAttachments;
+	attachments?: ChatAttachments;
+	/** Durable inline images restored as workspace previews, including for
+	 * text-only models whose committed model input omits native image blocks. */
+	images?: Array<{ mimeType: string; workspacePath: string }>;
 	timestamp: number;
 	/** Workspace that contained the attached files when the turn was accepted. */
 	workspaceId?: string;
@@ -90,6 +93,15 @@ export function mergeSessionAttachments(
 		const index = pending.findIndex((entry) => entry.promptContent === message.content);
 		if (index === -1) return message;
 		const [entry] = pending.splice(index, 1);
-		return { ...message, attachments: entry.attachments };
+		return {
+			...message,
+			...(entry.attachments ? { attachments: entry.attachments } : {}),
+			...(entry.images?.length && entry.workspaceId ? {
+				images: entry.images.map((image) => ({
+					mimeType: image.mimeType,
+					previewUrl: `/api/workspace/raw?workspaceId=${encodeURIComponent(entry.workspaceId!)}&path=${encodeURIComponent(image.workspacePath)}`,
+				})),
+			} : {}),
+		};
 	});
 }

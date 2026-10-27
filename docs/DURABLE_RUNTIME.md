@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: structured workspace attachments (3I)
+## Current stage: inline workspace images (3J)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -73,16 +73,19 @@ The current durable slice supports:
   including pending-question cleanup and persisted pi-durable abort marks;
 - structured workspace attachments on streaming and non-streaming chat, with
   canonical path validation and request-ID-deduplicated UI sidecar metadata;
+- inline images persisted under `.chat-images/`, native image blocks for
+  vision-capable models, OCR path hints for explicitly text-only models, and
+  workspace preview restoration through the same deduplicated sidecar;
 - graceful shutdown of open durable runtimes.
 
 Shell, workspace mutations, MCP, subagents, codemode, and computer-use remain
 disabled. Direct `patch_learner_profile` and `update_learner_profile` mutations
-are not exposed on the durable path yet. Inline `images`, native vision input,
-durable permissions, branching/editing, showcase export, and generated topics
-are not implemented on this path yet; unsupported operations fail explicitly
-rather than falling back to legacy execution. Workspace-private skills are
-injected as prompt resources; they do not alter the process-global PI resource
-loader or enable otherwise unsupported durable tools.
+are not exposed on the durable path yet. Automatic fallback after a provider
+rejects a native image payload, durable permissions, branching/editing, showcase
+export, and generated topics are not implemented on this path yet; unsupported
+operations fail explicitly rather than falling back to legacy execution.
+Workspace-private skills are injected as prompt resources; they do not alter the
+process-global PI resource loader or enable otherwise unsupported durable tools.
 
 ## Recovery and delivery semantics
 
@@ -143,8 +146,18 @@ model-only text block. History hides only that context block, then merges the
 validated attachment metadata back into the matching user message for the UI.
 Sidecar caches are scoped by tenant data root and `clientRequestId` deduplicates
 retried metadata writes. Sidecar and SQLite commits are not a distributed
-transaction; unmatched sidecar entries remain inert. Inline `body.images` still
-returns 400 and no native vision or provider-rejection fallback is claimed yet.
+transaction; unmatched sidecar entries remain inert.
+
+Inline `body.images` follows the same raw-prompt/model-context separation. Images
+are persisted before submission under the session workspace's `.chat-images/`
+directory. Durable filenames hash the request ID, image index, and bytes, so an
+identical retry reuses the path while a conflicting retry cannot overwrite the
+original file. Models whose resolved tenant config includes `input: ["image"]`
+receive native image blocks; explicitly text-only models instead receive the
+workspace paths and OCR hint as a separate hidden context block. Both modes merge
+workspace preview URLs into user history through the request-ID-deduplicated
+sidecar. Automatic retry without image blocks after a provider rejects a native
+payload is not implemented yet.
 
 Durable questions use the stable operation ID
 `ask_user_question:<sessionId>:<toolCallId>`. Records live under the
@@ -200,7 +213,8 @@ runtimes, request deduplication across idle close/reopen, stable committed
 revisions, busy-delete rejection, legacy JSONL non-interference,
 workspace/symlink containment, read-only fail-closed behavior, workspace
 `agent.md`/private-skill injection and reload, attachment-context history
-projection, tenant-scoped attachment sidecar caching and request-ID dedup,
+projection, inline-image retry path stability and OCR hint construction,
+tenant-scoped attachment/image sidecar caching and request-ID dedup,
 replay-safe L1/L2 execution, L1 event/profile crash-gap recovery, deterministic L2 archive,
 OCR completion caching and job-ID resume, channel payload/completion caching,
 verified tenant channel rebinding, and recovery after real child processes are
@@ -220,10 +234,12 @@ lack of legacy JSONL creation, SSE disconnect/reconnect replay, tenant-local
 L1/L2/OCR writes through the authenticated HTTP boundary, original-run question
 answers with cross-tenant 404 and stale-turn 409 responses, non-streaming
 `no_ui` question resolution, streaming/non-streaming validated workspace
-attachments with raw-text history and out-of-workspace path rejection, and scoped
-cancellation with cross-tenant abort denial and pending-card cleanup.
+attachments with raw-text history and out-of-workspace path rejection, native
+vision and text-only inline-image requests with workspace previews and retry
+dedup, and scoped cancellation with cross-tenant abort denial and pending-card
+cleanup.
 
 Still pending: application-persisted SSE replay after restart, durable
-permissions, inline images, direct durable profile patch/update, outbox and
+permissions, provider-rejection image fallback, direct durable profile patch/update, outbox and
 question retention/cleanup, scheduler integration, and sharded single-owner
 deployment.

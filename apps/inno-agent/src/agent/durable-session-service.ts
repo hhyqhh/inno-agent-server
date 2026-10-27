@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import { join } from "node:path";
 import type { InnoConfig } from "../config.js";
 import type { ChannelRegistry } from "../channels/channel.js";
@@ -22,7 +23,8 @@ import {
 	mergeSessionAttachments,
 	recordSessionAttachments,
 } from "../server/attachments-store.js";
-import { clearWorkspaceActivity, recordWorkspaceAttachmentActivity } from "../server/workspace-activity-store.js";
+import { clearWorkspaceActivity, recordWorkspaceAttachmentActivity, recordWorkspaceFileAccess } from "../server/workspace-activity-store.js";
+import { buildImagePathsHint, parseInlineImages, persistInlineImages } from "../server/inline-images.js";
 import { createConfiguredDurableModels } from "./durable-models.js";
 import { buildDurableInstructions } from "./durable-memory.js";
 import { durableEntriesToMessages } from "./durable-projection.js";
@@ -60,6 +62,14 @@ export interface DurableSessionLease {
 export interface PreparedDurableAttachments {
 	attachments: ChatAttachments;
 	context: string;
+	workspaceId: string;
+	workspaceRoot: string;
+}
+
+export interface PreparedDurableImages {
+	nativeImages: ImageContent[];
+	images: Array<{ mimeType: string; workspacePath: string }>;
+	fallbackContext: string;
 	workspaceId: string;
 	workspaceRoot: string;
 }
@@ -309,21 +319,64 @@ export class DurableSessionService {
 		return { attachments, context, workspaceId: record.workspaceId, workspaceRoot };
 	}
 
-	recordAttachments(req: IncomingMessage, id: string, prepared: PreparedDurableAttachments, prompt: string, requestId: string): void {
+	prepareImages(req: IncomingMessage, id: string, raw: unknown, requestId: string): PreparedDurableImages | null {
+		const parsed = parseInlineImages(raw);
+		if (parsed.length === 0) return null;
+		const record = this.get(req, id);
+		if (!record) throw new Error("Durable session not found");
+		const workspaceRoot = this.options.resolveWorkspaceDir(id, record.workspaceId);
+		if (!workspaceRoot) throw new Error(`Durable session workspace not found: ${record.workspaceId}`);
+		const paths = persistInlineImages(parsed, workspaceRoot, requestId);
+		if (paths.length !== parsed.length) throw new Error("Failed to persist every durable inline image");
+		const config = resolveCurrentTenantConfig(this.options.dataDir, this.options.getLocalConfig());
+		const model = config.providers[record.provider]?.models.find((candidate) => candidate.id === record.modelId);
+		if (!model) throw new Error(`Configured durable model not found: ${record.provider}/${record.modelId}`);
+		const native = model.input.includes("image");
+		return {
+			nativeImages: native ? parsed : [],
+			images: parsed.map((image, index) => ({ mimeType: image.mimeType, workspacePath: paths[index] })),
+			fallbackContext: native ? "" : buildImagePathsHint(paths),
+			workspaceId: record.workspaceId,
+			workspaceRoot,
+		};
+	}
+
+	recordTurnMetadata(
+		req: IncomingMessage,
+		id: string,
+		attachments: PreparedDurableAttachments | null,
+		images: PreparedDurableImages | null,
+		prompt: string,
+		requestId: string,
+	): void {
+		if (!attachments && !images) return;
 		const dataRoot = resolveRequestTenantDataRoot(req, this.options.dataDir);
+		const workspaceId = attachments?.workspaceId ?? images?.workspaceId;
 		recordSessionAttachments(dataRoot, id, {
 			promptContent: prompt,
-			attachments: prepared.attachments,
+			...(attachments ? { attachments: attachments.attachments } : {}),
+			...(images ? { images: images.images } : {}),
 			timestamp: Date.now(),
-			workspaceId: prepared.workspaceId,
+			workspaceId,
 			requestId,
 		});
-		recordWorkspaceAttachmentActivity(dataRoot, {
-			sessionId: id,
-			workspaceId: prepared.workspaceId,
-			workspaceRoot: prepared.workspaceRoot,
-			attachments: prepared.attachments,
-		});
+		if (attachments) {
+			recordWorkspaceAttachmentActivity(dataRoot, {
+				sessionId: id,
+				workspaceId: attachments.workspaceId,
+				workspaceRoot: attachments.workspaceRoot,
+				attachments: attachments.attachments,
+			});
+		}
+		if (images) {
+			recordWorkspaceFileAccess(dataRoot, {
+				sessionId: id,
+				workspaceId: images.workspaceId,
+				workspaceRoot: images.workspaceRoot,
+				paths: images.images.map((image) => image.workspacePath),
+				access: "write",
+			});
+		}
 	}
 
 	async snapshot(req: IncomingMessage, id: string): Promise<{

@@ -63,7 +63,7 @@ describe("DurableSseProjector", () => {
 		}))).toEqual([]);
 	});
 
-	it("hides the durable attachment context while preserving the raw prompt", () => {
+	it("hides model-only attachment and image-fallback context while preserving the raw prompt", () => {
 		const context = buildAttachmentContext({
 			bindings: [{ word: "资料", wordIndex: 0, files: [{ path: "notes.pdf", kind: "pdf", source: "workspace" }] }],
 			loose: [],
@@ -72,7 +72,12 @@ describe("DurableSseProjector", () => {
 			id: 1,
 			model: [{
 				role: "user",
-				content: [{ type: "text", text: "总结资料" }, { type: "text", text: context }],
+				content: [
+					{ type: "text", text: "总结资料" },
+					{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+					{ type: "text", text: "[用户本轮上传了 1 张图片，已保存到工作区：\n- .chat-images/a.png\n请调用 ocr_image。]" },
+					{ type: "text", text: context },
+				],
 				timestamp: 1,
 			}],
 		}] as unknown as EntryRecord[];
