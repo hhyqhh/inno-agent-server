@@ -28,6 +28,9 @@ import {
 import { completePromptOnce, runPromptSerialized, runPromptStreamingInSession, runPromptInSession, abortPromptForTurnToken, abortJobPromptInSession } from "./agent/pi-runner.js";
 import { closeDeferredRuns, configureDeferredRuns } from "./scheduler/deferred-runs.js";
 import { DurableSessionService } from "./agent/durable-session-service.js";
+import { runDurableJobPrompt } from "./agent/durable-job-runner.js";
+import type { CreatedJobSession, DurableJobExecution, DurableJobExecutor } from "./scheduler/job-runner.js";
+import type { ScheduledJob } from "./scheduler/types.js";
 import { ChannelRegistry } from "./channels/channel.js";
 import type { ChannelStreamEvent } from "./channels/channel.js";
 import { FeishuChannel } from "./channels/feishu/feishu-channel.js";
@@ -96,7 +99,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { readAuthRuntimeConfig, readListenConfig } from "./auth/config.js";
 import { assertSignUpAllowed, isPublicApiRequest, isTrustedOrigin, requireSession } from "./auth/http.js";
 import { createAuthRuntime } from "./auth/runtime.js";
-import { ownsRequestResource, setRequestTenant } from "./tenants/http.js";
+import { createBackgroundRequest, ownsRequestResource, setRequestTenant } from "./tenants/http.js";
 import { resolveCurrentTenantDataDir, resolveCurrentTenantDataRoot } from "./tenants/paths.js";
 import { getCurrentTenant, getCurrentTenantStore, runWithoutTenantContext } from "./tenants/current.js";
 
@@ -160,6 +163,7 @@ let wechatChannel: WeChatChannel | null = null;
 let dispatcher: PersonalChannelDispatcher | null = null;
 let tenantChannelManager: TenantChannelManager | null = null;
 let scheduler: CronScheduler | TenantCronScheduler | null = null;
+let scheduledSessionFactory: ((job: ScheduledJob, request?: HttpReq) => Promise<CreatedJobSession | null>) | undefined;
 
 let bootstrapped = false;
 let bootstrapPromise: Promise<void> | null = null;
@@ -432,8 +436,27 @@ async function ensureBootstrapped(): Promise<void> {
 			}
 		}
 
-		async function createScheduledSession(): Promise<string | null> {
+		async function createScheduledSession(job: ScheduledJob, request?: HttpReq): Promise<CreatedJobSession | null> {
 			try {
+				if (job.runtime === "durable") {
+					const req = request ?? backgroundTenantRequest();
+					const tenant = getCurrentTenant();
+					const store = getCurrentTenantStore();
+					if (tenant && !store) throw new Error("Scheduled session creation requires a tenant store");
+					const ws = workspaceRegistry.ensureChannelWorkspace("scheduler", tenant?.tenantId);
+					if (tenant) await store!.claimResource(tenant, "workspace", ws.id);
+					const summary = durableSessions.create(req, { workspaceId: ws.id, origin: "scheduler" });
+					try {
+						if (tenant) await store!.claimResource(tenant, "session", summary.id);
+						if (!workspaceRegistry.bindSession(summary.id, ws.id)) throw new Error("Workspace not found");
+						return { id: summary.id, runtime: "durable" };
+					} catch (error) {
+						await durableSessions.delete(req, summary.id).catch(() => undefined);
+						workspaceRegistry.unbindSession(summary.id);
+						if (tenant) await store!.releaseResource(tenant, "session", summary.id).catch(() => undefined);
+						throw error;
+					}
+				}
 				const id = await createNewSession({});
 				const tenant = getCurrentTenant();
 				if (tenant) {
@@ -448,23 +471,32 @@ async function ensureBootstrapped(): Promise<void> {
 				const sessionPath = sessionFileFromId(paths.sessionDir, id);
 				return sessionPath && existsSync(sessionPath) ? sessionPath : null;
 			} catch (err) {
-				logger.error({ err }, "scheduled run session creation failed");
+				logger.error({ err, runtime: job.runtime ?? "legacy" }, "scheduled run session creation failed");
 				return null;
 			}
 		}
+
+		scheduledSessionFactory = createScheduledSession;
+		const durableExecutor: DurableJobExecutor = (execution) =>
+			executeDurableJob(backgroundTenantRequest(), execution);
 
 		configureDeferredRuns({
 			jobStore,
 			channelRegistry,
 			checkInStore,
 			createSession: createScheduledSession,
+			durableExecutor,
 			durableClaims: auth.mode === "better-auth",
 		});
 		if (auth.mode === "local") {
-			scheduler = new CronScheduler(jobStore, channelRegistry, checkInStore);
+			scheduler = new CronScheduler(jobStore, channelRegistry, checkInStore, {
+				createSession: (job) => job.runtime === "durable" ? createScheduledSession(job) : Promise.resolve(null),
+				durableExecutor,
+			});
 		} else {
 			scheduler = new TenantCronScheduler(auth.tenantStore!, jobStore, channelRegistry, checkInStore, {
 				createSession: createScheduledSession,
+				durableExecutor,
 			});
 		}
 		scheduler.start();
@@ -1289,8 +1321,12 @@ function recordCurrentSessionChannel(
  * the session's birthplace IS the scheduler. Override the "web" origin that
  * POST /api/sessions stamped at creation time so the sidebar can badge it.
  */
-function recordJobRunSession(sessionId: string): void {
+function recordJobRunSession(sessionId: string, req?: HttpReq): void {
 	if (!sessionId) return;
+	if (req && durableSessions.get(req, sessionId)) {
+		durableSessions.markSchedulerOrigin(req, sessionId);
+		return;
+	}
 	const metadata = readSessionChannelMetadata();
 	const prev = metadata[sessionId];
 	metadata[sessionId] = {
@@ -1439,6 +1475,30 @@ const durableSessions = new DurableSessionService({
 	tenantStore: auth.tenantStore,
 });
 
+const activeDurableJobTurns = new Map<string, string>();
+
+function backgroundTenantRequest(): HttpReq {
+	const tenant = getCurrentTenant();
+	if (!tenant) return createBackgroundRequest();
+	const store = getCurrentTenantStore();
+	if (!store) throw new Error("Background durable execution requires a tenant store");
+	return createBackgroundRequest(tenant, store);
+}
+
+async function executeDurableJob(req: HttpReq, execution: DurableJobExecution): Promise<string> {
+	if (activeDurableJobTurns.has(execution.sessionId)) {
+		throw new Error("Durable session already has an active job run");
+	}
+	activeDurableJobTurns.set(execution.sessionId, execution.turnId);
+	try {
+		return await runDurableJobPrompt(req, durableSessions, execution.sessionId, execution.prompt, execution);
+	} finally {
+		if (activeDurableJobTurns.get(execution.sessionId) === execution.turnId) {
+			activeDurableJobTurns.delete(execution.sessionId);
+		}
+	}
+}
+
 const { dispatch: dispatchRoutes } = createRouteDispatcher({
 	// --- Check-ins API ---
 	checkins: (req, res, method, url) => handleCheckInsRoutes(req, res, method, url, { checkInStore, tenantStore: auth.tenantStore }),
@@ -1448,13 +1508,26 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 		jobStore,
 		channelRegistry,
 		checkInStore,
-		resolveSessionPath: (sessionId) => {
+		resolveSession: (sessionId) => {
+			if (durableSessions.get(req, sessionId)) return { id: sessionId, runtime: "durable" };
 			const sessionPath = sessionFileFromId(paths.sessionDir, sessionId);
-			return sessionPath && existsSync(sessionPath) ? sessionPath : null;
+			return sessionPath && existsSync(sessionPath) ? { id: sessionId, path: sessionPath, runtime: "legacy" } : null;
+		},
+		createSession: async (request, job) => scheduledSessionFactory?.(job, request) ?? null,
+		durableExecutor: executeDurableJob,
+		disconnectJobRun: (sessionId, turnId) => {
+			if (activeDurableJobTurns.get(sessionId) === turnId) {
+				durableSessions.cancelQuestionTurn(req, sessionId, turnId);
+			}
 		},
 		recordJobRunSession,
 		tenantStore: auth.tenantStore,
 		abortJobRun: async (sessionId) => {
+			const durableTurnId = activeDurableJobTurns.get(sessionId);
+			if (durableTurnId && durableSessions.get(req, sessionId)) {
+				await durableSessions.abort(req, sessionId, durableTurnId);
+				return true;
+			}
 			const sessionPath = sessionFileFromId(paths.sessionDir, sessionId);
 			if (!sessionPath || !existsSync(sessionPath)) return false;
 			return abortJobPromptInSession(sessionPath);

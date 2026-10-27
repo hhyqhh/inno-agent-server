@@ -174,6 +174,7 @@ export class JobStore {
 			channel: job.channel,
 			target: job.target,
 			taskType: job.taskType ?? "custom_prompt",
+			runtime: job.runtime,
 			prompt: job.prompt ?? "",
 			lastRunAt: job.lastRunAt,
 			nextRunAt: enabled ? (job.nextRunAt ?? computeNextRunAt(job.cron ?? "0 9 * * *", timezone)) : undefined,

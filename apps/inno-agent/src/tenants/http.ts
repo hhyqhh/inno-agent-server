@@ -14,6 +14,17 @@ export function getRequestTenant(req: IncomingMessage): TenantContext | null {
 	return requestTenants.get(req) ?? null;
 }
 
+/** Internal request-shaped scope for background services that already restore
+ * verified tenant ALS. No socket or client-supplied identity is involved. */
+export function createBackgroundRequest(context?: TenantContext, store?: TenantStore): IncomingMessage {
+	const req = {} as IncomingMessage;
+	if (context) {
+		if (!store) throw new Error("A tenant store is required for a background tenant scope");
+		setRequestTenant(req, context, store);
+	}
+	return req;
+}
+
 export async function ownsRequestResource(
 	req: IncomingMessage,
 	store: TenantStore | null | undefined,

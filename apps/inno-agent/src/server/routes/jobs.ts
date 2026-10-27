@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { ChannelRegistry } from "../../channels/channel.js";
 import type { JobStore } from "../../scheduler/job-store.js";
 import type { ScheduledJob } from "../../scheduler/types.js";
-import { executeJob, type JobRunResult } from "../../scheduler/job-runner.js";
+import { executeJob, type CreatedJobSession, type DurableJobExecution, type JobRunResult, type JobSessionTarget } from "../../scheduler/job-runner.js";
 import { validateCron } from "../../scheduler/cron-utils.js";
 import { json, matchRoute, readBody } from "../http-helpers.js";
 import { isLearningJob, type CheckInStore } from "../../checkins/check-in-store.js";
@@ -85,6 +85,49 @@ export function jobStreamEventFromAgent(event: unknown): JobRunStreamEvent | nul
 			};
 		}
 	}
+	// Durable already projects coding-agent-like top-level events. Normalize its
+	// tool payloads here too, then share the text/thinking mapping below.
+	if (record.type === "tool_start" || record.type === "tool_update" || record.type === "tool_end") {
+		const toolName = typeof record.toolName === "string" && record.toolName ? record.toolName : "tool";
+		const toolCallId = typeof record.toolCallId === "string" ? record.toolCallId : "";
+		if (!toolCallId) return null;
+		if (record.type === "tool_start") {
+			const args = compactToolPayload(record.args);
+			return { type: "tool_start", toolCallId, toolName, ...(args === undefined ? {} : { args }) };
+		}
+		if (record.type === "tool_update") {
+			const partialResult = compactToolPayload(record.partialResult);
+			return { type: "tool_update", toolCallId, toolName, ...(partialResult === undefined ? {} : { partialResult }) };
+		}
+		const result = compactToolPayload(record.result);
+		return {
+			type: "tool_end", toolCallId, toolName,
+			...(result === undefined ? {} : { result }), isError: record.isError === true,
+		};
+	}
+	if (record.type === "question" && typeof record.questionId === "string") {
+		return {
+			type: "question", questionId: record.questionId, params: record.params,
+			...(typeof record.turnId === "string" ? { turnId: record.turnId } : {}),
+			...(typeof record.toolCallId === "string" ? { toolCallId: record.toolCallId } : {}),
+		};
+	}
+	if (record.type === "question_resolved" && typeof record.questionId === "string") {
+		return {
+			type: "question_resolved", questionId: record.questionId,
+			cancelled: record.cancelled === true,
+			...(typeof record.error === "string" ? { error: record.error } : {}),
+		};
+	}
+	if (record.type === "text_start" || record.type === "text_end"
+		|| record.type === "thinking_start" || record.type === "thinking_end") {
+		return { type: record.type, ...(typeof record.contentIndex === "number" ? { contentIndex: record.contentIndex } : {}) };
+	}
+	if (record.type === "text_delta" || record.type === "thinking_delta") {
+		return typeof record.delta === "string"
+			? { type: record.type, delta: record.delta, ...(typeof record.contentIndex === "number" ? { contentIndex: record.contentIndex } : {}) }
+			: null;
+	}
 	const assistantMessageEvent = record.assistantMessageEvent as {
 		type?: unknown;
 		delta?: unknown;
@@ -130,10 +173,15 @@ export interface JobsRouteContext {
 	channelRegistry: ChannelRegistry;
 	checkInStore?: CheckInStore;
 	resolveSessionPath?: (sessionId: string) => string | null;
+	resolveSession?: (sessionId: string) => JobSessionTarget | null;
+	createSession?: (req: HttpReq, job: ScheduledJob) => Promise<CreatedJobSession | null>;
+	durableExecutor?: (req: HttpReq, execution: DurableJobExecution) => Promise<string>;
 	/** Tag the target session as scheduler-born so the sidebar badges it. */
-	recordJobRunSession?: (sessionId: string) => void;
+	recordJobRunSession?: (sessionId: string, req: HttpReq) => void;
 	/** Abort the in-flight manual job run streaming into this session. */
 	abortJobRun?: (sessionId: string) => Promise<boolean>;
+	/** Release a durable question waiter when its only live view disconnects. */
+	disconnectJobRun?: (sessionId: string, turnId: string) => void;
 	tenantStore: TenantStore | null;
 }
 
@@ -156,6 +204,15 @@ export async function handleJobsRoutes(
 		if (await ownsRequestResource(req, tenantStore, "session", sessionId)) return true;
 		json(res, 404, { error: "Session not found" });
 		return false;
+	};
+	const resolveSession = (sessionId: string): JobSessionTarget | null => {
+		if (ctx.resolveSession) return ctx.resolveSession(sessionId);
+		const path = ctx.resolveSessionPath?.(sessionId);
+		return path ? { id: sessionId, path, runtime: "legacy" } : null;
+	};
+	const durableExecutor = (execution: DurableJobExecution) => {
+		if (!ctx.durableExecutor) throw new Error("Durable job execution is unavailable");
+		return ctx.durableExecutor(req, execution);
 	};
 
 	if (method === "GET" && url === "/api/jobs") {
@@ -186,6 +243,14 @@ export async function handleJobsRoutes(
 		}
 		if (body.channel && !channelRegistry.get(body.channel)) {
 			json(res, 400, { error: `Channel not registered: ${body.channel}. Enable it in settings first.` });
+			return true;
+		}
+		if (body.runtime !== undefined && body.runtime !== "legacy" && body.runtime !== "durable") {
+			json(res, 400, { error: "runtime must be legacy or durable" });
+			return true;
+		}
+		if (body.runtime === "durable" && (body.taskType === "push_reminder" || body.taskType === "check_in_reminder")) {
+			json(res, 400, { error: "Durable jobs support agent tasks, not reminder tasks" });
 			return true;
 		}
 		const job = jobStore.create(body);
@@ -243,11 +308,12 @@ export async function handleJobsRoutes(
 		// Resolve the target session BEFORE claiming the slot: a 404 here must
 		// not leak the claim, which would wedge the occurrence (auto-exec is
 		// blocked by isOccurrenceClaimed, manual retries 409) until restart.
-		const sessionPath = ctx.resolveSessionPath?.(sessionId);
-		if (!sessionPath) {
+		const session = resolveSession(sessionId);
+		if (!session) {
 			json(res, 404, { error: "Session not found" });
 			return true;
 		}
+		const sessionPath = session.path;
 		if (occurrenceId) {
 			// A manual run takes over a fired-but-waiting slot: cancel its
 			// deferred auto-execution and reserve the slot so cron re-fires
@@ -270,7 +336,7 @@ export async function handleJobsRoutes(
 				}
 			}
 		}
-		ctx.recordJobRunSession?.(sessionId);
+		ctx.recordJobRunSession?.(sessionId, req);
 
 		res.writeHead(200, {
 			"Content-Type": "text/event-stream",
@@ -303,35 +369,40 @@ export async function handleJobsRoutes(
 		// The run's agent may call ask_user_question; binding the bridge lets the
 		// tool park and wait for an answer instead of failing with "no_ui".
 		const runTurnId = randomUUID();
-		questionBridge.bindTurn({
-			sessionId,
-			turnId: runTurnId,
-			timeoutMs: 30 * 60_000,
-			emit: (event) => {
-				const forwarded = event.type === "question" ? { ...event, turnId: runTurnId } : event;
-				writeJobStreamEvent(res, forwarded as JobRunStreamEvent);
-			},
-		});
-		// Same for permission asks: the job stream view can approve/deny them.
-		permissionBridge.bindTurn({
-			sessionId,
-			turnId: runTurnId,
-			tenantId: getRequestTenant(req)?.tenantId,
-			runId: sessionPath,
-			timeoutMs: 30 * 60_000,
-			emit: (event) => {
-				const forwarded = event.type === "permission_request" ? { ...event, turnId: runTurnId } : event;
-				writeJobStreamEvent(res, forwarded as JobRunStreamEvent);
-			},
-		});
+		if (session.runtime === "legacy") {
+			questionBridge.bindTurn({
+				sessionId,
+				turnId: runTurnId,
+				timeoutMs: 30 * 60_000,
+				emit: (event) => {
+					const forwarded = event.type === "question" ? { ...event, turnId: runTurnId } : event;
+					writeJobStreamEvent(res, forwarded as JobRunStreamEvent);
+				},
+			});
+			permissionBridge.bindTurn({
+				sessionId,
+				turnId: runTurnId,
+				tenantId: getRequestTenant(req)?.tenantId,
+				runId: sessionPath,
+				timeoutMs: 30 * 60_000,
+				emit: (event) => {
+					const forwarded = event.type === "permission_request" ? { ...event, turnId: runTurnId } : event;
+					writeJobStreamEvent(res, forwarded as JobRunStreamEvent);
+				},
+			});
+		}
 		res.on("close", () => {
 			disconnected = true;
 			clearInterval(heartbeat);
 			// The run itself keeps going server-side; only the live view is lost.
 			logger.info({ jobId: job.id, sessionId }, "Manual job run stream disconnected");
 			// Nobody can answer a question with the stream gone — release the tool.
-			questionBridge.unbindTurn({ sessionId, turnId: runTurnId, reason: "client_disconnected" });
-			permissionBridge.unbindTurn({ sessionId, turnId: runTurnId, reason: "client_disconnected" });
+			if (session.runtime === "durable") {
+				ctx.disconnectJobRun?.(sessionId, runTurnId);
+			} else {
+				questionBridge.unbindTurn({ sessionId, turnId: runTurnId, reason: "client_disconnected" });
+				permissionBridge.unbindTurn({ sessionId, turnId: runTurnId, reason: "client_disconnected" });
+			}
 		});
 		try {
 			const result = await executeJob(
@@ -342,6 +413,10 @@ export async function handleJobsRoutes(
 				ctx.checkInStore,
 				{
 					sessionPath,
+					sessionId,
+					sessionRuntime: session.runtime,
+					durableExecutor,
+					turnId: runTurnId,
 					occurrenceId: occurrenceId || undefined,
 					onEvent: (event) => {
 						const normalized = jobStreamEventFromAgent(event);
@@ -360,8 +435,10 @@ export async function handleJobsRoutes(
 				writeJobStreamEvent(res, { type: "error", message: err instanceof Error ? err.message : String(err) });
 			}
 		} finally {
-			questionBridge.unbindTurn({ sessionId, turnId: runTurnId, reason: "finished" });
-			permissionBridge.unbindTurn({ sessionId, turnId: runTurnId, reason: "finished" });
+			if (session.runtime === "legacy") {
+				questionBridge.unbindTurn({ sessionId, turnId: runTurnId, reason: "finished" });
+				permissionBridge.unbindTurn({ sessionId, turnId: runTurnId, reason: "finished" });
+			}
 			finish();
 		}
 		return true;
@@ -382,12 +459,26 @@ export async function handleJobsRoutes(
 			return true;
 		}
 		if (sessionId && !await requireSessionOwnership(sessionId)) return true;
-		const sessionPath = sessionId ? ctx.resolveSessionPath?.(sessionId) : undefined;
-		if (sessionId && !sessionPath) {
+		let session = sessionId ? resolveSession(sessionId) : null;
+		if (sessionId && !session) {
 			json(res, 404, { error: "Session not found" });
 			return true;
 		}
-		if (sessionId) ctx.recordJobRunSession?.(sessionId);
+		if (!session && job.runtime === "durable") {
+			if (!ctx.createSession) {
+				json(res, 503, { error: "Durable job session creation is unavailable" });
+				return true;
+			}
+			const created = await ctx.createSession(req, job);
+			if (!created || typeof created === "string" || created.runtime !== "durable") {
+				json(res, 503, { error: "Durable job session creation failed" });
+				return true;
+			}
+			session = created;
+		}
+		const sessionPath = session?.path;
+		const targetSessionId = session?.id ?? "";
+		if (targetSessionId) ctx.recordJobRunSession?.(targetSessionId, req);
 		if (occurrenceId) {
 			await cancelDeferredRun(occurrenceId);
 			if (isDeferredExecuting(occurrenceId)) {
@@ -414,7 +505,13 @@ export async function handleJobsRoutes(
 				channelRegistry,
 				"api",
 				ctx.checkInStore,
-				sessionPath || occurrenceId ? { sessionPath: sessionPath || undefined, occurrenceId: occurrenceId || undefined } : undefined,
+				session || occurrenceId ? {
+					sessionPath,
+					sessionId: targetSessionId || undefined,
+					sessionRuntime: session?.runtime,
+					durableExecutor,
+					occurrenceId: occurrenceId || undefined,
+				} : undefined,
 			);
 			if (occurrenceId && (!result.success || getRequestTenant(req))) await occurrenceClaim?.release();
 			json(res, 200, result);
@@ -437,6 +534,20 @@ export async function handleJobsRoutes(
 		}
 		if (body.channel && !channelRegistry.get(body.channel)) {
 			json(res, 400, { error: `Channel not registered: ${body.channel}. Enable it in settings first.` });
+			return true;
+		}
+		if (body.runtime !== undefined && body.runtime !== "legacy" && body.runtime !== "durable") {
+			json(res, 400, { error: "runtime must be legacy or durable" });
+			return true;
+		}
+		const current = jobStore.get(patchMatch.id);
+		const effectiveTaskType = body.taskType ?? current?.taskType;
+		if (body.runtime === "durable" && (effectiveTaskType === "push_reminder" || effectiveTaskType === "check_in_reminder")) {
+			json(res, 400, { error: "Durable jobs support agent tasks, not reminder tasks" });
+			return true;
+		}
+		if ((body.taskType === "push_reminder" || body.taskType === "check_in_reminder") && current?.runtime === "durable") {
+			json(res, 400, { error: "Durable jobs support agent tasks, not reminder tasks" });
 			return true;
 		}
 		const updated = jobStore.update(patchMatch.id, body);

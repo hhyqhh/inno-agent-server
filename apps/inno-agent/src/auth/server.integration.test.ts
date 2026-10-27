@@ -1021,7 +1021,7 @@ describe("channel runtime isolation", () => {
 		expect(workspacesB.map((workspace) => workspace.id)).toContain(`channel-qq-${tenantB}`);
 
 		const sessionResponse = await api(cookieA, "/api/sessions", {
-			method: "POST", body: JSON.stringify({ newWorkspace: { isTemp: true } }),
+			method: "POST", body: JSON.stringify({ runtime: "durable" }),
 		});
 		expect(sessionResponse.status).toBe(201);
 		const ownedSession = await sessionResponse.json() as { id: string };
@@ -1029,7 +1029,7 @@ describe("channel runtime isolation", () => {
 			method: "POST",
 			body: JSON.stringify({
 				name: "channel job A", cron: "0 9 * * *", timezone: "UTC", enabled: true,
-				taskType: "custom_prompt", prompt: "channel-job-a", channel: "qq",
+				taskType: "custom_prompt", prompt: "channel-job-a", channel: "qq", runtime: "durable",
 				target: { channel: "qq", chatId: "chat-a" },
 			}),
 		});
@@ -1041,6 +1041,9 @@ describe("channel runtime isolation", () => {
 		});
 		expect(runResponse.status).toBe(200);
 		expect(await runResponse.json()).toMatchObject({ success: true, pushedToChannel: "qq" });
+		expect(await (await api(cookieA, `/api/sessions/${ownedSession.id}`)).json()).toMatchObject({
+			runtime: "durable", origin: "scheduler",
+		});
 		await waitFor(() => sidecarRequests.some((request) => request.path === "/push" && request.body.includes("tenant stub response") && request.body.includes("chat-a")), "manual tenant job push");
 		expect(providerRequests.find((request) => request.body.includes("channel-job-a"))?.authorization).toBe("Bearer channel-a-secret");
 		expect(sidecarRequests.some((request) => request.sidecar === "b" && request.body.includes("channel-job-a"))).toBe(false);
@@ -1078,20 +1081,20 @@ describe("tenant background execution", () => {
 			configure(cookieA, "background-a-secret", "background-token-a", sidecarOriginA, "background-chat-a"),
 			configure(cookieB, "background-b-secret", "background-token-b", sidecarOriginB, "background-chat-b"),
 		]);
-		const createJob = async (cookie: string, name: string, prompt: string) => {
+		const createJob = async (cookie: string, name: string, prompt: string, runtime?: "legacy" | "durable") => {
 			const response = await api(cookie, "/api/jobs", {
 				method: "POST",
 				body: JSON.stringify({
 					name, cron: "* * * * *", timezone: "UTC", enabled: true,
-					taskType: "custom_prompt", prompt, channel: "qq",
+					taskType: "custom_prompt", prompt, channel: "qq", runtime,
 				}),
 			});
 			expect(response.status).toBe(201);
 			return response.json() as Promise<{ id: string }>;
 		};
 		const [jobA, jobB] = await Promise.all([
-			createJob(cookieA, "background A", "background-a-prompt"),
-			createJob(cookieB, "background B", "background-b-prompt"),
+			createJob(cookieA, "background A", "background-a-prompt", "durable"),
+			createJob(cookieB, "background B", "background-b-prompt", "legacy"),
 		]);
 		await waitFor(() => ["background-a-prompt", "background-b-prompt"].every((prompt) =>
 			providerRequests.some((request) => request.body.includes(prompt)),
@@ -1104,6 +1107,17 @@ describe("tenant background execution", () => {
 		expect((await api(cookieB, `/api/jobs/${jobB.id}`, {
 			method: "PATCH", body: JSON.stringify({ enabled: false }),
 		})).status).toBe(200);
+		// A minute boundary can arm the next countdown before the first run is
+		// observed. Settle only this test's extra occurrences instead of letting
+		// their deferred claims outlive the assertions.
+		for (const [cookie, jobId] of [[cookieA, jobA.id], [cookieB, jobB.id]] as const) {
+			const pending = await (await api(cookie, "/api/checkins/pending-runs")).json() as Array<{ jobId: string; occurrenceId: string }>;
+			for (const run of pending.filter((run) => run.jobId === jobId)) {
+				expect((await api(cookie, "/api/checkins/skip", {
+					method: "POST", body: JSON.stringify({ occurrenceId: run.occurrenceId }),
+				})).status).toBe(200);
+			}
+		}
 		await waitFor(async () => {
 			for (const [cookie, jobId] of [[cookieA, jobA.id], [cookieB, jobB.id]] as const) {
 				const runs = await (await api(cookie, "/api/jobs/runs")).json() as Array<{ jobId: string; status: string }>;
@@ -1119,10 +1133,14 @@ describe("tenant background execution", () => {
 		expect(pushA).toMatchObject({ sidecar: "a", authorization: "Bearer background-token-a" });
 		expect(pushB).toMatchObject({ sidecar: "b", authorization: "Bearer background-token-b" });
 
-		const sessionsA = await (await api(cookieA, "/api/sessions")).json() as Array<{ id: string }>;
-		const sessionsB = await (await api(cookieB, "/api/sessions")).json() as Array<{ id: string }>;
+		const sessionsA = await (await api(cookieA, "/api/sessions")).json() as Array<{ id: string; runtime?: string; origin?: string }>;
+		const sessionsB = await (await api(cookieB, "/api/sessions")).json() as Array<{ id: string; runtime?: string; origin?: string }>;
 		expect(sessionsA).toHaveLength(1);
 		expect(sessionsB).toHaveLength(1);
+		expect(sessionsA[0]).toMatchObject({ runtime: "durable", origin: "scheduler" });
+		expect(sessionsA[0].id).toMatch(/^durable-/);
+		expect(sessionsB[0].origin).toBe("scheduler");
+		expect(sessionsB[0].id).not.toMatch(/^durable-/);
 		expect(sessionsA[0].id).not.toBe(sessionsB[0].id);
 		expect((await api(cookieB, `/api/sessions/${sessionsA[0].id}`)).status).toBe(404);
 
@@ -1138,13 +1156,25 @@ describe("tenant background execution", () => {
 			const workspacesB = await (await api(cookieB, "/api/workspaces")).json() as Array<{ id: string }>;
 			expect(workspacesA.map((workspace) => workspace.id)).toContain(`channel-scheduler-${tenantA}`);
 			expect(workspacesB.map((workspace) => workspace.id)).toContain(`channel-scheduler-${tenantB}`);
-			await waitFor(async () => {
-				const claims = await pool.query<{ count: number }>(
-					"SELECT COUNT(*)::int AS count FROM job_run_claims WHERE job_id = ANY($1)",
+			try {
+				await waitFor(async () => {
+					const claims = await pool.query<{ count: number }>(
+						"SELECT COUNT(*)::int AS count FROM job_run_claims WHERE job_id = ANY($1)",
+						[[jobA.id, jobB.id]],
+					);
+					return claims.rows[0].count === 0;
+				}, "background claim cleanup");
+			} catch (error) {
+				const claims = await pool.query(
+					"SELECT occurrence_id, job_id, expires_at FROM job_run_claims WHERE job_id = ANY($1)",
 					[[jobA.id, jobB.id]],
 				);
-				return claims.rows[0].count === 0;
-			}, "background claim cleanup");
+				const pendingA = await (await api(cookieA, "/api/checkins/pending-runs")).json();
+				const pendingB = await (await api(cookieB, "/api/checkins/pending-runs")).json();
+				const runsA = await (await api(cookieA, "/api/jobs/runs")).json();
+				const runsB = await (await api(cookieB, "/api/jobs/runs")).json();
+				throw new Error(`${(error as Error).message}; claims=${JSON.stringify(claims.rows)}; pending=${JSON.stringify([pendingA, pendingB])}; runs=${JSON.stringify([runsA, runsB])}`);
+			}
 		} finally {
 			await pool.end();
 		}
@@ -1251,6 +1281,61 @@ describe("durable session HTTP boundary", () => {
 		expect(recovered.messages.some((message) => message.role === "user" && message.content === "durable-reconnect")).toBe(true);
 		expect(recovered.messages.some((message) => message.role === "assistant" && message.content === "tenant stub response")).toBe(true);
 	}, 60_000);
+
+	it("streams manual durable jobs and validates explicit runtime selection", async () => {
+		const cookie = await registerUser("durable-job-stream@example.com");
+		expect((await api(cookie, "/api/settings/providers", {
+			method: "PUT",
+			body: JSON.stringify({
+				providerId: "shared", baseUrl: providerOrigin, apiKey: "durable-job-stream-secret",
+				api: "openai-completions", makeDefault: true,
+				models: [{ id: "tenant-model", name: "Tenant model", contextWindow: 32_000, maxTokens: 2_000 }],
+			}),
+		})).status).toBe(200);
+		expect((await api(cookie, "/api/jobs", {
+			method: "POST",
+			body: JSON.stringify({ name: "bad runtime", cron: "0 9 * * *", taskType: "custom_prompt", prompt: "no", runtime: "other" }),
+		})).status).toBe(400);
+		expect((await api(cookie, "/api/jobs", {
+			method: "POST",
+			body: JSON.stringify({ name: "bad reminder", cron: "0 9 * * *", taskType: "push_reminder", prompt: "no", runtime: "durable" }),
+		})).status).toBe(400);
+		const sessionResponse = await api(cookie, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ runtime: "durable" }),
+		});
+		expect(sessionResponse.status).toBe(201);
+		const session = await sessionResponse.json() as { id: string };
+		const jobResponse = await api(cookie, "/api/jobs", {
+			method: "POST",
+			body: JSON.stringify({
+				name: "durable stream job", cron: "0 9 * * *", timezone: "UTC", enabled: false,
+				taskType: "custom_prompt", prompt: "durable-job-stream-prompt", runtime: "durable",
+			}),
+		});
+		expect(jobResponse.status).toBe(201);
+		const job = await jobResponse.json() as { id: string; runtime: string };
+		expect(job.runtime).toBe("durable");
+		const runResponse = await api(cookie, `/api/jobs/${job.id}/run/stream`, {
+			method: "POST", body: JSON.stringify({ sessionId: session.id }),
+		});
+		expect(runResponse.status).toBe(200);
+		const streamText = await runResponse.text();
+		expect(streamText).toContain("tenant stub response");
+		expect(streamText).toContain("job_result");
+		expect(streamText).toContain('"success":true');
+		expect(providerRequests.find((request) => request.body.includes("durable-job-stream-prompt"))?.authorization)
+			.toBe("Bearer durable-job-stream-secret");
+		const detail = await (await api(cookie, `/api/sessions/${session.id}`)).json() as {
+			runtime: string; origin: string; messages: Array<{ role: string; content: string }>;
+		};
+		expect(detail).toMatchObject({ runtime: "durable", origin: "scheduler" });
+		expect(detail.messages).toEqual(expect.arrayContaining([
+			expect.objectContaining({ role: "user", content: "durable-job-stream-prompt" }),
+			expect.objectContaining({ role: "assistant", content: "tenant stub response" }),
+		]));
+		const runs = await (await api(cookie, `/api/jobs/${job.id}/runs`)).json() as Array<{ status: string }>;
+		expect(runs[0]?.status).toBe("success");
+	}, 45_000);
 
 	it("generates durable topics with tenant credentials and the session's pinned model", async () => {
 		const [cookieA, cookieB] = await Promise.all([

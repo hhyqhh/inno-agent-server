@@ -11,6 +11,7 @@ export type TaskType =
 	| "custom_prompt";
 
 export type JobRunStatus = "running" | "success" | "error" | "skipped";
+export type JobRuntime = "legacy" | "durable";
 
 export interface ScheduledJob {
 	id: string;
@@ -21,6 +22,8 @@ export interface ScheduledJob {
 	channel?: ChannelName;
 	target?: PushTarget;
 	taskType: TaskType;
+	/** Execution engine for newly created automatic sessions. Absent means legacy. */
+	runtime?: JobRuntime;
 	prompt: string;
 	lastRunAt?: string;
 	nextRunAt?: string;

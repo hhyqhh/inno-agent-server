@@ -52,6 +52,7 @@ export interface DurableSessionRecord {
 	modelId: string;
 	topicGenerated?: boolean;
 	topicUpgraded?: boolean;
+	origin?: "web" | "scheduler";
 	archived: boolean;
 }
 
@@ -139,6 +140,7 @@ function isRecord(value: unknown): value is DurableSessionRecord {
 		&& typeof record.provider === "string" && typeof record.modelId === "string"
 		&& (record.topicGenerated === undefined || typeof record.topicGenerated === "boolean")
 		&& (record.topicUpgraded === undefined || typeof record.topicUpgraded === "boolean")
+		&& (record.origin === undefined || record.origin === "web" || record.origin === "scheduler")
 		&& typeof record.archived === "boolean";
 }
 
@@ -150,8 +152,8 @@ function toSummary(record: DurableSessionRecord): DurableSessionSummary {
 		updatedAt: record.updatedAt,
 		messageCount: record.messageCount,
 		preview: record.preview,
-		channels: ["web"],
-		origin: "web",
+		channels: [record.origin ?? "web"],
+		origin: record.origin ?? "web",
 		hasTopic: record.name !== "新对话",
 		topicPendingUpgrade: record.topicGenerated === true
 			&& record.topicUpgraded !== true
@@ -220,6 +222,10 @@ export class DurableSessionService {
 		return this.questionStore(req, id).respond(input);
 	}
 
+	cancelQuestionTurn(req: IncomingMessage, id: string, turnId: string): number {
+		return this.questionStore(req, id).cancelTurn(turnId);
+	}
+
 	/** Hold an owner until the accepted answer and any following model response
 	 * are committed. Without an active SSE this still resumes in the background. */
 	async resumeAfterQuestion(req: IncomingMessage, id: string): Promise<void> {
@@ -262,7 +268,7 @@ export class DurableSessionService {
 			.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 	}
 
-	create(req: IncomingMessage, input: { workspaceId: string }): DurableSessionSummary {
+	create(req: IncomingMessage, input: { workspaceId: string; origin?: "web" | "scheduler" }): DurableSessionSummary {
 		if (!this.options.enabled) throw new DurableRuntimeDisabledError();
 		if (this.closing) throw new Error("Durable session service is shutting down");
 		const config = resolveCurrentTenantConfig(this.options.dataDir, this.options.getLocalConfig());
@@ -285,6 +291,7 @@ export class DurableSessionService {
 			preview: "",
 			provider: config.defaultProvider,
 			modelId: config.defaultModel,
+			origin: input.origin ?? "web",
 			archived: false,
 		};
 		this.writeCatalog(req, [...this.catalog(req), record]);
@@ -312,6 +319,10 @@ export class DurableSessionService {
 
 	setArchived(req: IncomingMessage, id: string, archived: boolean): DurableSessionSummary {
 		return toSummary(this.update(req, id, { archived, updatedAt: new Date().toISOString() }));
+	}
+
+	markSchedulerOrigin(req: IncomingMessage, id: string): DurableSessionSummary {
+		return toSummary(this.update(req, id, { origin: "scheduler", updatedAt: new Date().toISOString() }));
 	}
 
 	noteSubmission(req: IncomingMessage, id: string, prompt: string): void {

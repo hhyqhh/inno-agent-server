@@ -18,7 +18,7 @@ export class TenantCronScheduler {
 		private readonly jobStore: JobStore,
 		private readonly channelRegistry: ChannelRegistry,
 		private readonly checkInStore: CheckInStore,
-		private readonly options: Pick<CronSchedulerOptions, "createSession">,
+		private readonly options: Pick<CronSchedulerOptions, "createSession" | "durableExecutor">,
 	) {}
 
 	start(): void {
@@ -64,6 +64,7 @@ export class TenantCronScheduler {
 					scheduler = new CronScheduler(this.jobStore, this.channelRegistry, this.checkInStore, {
 						durableClaims: true,
 						createSession: this.options.createSession,
+						durableExecutor: this.options.durableExecutor,
 					});
 					this.schedulers.set(context.tenantId, scheduler);
 				}

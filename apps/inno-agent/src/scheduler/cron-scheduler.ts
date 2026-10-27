@@ -1,6 +1,6 @@
 import type { JobStore } from "./job-store.js";
 import type { ChannelRegistry } from "../channels/channel.js";
-import { executeJob } from "./job-runner.js";
+import { executeJob, type CreatedJobSession, type DurableJobExecutor } from "./job-runner.js";
 import { getCronDueAt } from "./cron-utils.js";
 import { deferScheduledRun } from "./deferred-runs.js";
 import { claimTenantJobRun } from "./execution-claims.js";
@@ -11,7 +11,8 @@ import type { ScheduledJob } from "./types.js";
 export interface CronSchedulerOptions {
 	/** Authenticated runs use PostgreSQL occurrence leases and explicit sessions. */
 	durableClaims?: boolean;
-	createSession?: () => Promise<string | null>;
+	createSession?: (job: ScheduledJob) => Promise<CreatedJobSession | null>;
+	durableExecutor?: DurableJobExecutor;
 }
 
 /** In-process cron loop; tenant enumeration and durable leases are injectable. */
@@ -87,15 +88,24 @@ export class CronScheduler {
 			if (this.options.durableClaims && !claim) return;
 			try {
 				logger.info({ jobId: job.id, jobName: job.name }, "scheduler executing job");
-				const sessionPath = createSession && this.options.createSession
-					? await this.options.createSession()
+				const createdSession = createSession && this.options.createSession
+					? await this.options.createSession(job)
 					: undefined;
-				const ownedSessionPath = sessionPath ?? undefined;
-				if (createSession && this.options.createSession && !ownedSessionPath) {
+				const sessionPath = typeof createdSession === "string" ? createdSession : createdSession?.path;
+				const sessionId = createdSession && typeof createdSession === "object" ? createdSession.id : undefined;
+				const sessionRuntime = createdSession && typeof createdSession === "object" ? createdSession.runtime : undefined;
+				if (createSession && this.options.createSession && !createdSession
+					&& (this.options.durableClaims || job.runtime === "durable")) {
 					throw new Error("Scheduled run could not create an owned session");
 				}
+				if (job.runtime === "durable" && createSession && sessionRuntime !== "durable") {
+					throw new Error("Durable scheduled job did not create a durable session");
+				}
 				const result = await executeJob(job, this.jobStore, this.channelRegistry, "scheduled", this.checkInStore, {
-					sessionPath: ownedSessionPath,
+					sessionPath,
+					sessionId,
+					sessionRuntime,
+					durableExecutor: this.options.durableExecutor,
 					scheduledAt,
 					occurrenceId: this.checkInStore || this.options.durableClaims ? occurrenceId : undefined,
 					allowSessionChannelInference: !this.options.durableClaims,

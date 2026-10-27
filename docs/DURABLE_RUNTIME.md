@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: replay-safe durable recovery-record retention (3Q)
+## Current stage: durable scheduler execution (3R)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -85,7 +85,10 @@ The current durable slice supports:
   session's pinned provider/model and isolated tenant credentials;
 - graceful shutdown of open durable runtimes;
 - 30-day retention of completed channel/question recovery records, cleaned only
-  after the owning session is proved idle, plus outbox removal on session delete.
+  after the owning session is proved idle, plus outbox removal on session delete;
+- explicit durable agent-job execution through the existing manual, cron, and
+  deferred scheduler paths, with owned scheduler sessions/workspaces and the
+  existing occurrence, check-in, run-ledger, and channel behavior.
 
 Shell, workspace mutations, MCP, subagents, codemode, and computer-use remain
 disabled. Durable permissions, branching/editing, and showcase
@@ -239,6 +242,35 @@ Question records and pi-durable SQLite are separate commits, not a distributed
 transaction; if the process dies before an abort is acknowledged, the caller
 must retry/recheck rather than assuming both writes completed.
 
+## Scheduler execution
+
+`POST/PATCH /api/jobs` accepts `runtime: "legacy" | "durable"`; omitted runtime
+keeps legacy behavior. The selector applies to agent tasks. Reminder tasks are
+rejected for durable execution rather than writing an assistant notification
+into legacy JSONL. Manual runs follow the target session's actual runtime, so a
+legacy job can explicitly run in a durable session and vice versa. A local
+non-streaming durable manual run without a session creates its own durable
+scheduler session.
+
+Automatic and deferred runs use the job's runtime when creating their owned
+scheduler session/workspace. Durable sessions record `origin: "scheduler"`;
+manual runs apply the same badge to an existing durable target. Background
+service scopes derive tenant identity only from the scheduler's verified ALS,
+never from job payloads or tenant headers. Headless runs bind durable questions
+as `no_ui`; manual streaming reuses the persisted question bridge and cancels an
+unanswered card if its only live view disconnects. The existing job-stop route
+can abort the active durable job turn.
+
+`agent/durable-job-runner.ts` owns durable admission, hidden automatic L3
+context, live event projection, and final snapshot persistence. The shared
+`executeJob` boundary still owns run ledgers, check-in reconciliation, channel
+push, and completion/failure notices. PostgreSQL `durableClaims` occurrence
+leases are distinct from pi-durable execution and are unchanged. A durable job
+never falls back to the legacy global prompt queue or a synthetic `.jsonl` path.
+Crash recovery remains at-least-once at the occurrence/model/external-delivery
+boundaries; this stage does not make deferred countdowns or scheduler ledgers
+cross-process durable queues.
+
 One durable storage has **one owner at a time**. The in-process guard does not
 replace deployment routing, lease/fencing, or an ordered old-owner shutdown.
 Never mount the same SQLite database into active-active workers or share it
@@ -278,7 +310,9 @@ durable topic upgrade dedup, pinned-model selection, and manual-rename protectio
 L1 event/profile crash-gap recovery, deterministic L2 archive,
 OCR completion caching and job-ID resume, channel payload/completion caching,
 verified tenant channel rebinding, proven-idle 30-day outbox/question retention
-with live-recovery preservation and session-delete outbox cleanup, and recovery after real child processes are
+with live-recovery preservation and session-delete outbox cleanup, legacy/durable
+scheduler routing with fail-closed unwired execution, local legacy cron
+compatibility, durable headless `no_ui` and streaming projection, and recovery after real child processes are
 killed with `SIGKILL` during a delayed model response, during an interrupted
 memory tool, while a submitted OCR job is still running, after a channel send
 but before its outbox completion commit, and after a question answer is
@@ -304,7 +338,10 @@ attachments with raw-text history and out-of-workspace path rejection, native
 vision and text-only inline-image requests with workspace previews and retry
 dedup, provider-rejection native-image fallback without duplicate user history,
 and scoped cancellation with cross-tenant abort denial and pending-card
-cleanup.
+cleanup. Scheduler coverage includes manual durable streaming/non-streaming runs,
+runtime validation, scheduler-origin history, tenant channel delivery, and mixed
+durable/legacy deferred execution with per-tenant credentials, owned workspaces,
+run ledgers, and claim cleanup.
 
 Still pending: application-persisted SSE replay after restart, durable
-permissions, scheduler integration, and sharded single-owner deployment.
+permissions, and sharded single-owner deployment.

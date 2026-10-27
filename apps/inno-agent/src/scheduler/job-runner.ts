@@ -1,4 +1,4 @@
-import type { ScheduledJob } from "./types.js";
+import type { JobRuntime, ScheduledJob } from "./types.js";
 import type { JobStore } from "./job-store.js";
 import type { ChannelRegistry } from "../channels/channel.js";
 import {
@@ -27,9 +27,35 @@ export interface JobRunResult {
 
 export type JobRunTrigger = "scheduled" | "manual" | "api";
 
+export interface JobSessionTarget {
+	id: string;
+	runtime: JobRuntime;
+	/** Legacy JSONL path; durable sessions deliberately never have one. */
+	path?: string;
+}
+
+export type CreatedJobSession = string | JobSessionTarget;
+
+export interface DurableJobExecution {
+	sessionId: string;
+	prompt: string;
+	requestId: string;
+	turnId: string;
+	onEvent?: (event: any) => void;
+}
+
+export type DurableJobExecutor = (execution: DurableJobExecution) => Promise<string>;
+
 export interface JobExecutionOptions {
-	/** Explicit session target for a manual run initiated from the Web UI. */
+	/** Explicit session target for a manual or automatic run. */
 	sessionPath?: string;
+	sessionId?: string;
+	sessionRuntime?: JobRuntime;
+	/** Durable execution is injected by the server; there is no legacy fallback. */
+	durableExecutor?: DurableJobExecutor;
+	/** Stable within one execution; occurrence leases remain a separate concern. */
+	requestId?: string;
+	turnId?: string;
 	/** Forward model events to a caller-owned stream for live UI updates. */
 	onEvent?: StreamEventCallback;
 	/** Explicit daily plan slot selected by the check-in UI. */
@@ -38,6 +64,34 @@ export interface JobExecutionOptions {
 	scheduledAt?: string;
 	/** Scheduled tenant jobs must not infer a channel from the shared active session. */
 	allowSessionChannelInference?: boolean;
+}
+
+async function runJobPrompt(
+	job: ScheduledJob,
+	options: JobExecutionOptions | undefined,
+	runId: string,
+	useDurable: boolean,
+): Promise<string> {
+	if (job.taskType === "push_reminder") return formatReminderOutput(job.prompt);
+	if (job.taskType === "check_in_reminder") return formatCheckInReminderOutput(job.prompt);
+	if (useDurable) {
+		if (!options?.sessionId || !options.durableExecutor) {
+			throw new Error("Durable job execution requires an owned durable session and executor");
+		}
+		return options.durableExecutor({
+			sessionId: options.sessionId,
+			prompt: job.prompt,
+			requestId: options.requestId ?? `job-${job.id}-${runId}`,
+			turnId: options.turnId ?? randomUUID(),
+			...(options.onEvent ? { onEvent: options.onEvent } : {}),
+		});
+	}
+	if (options?.sessionPath) {
+		return options.onEvent
+			? runPromptStreamingInSession(options.sessionPath, job.prompt, options.onEvent)
+			: runPromptInSession(options.sessionPath, job.prompt);
+	}
+	return runPromptSerialized(job.prompt);
 }
 
 /**
@@ -98,7 +152,13 @@ export async function executeJob(
 		lastError: undefined,
 	});
 
+	const useDurable = options?.sessionRuntime === "durable"
+		|| (!options?.sessionRuntime && !options?.sessionPath && !options?.sessionId && job.runtime === "durable");
+
 	try {
+		if (useDurable && isReminderJob) {
+			throw new Error("Durable job execution does not support reminder tasks; use a custom agent prompt");
+		}
 		if (isCheckInReminder && checkInStore?.isCheckedInToday()) {
 			const finishedAt = new Date();
 			const output = "今天已经完成学习打卡，跳过提醒。";
@@ -128,15 +188,7 @@ export async function executeJob(
 		return { jobId: job.id, runId, success: true, output };
 	}
 
-	const output = job.taskType === "push_reminder"
-			? formatReminderOutput(job.prompt)
-			: isCheckInReminder
-				? formatCheckInReminderOutput(job.prompt)
-			: options?.sessionPath
-				? options.onEvent
-					? await runPromptStreamingInSession(options.sessionPath, job.prompt, options.onEvent)
-					: await runPromptInSession(options.sessionPath, job.prompt)
-				: await runPromptSerialized(job.prompt);
+	const output = await runJobPrompt(job, options, runId, useDurable);
 		if (isReminderJob) {
 			if (options?.sessionPath) await appendAssistantNotificationInSession(options.sessionPath, output);
 			else appendAssistantNotification(output);

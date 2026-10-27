@@ -3,7 +3,7 @@ import type { CheckInStore } from "../checkins/check-in-store.js";
 import { logger } from "../logger.js";
 import { getCurrentTenant, getCurrentTenantStore, runInTenantContext } from "../tenants/current.js";
 import type { JobRunClaim, TenantContext, TenantStore } from "../tenants/store.js";
-import { executeJob, pushThroughDefaultChannel } from "./job-runner.js";
+import { executeJob, pushThroughDefaultChannel, type CreatedJobSession, type DurableJobExecutor } from "./job-runner.js";
 import { claimTenantJobRun } from "./execution-claims.js";
 import type { JobStore } from "./job-store.js";
 import type { ScheduledJob } from "./types.js";
@@ -25,7 +25,8 @@ export interface DeferredRunWiring {
 	channelRegistry: ChannelRegistry;
 	checkInStore?: CheckInStore;
 	/** Create the conversation the auto-executed run will live in. */
-	createSession: () => Promise<string | null>;
+	createSession: (job: ScheduledJob) => Promise<CreatedJobSession | null>;
+	durableExecutor?: DurableJobExecutor;
 	/** Enable PostgreSQL leases in authenticated mode. */
 	durableClaims?: boolean;
 }
@@ -163,10 +164,19 @@ async function autoExecute(run: PendingDeferredRun): Promise<void> {
 			}
 		}
 		executing.add(key);
-		const sessionPath = await cfg.createSession();
-		if (!sessionPath) throw new Error("Deferred run could not create an owned session");
+		const createdSession = await cfg.createSession(job);
+		if (!createdSession) throw new Error("Deferred run could not create an owned session");
+		const sessionPath = typeof createdSession === "string" ? createdSession : createdSession.path;
+		const sessionId = typeof createdSession === "object" ? createdSession.id : undefined;
+		const sessionRuntime = typeof createdSession === "object" ? createdSession.runtime : undefined;
+		if (job.runtime === "durable" && sessionRuntime !== "durable") {
+			throw new Error("Durable deferred job did not create a durable session");
+		}
 		const result = await executeJob(job, cfg.jobStore, cfg.channelRegistry, "scheduled", cfg.checkInStore, {
 			sessionPath,
+			sessionId,
+			sessionRuntime,
+			durableExecutor: cfg.durableExecutor,
 			scheduledAt,
 			occurrenceId,
 			allowSessionChannelInference: !cfg.durableClaims,

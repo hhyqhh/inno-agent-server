@@ -42,6 +42,19 @@ describe("jobStreamEventFromAgent", () => {
 		})).toEqual({ type: "tool_end", toolCallId: "t1", toolName: "read_file", result: "ok", isError: true });
 	});
 
+	it("maps durable top-level deltas, tools and question cards", () => {
+		expect(jobStreamEventFromAgent({ type: "text_delta", delta: "durable", contentIndex: 0 }))
+			.toEqual({ type: "text_delta", delta: "durable", contentIndex: 0 });
+		expect(jobStreamEventFromAgent({
+			type: "tool_end", toolCallId: "d1", toolName: "read", result: "ok", isError: false,
+		})).toEqual({ type: "tool_end", toolCallId: "d1", toolName: "read", result: "ok", isError: false });
+		expect(jobStreamEventFromAgent({
+			type: "question", questionId: "q1", toolCallId: "d1", turnId: "turn1", params: { questions: [] },
+		})).toEqual({
+			type: "question", questionId: "q1", toolCallId: "d1", turnId: "turn1", params: { questions: [] },
+		});
+	});
+
 	it("ignores events the job bubble does not render", () => {
 		expect(jobStreamEventFromAgent({ type: "auto_retry_start", attempt: 1 })).toBeNull();
 		expect(jobStreamEventFromAgent({ type: "message_update" })).toBeNull();
