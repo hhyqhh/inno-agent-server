@@ -245,6 +245,12 @@ export class DurableSessionService {
 						l1Enabled: config.memory?.l1Enabled !== false,
 						l2Enabled: config.memory?.l2Enabled !== false,
 					};
+					const ocr = {
+						sessionId: id,
+						checkpointDir: join(tenantDataRoot, "ocr"),
+						workspaceDir,
+						ocrApi: config.ocrApi,
+					};
 					return this.openRuntime({
 						storagePath: this.storagePath(req, id),
 						...selection,
@@ -252,6 +258,7 @@ export class DurableSessionService {
 						workspaceDir,
 						readOnlyTools: true,
 						memory,
+						ocr,
 					});
 				})();
 				this.openings.set(key, opening);

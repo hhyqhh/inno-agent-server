@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -22,6 +22,9 @@ let origin: string;
 let output = "";
 let providerServer: HttpServer;
 let providerOrigin = "";
+let ocrServer: HttpServer;
+let ocrOrigin = "";
+const ocrRequests: Array<{ authorization: string; body: string }> = [];
 const providerRequests: Array<{ authorization: string; body: string }> = [];
 const sidecarServers: HttpServer[] = [];
 const sidecarRequests: Array<{ sidecar: string; method: string; path: string; authorization: string; body: string }> = [];
@@ -108,9 +111,9 @@ beforeAll(async () => {
 			if (memoryPrompt) {
 				const request = JSON.parse(body) as { messages?: Array<{ role?: string }> };
 				const toolResults = request.messages?.filter((message) => message.role === "tool").length ?? 0;
-				if (toolResults < 2) {
+				if (toolResults < 3) {
 					const tenant = memoryPrompt[1];
-					const toolCall = toolResults === 0 ? {
+					const toolCalls = [{
 						id: `durable-memory-event-${tenant}`,
 						name: "record_learning_event",
 						arguments: {
@@ -118,7 +121,7 @@ beforeAll(async () => {
 							context: { concept_ids: [`durable-concept-${tenant}`] },
 							payload: { topic: `durable-topic-${tenant}` },
 						},
-					} : {
+					}, {
 						id: `durable-memory-archive-${tenant}`,
 						name: "l2_archive",
 						arguments: {
@@ -126,7 +129,12 @@ beforeAll(async () => {
 							content: `durable-content-${tenant}`,
 							sourceType: "markdown",
 						},
-					};
+					}, {
+						id: `durable-ocr-call-${tenant}`,
+						name: "ocr_image",
+						arguments: { filePath: `https://images.local/durable-ocr-${tenant}.png` },
+					}];
+					const toolCall = toolCalls[toolResults]!;
 					res.writeHead(200, { "Content-Type": "text/event-stream" });
 					res.end([
 						`data: ${JSON.stringify({
@@ -169,6 +177,40 @@ beforeAll(async () => {
 	});
 	await new Promise<void>((resolveListen) => providerServer.listen(0, "127.0.0.1", resolveListen));
 	providerOrigin = `http://127.0.0.1:${(providerServer.address() as AddressInfo).port}`;
+	ocrServer = createHttpServer((req, res) => {
+		let body = "";
+		req.setEncoding("utf-8");
+		req.on("data", (chunk) => { body += chunk; });
+		req.on("end", () => {
+			ocrRequests.push({ authorization: req.headers.authorization ?? "", body });
+			const path = new URL(req.url ?? "/", "http://ocr.local").pathname;
+			if (req.method === "POST" && path === "/jobs") {
+				const tenant = body.includes("durable-ocr-a") ? "a" : "b";
+				res.writeHead(200, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ data: { jobId: `job-${tenant}` } }));
+				return;
+			}
+			const job = /^\/jobs\/job-(a|b)$/.exec(path);
+			if (req.method === "GET" && job) {
+				res.writeHead(200, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ data: {
+					state: "done",
+					resultUrl: { jsonUrl: `${ocrOrigin}/result-${job[1]}` },
+				} }));
+				return;
+			}
+			const result = /^\/result-(a|b)$/.exec(path);
+			if (req.method === "GET" && result) {
+				res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+				res.end(`${JSON.stringify({ result: { layoutParsingResults: [{ markdown: { text: `durable-ocr-text-${result[1]}` } }] } })}\n`);
+				return;
+			}
+			res.writeHead(404);
+			res.end();
+		});
+	});
+	await new Promise<void>((resolveListen) => ocrServer.listen(0, "127.0.0.1", resolveListen));
+	ocrOrigin = `http://127.0.0.1:${(ocrServer.address() as AddressInfo).port}`;
 	[sidecarOriginA, sidecarOriginB] = await Promise.all([startSidecar("a"), startSidecar("b")]);
 	const port = await freePort();
 	origin = `http://127.0.0.1:${port}`;
@@ -232,6 +274,10 @@ afterAll(async () => {
 	if (providerServer) {
 		providerServer.closeAllConnections();
 		await new Promise<void>((resolveClose) => providerServer.close(() => resolveClose()));
+	}
+	if (ocrServer) {
+		ocrServer.closeAllConnections();
+		await new Promise<void>((resolveClose) => ocrServer.close(() => resolveClose()));
 	}
 	for (const server of sidecarServers) {
 		server.closeAllConnections();
@@ -1110,12 +1156,12 @@ describe("durable session HTTP boundary", () => {
 		expect(recovered.messages.some((message) => message.role === "assistant" && message.content === "tenant stub response")).toBe(true);
 	}, 60_000);
 
-	it("writes durable L1/L2 memory only to the authenticated tenant roots", async () => {
+	it("writes durable L1/L2/OCR state only to the authenticated tenant roots", async () => {
 		const [cookieA, cookieB] = await Promise.all([
 			registerUser("durable-memory-a@example.com"),
 			registerUser("durable-memory-b@example.com"),
 		]);
-		const configure = async (cookie: string) => {
+		const configure = async (cookie: string, tenant: string) => {
 			const response = await api(cookie, "/api/settings/providers", {
 				method: "PUT",
 				body: JSON.stringify({
@@ -1127,8 +1173,13 @@ describe("durable session HTTP boundary", () => {
 				}),
 			});
 			expect(response.status).toBe(200);
+			const ocr = await api(cookie, "/api/settings/ocr", {
+				method: "PUT",
+				body: JSON.stringify({ token: `durable-ocr-secret-${tenant}`, baseUrl: `${ocrOrigin}/jobs` }),
+			});
+			expect(ocr.status).toBe(200);
 		};
-		await Promise.all([configure(cookieA), configure(cookieB)]);
+		await Promise.all([configure(cookieA, "a"), configure(cookieB, "b")]);
 		const runMemoryTurn = async (cookie: string, prompt: string) => {
 			const created = await api(cookie, "/api/sessions", {
 				method: "POST",
@@ -1181,6 +1232,20 @@ describe("durable session HTTP boundary", () => {
 		expect(manifestB).toContain("durable-archive-b");
 		expect(manifestB).not.toContain("durable-archive-a");
 		expect(profileA).toContain("record_learning_event:");
+		const readOcrCheckpoints = async (tenantRoot: string) => {
+			const directory = join(tenantRoot, "ocr");
+			const files = await readdir(directory);
+			expect(files).toHaveLength(1);
+			return (await Promise.all(files.map((file) => readFile(join(directory, file), "utf-8")))).join("\n");
+		};
+		const [ocrA, ocrB] = await Promise.all([readOcrCheckpoints(rootA), readOcrCheckpoints(rootB)]);
+		expect(ocrA).toContain("durable-ocr-text-a");
+		expect(ocrA).not.toContain("durable-ocr-text-b");
+		expect(ocrB).toContain("durable-ocr-text-b");
+		expect(ocrB).not.toContain("durable-ocr-text-a");
+		expect(ocrRequests.find((request) => request.body.includes("durable-ocr-a"))?.authorization).toBe("bearer durable-ocr-secret-a");
+		expect(ocrRequests.find((request) => request.body.includes("durable-ocr-b"))?.authorization).toBe("bearer durable-ocr-secret-b");
 		expect(existsSync(join(home, "data", "learner", "events.jsonl"))).toBe(false);
+		expect(existsSync(join(home, "data", "ocr"))).toBe(false);
 	}, 60_000);
 });

@@ -39,4 +39,43 @@ describe("ocr_image workspace boundary", () => {
 		expect(result.details).toMatchObject({ error: "submit_failed" });
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
+
+	it("caches durable OCR completion without repeating remote calls on retry", async () => {
+		tempRoot = mkdtempSync(join(tmpdir(), "inno-ocr-durable-"));
+		const workspace = join(tempRoot, "workspace");
+		mkdirSync(workspace);
+		writeFileSync(join(workspace, "note.png"), "image");
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (init?.method === "POST") {
+				return new Response(JSON.stringify({ data: { jobId: "job-1" } }), { status: 200 });
+			}
+			if (url.endsWith("/job-1")) {
+				return new Response(JSON.stringify({ data: { state: "done", resultUrl: { jsonUrl: "https://ocr.test/result" } } }), { status: 200 });
+			}
+			return new Response(`${JSON.stringify({ result: { layoutParsingResults: [{ markdown: { text: "识别文本" } }] } })}\n`, { status: 200 });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const tool = createOcrTools(config(), {
+			restrictToWorkspace: true,
+			durable: {
+				checkpointDir: join(tempRoot, "ocr"),
+				getOperationId: (callId) => `ocr_image:durable-session:${callId}`,
+			},
+		})[0];
+		const execute = () => tool.execute(
+			"stable-call",
+			{ filePath: "note.png" },
+			undefined,
+			undefined,
+			{ cwd: workspace } as never,
+		);
+
+		const first = await execute();
+		const retry = await execute();
+
+		expect(first.content[0]).toEqual({ type: "text", text: "识别文本" });
+		expect(retry).toEqual(first);
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+	});
 });

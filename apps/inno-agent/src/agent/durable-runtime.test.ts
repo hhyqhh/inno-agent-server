@@ -1,6 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -298,5 +300,92 @@ describe("DurableSessionRuntime", () => {
 			concept_id: "physics.force_decomposition",
 			evidence_ids: [events[0]!.event_id],
 		});
+	}, 20_000);
+
+	it("resumes a submitted OCR job after SIGKILL without submitting it again", async () => {
+		const root = tempRoot();
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		writeFileSync(join(workspace, "note.png"), "fixture image");
+		let submissions = 0;
+		let polls = 0;
+		let resultFetches = 0;
+		let finished = false;
+		let notifyFirstPoll!: () => void;
+		const firstPoll = new Promise<void>((resolveFirstPoll) => { notifyFirstPoll = resolveFirstPoll; });
+		const server = createHttpServer((req, res) => {
+			const path = new URL(req.url ?? "/", "http://ocr.local").pathname;
+			if (req.method === "POST" && path === "/jobs") {
+				submissions += 1;
+				req.resume();
+				req.on("end", () => {
+					res.writeHead(200, { "Content-Type": "application/json" });
+					res.end(JSON.stringify({ data: { jobId: "ocr-crash-job" } }));
+				});
+				return;
+			}
+			if (req.method === "GET" && path === "/jobs/ocr-crash-job") {
+				polls += 1;
+				res.writeHead(200, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ data: finished ? {
+					state: "done",
+					resultUrl: { jsonUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/result` },
+				} : { state: "running" } }));
+				if (polls === 1) notifyFirstPoll();
+				return;
+			}
+			if (req.method === "GET" && path === "/result") {
+				resultFetches += 1;
+				res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+				res.end(`${JSON.stringify({ result: { layoutParsingResults: [{ markdown: { text: "崩溃后恢复的 OCR 文本" } }] } })}\n`);
+				return;
+			}
+			res.writeHead(404);
+			res.end();
+		});
+		await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+		const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/jobs`;
+		try {
+			const storagePath = join(root, "ocr-crash.sqlite");
+			const checkpointDir = join(root, "tenant", "ocr");
+			const fixture = fileURLToPath(new URL("./durable-ocr-crash-fixture.ts", import.meta.url));
+			const child = spawn(process.execPath, ["--import", "tsx", fixture, storagePath, checkpointDir, workspace, baseUrl], {
+				cwd: process.cwd(),
+				env: { ...process.env },
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+			children.add(child);
+			const output = await waitForOutput(child, "submission:");
+			const submissionId = Number(/submission:(\d+)/.exec(output)?.[1]) as SubmissionId;
+			await firstPoll;
+			child.kill("SIGKILL");
+			await once(child, "exit");
+			children.delete(child);
+			finished = true;
+
+			const provider = fauxRuntime();
+			provider.faux.setResponses([fauxAssistantMessage("ocr recovered")]);
+			const runtime = await open({
+				storagePath,
+				workspaceDir: workspace,
+				ocr: {
+					sessionId: "durable-crash-ocr",
+					checkpointDir,
+					workspaceDir: workspace,
+					ocrApi: { token: "fixture-token", baseUrl },
+				},
+				...provider,
+			});
+			const recovered = await runtime.waitForSubmission(submissionId);
+			expect(recovered).toMatchObject({ status: "done", text: "ocr recovered" });
+			expect(submissions).toBe(1);
+			expect(polls).toBeGreaterThanOrEqual(2);
+			expect(resultFetches).toBe(1);
+			const messages = durableEntriesToMessages((await runtime.snapshot()).entries);
+			const tool = messages.flatMap((message) => message.tools ?? []).find((call) => call.toolCallId === "crash-ocr-call");
+			expect(JSON.stringify(tool?.result)).toContain("崩溃后恢复的 OCR 文本");
+		} finally {
+			await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+		}
 	}, 20_000);
 });

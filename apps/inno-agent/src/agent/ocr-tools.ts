@@ -13,16 +13,23 @@
  * The auth header is `Authorization: bearer {token}`.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { basename, isAbsolute, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { ConfigHolder } from "./inno-extension.js";
 import { logger } from "../logger.js";
+import { writeJson } from "../storage/file-store.js";
 import { checkWorkspaceMutationPath } from "./workspace-path-guard.js";
 
 export interface OcrToolOptions {
 	restrictToWorkspace?: boolean;
+	/** Persist submit/result checkpoints for replay-safe durable tool calls. */
+	durable?: {
+		checkpointDir: string;
+		getOperationId: (toolCallId: string) => string;
+	};
 }
 
 /** Default endpoint for the public PaddleOCR-VL service. */
@@ -48,6 +55,46 @@ interface OcrApiConfig {
 	token: string;
 	model: string;
 	baseUrl: string;
+}
+
+interface OcrCompletion {
+	text: string;
+	details: Record<string, unknown>;
+}
+
+interface OcrCheckpoint {
+	operationId: string;
+	filePath: string;
+	jobId?: string;
+	completion?: OcrCompletion;
+}
+
+function checkpointPath(checkpointDir: string, operationId: string): string {
+	return join(checkpointDir, `${createHash("sha256").update(operationId).digest("hex")}.json`);
+}
+
+function loadCheckpoint(filePath: string, operationId: string, inputPath: string): OcrCheckpoint | undefined {
+	if (!existsSync(filePath)) return undefined;
+	const checkpoint = JSON.parse(readFileSync(filePath, "utf-8")) as OcrCheckpoint;
+	if (checkpoint.operationId !== operationId || checkpoint.filePath !== inputPath) {
+		throw new Error("OCR checkpoint does not match the durable tool call");
+	}
+	return checkpoint;
+}
+
+function saveCheckpoint(checkpointDir: string, checkpoint: OcrCheckpoint): void {
+	writeJson(checkpointPath(checkpointDir, checkpoint.operationId), checkpoint);
+}
+
+function completedResult(completion: OcrCompletion) {
+	return {
+		content: [{ type: "text" as const, text: completion.text }],
+		details: completion.details,
+	};
+}
+
+function requestSignal(signal: AbortSignal): AbortSignal {
+	return AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
 }
 
 function resolveOcrConfig(holder: ConfigHolder): OcrApiConfig | undefined {
@@ -186,6 +233,10 @@ async function fetchResult(jsonUrl: string, signal: AbortSignal): Promise<string
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
 	return new Promise((resolveSleep, reject) => {
+		if (signal.aborted) {
+			reject(new Error("aborted"));
+			return;
+		}
 		const t = setTimeout(resolveSleep, ms);
 		signal.addEventListener(
 			"abort",
@@ -216,7 +267,7 @@ export function createOcrTools(configHolder: ConfigHolder, options: OcrToolOptio
 				description: "要识别的图片路径（工作区相对路径、绝对路径或 http(s) URL）",
 			}),
 		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(toolCallId, params, upstreamSignal, _onUpdate, ctx) {
 			const typed = params as { filePath: string };
 			const filePath = String(typed.filePath ?? "").trim();
 			if (!filePath) {
@@ -224,6 +275,27 @@ export function createOcrTools(configHolder: ConfigHolder, options: OcrToolOptio
 					content: [{ type: "text" as const, text: "请提供 filePath（图片路径或 URL）。" }],
 					details: { error: "missing_file_path" } as Record<string, unknown>,
 				};
+			}
+
+			const durable = options.durable;
+			const operationId = durable?.getOperationId(toolCallId);
+			let checkpoint: OcrCheckpoint | undefined;
+			if (durable && operationId) {
+				try {
+					checkpoint = loadCheckpoint(
+						checkpointPath(durable.checkpointDir, operationId),
+						operationId,
+						filePath,
+					);
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					logger.warn({ err, filePath }, "ocr_image: checkpoint recovery failed");
+					return {
+						content: [{ type: "text" as const, text: `OCR 恢复失败：${msg}` }],
+						details: { error: "checkpoint_failed", filePath, message: msg } as Record<string, unknown>,
+					};
+				}
+				if (checkpoint?.completion) return completedResult(checkpoint.completion);
 			}
 
 			const cfg = resolveOcrConfig(configHolder);
@@ -239,35 +311,45 @@ export function createOcrTools(configHolder: ConfigHolder, options: OcrToolOptio
 
 			const controller = new AbortController();
 			const totalTimer = setTimeout(() => controller.abort(), MAX_TOTAL_TIMEOUT_MS);
-			const signal = controller.signal;
+			const signal = upstreamSignal
+				? AbortSignal.any([controller.signal, upstreamSignal])
+				: controller.signal;
 
 			try {
-				let jobId: string;
-				try {
-					jobId = await submitJob(
-						cfg,
-						filePath,
-						ctx.cwd,
-						AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-						Boolean(options.restrictToWorkspace),
-					);
-				} catch (err) {
-					logger.warn({ err, filePath }, "ocr_image: submit failed");
-					const msg = err instanceof Error ? err.message : String(err);
-					return {
-						content: [{ type: "text" as const, text: `OCR 任务提交失败：${msg}` }],
-						details: { error: "submit_failed", filePath, message: msg } as Record<string, unknown>,
-					};
+				let jobId = checkpoint?.jobId;
+				if (!jobId) {
+					try {
+						if (durable && operationId) {
+							checkpoint = { operationId, filePath };
+							saveCheckpoint(durable.checkpointDir, checkpoint);
+						}
+						jobId = await submitJob(
+							cfg,
+							filePath,
+							ctx.cwd,
+							requestSignal(signal),
+							Boolean(options.restrictToWorkspace),
+						);
+						if (durable && operationId) {
+							checkpoint = { operationId, filePath, jobId };
+							saveCheckpoint(durable.checkpointDir, checkpoint);
+						}
+					} catch (err) {
+						logger.warn({ err, filePath }, "ocr_image: submit failed");
+						const msg = err instanceof Error ? err.message : String(err);
+						return {
+							content: [{ type: "text" as const, text: `OCR 任务提交失败：${msg}` }],
+							details: { error: "submit_failed", filePath, message: msg } as Record<string, unknown>,
+						};
+					}
+					logger.info({ jobId, filePath }, "ocr_image: job submitted");
 				}
-				logger.info({ jobId, filePath }, "ocr_image: job submitted");
 
-				// Poll until terminal state.
+				// Poll immediately, then wait between pending/running responses. A
+				// recovered checkpoint resumes this loop without another submission.
 				let status: JobStatus;
 				while (true) {
-					await sleep(POLL_INTERVAL_MS, signal).catch(() => {
-						throw new Error("OCR 轮询被中断（超时或取消）");
-					});
-					status = await pollJob(cfg, jobId, AbortSignal.timeout(REQUEST_TIMEOUT_MS));
+					status = await pollJob(cfg, jobId, requestSignal(signal));
 					if (status.state === "done") break;
 					if (status.state === "failed") {
 						const msg = status.errorMsg || "OCR 任务失败（未提供错误详情）";
@@ -276,7 +358,9 @@ export function createOcrTools(configHolder: ConfigHolder, options: OcrToolOptio
 							details: { error: "job_failed", jobId, message: msg } as Record<string, unknown>,
 						};
 					}
-					// pending / running — keep polling
+					await sleep(POLL_INTERVAL_MS, signal).catch(() => {
+						throw new Error("OCR 轮询被中断（超时或取消）");
+					});
 				}
 
 				const jsonUrl = status.resultUrl?.jsonUrl;
@@ -287,22 +371,22 @@ export function createOcrTools(configHolder: ConfigHolder, options: OcrToolOptio
 					};
 				}
 
-				const markdown = await fetchResult(jsonUrl, AbortSignal.timeout(REQUEST_TIMEOUT_MS));
-				if (!markdown.trim()) {
-					return {
-						content: [{ type: "text" as const, text: "OCR 完成，但未从图片中提取到任何文字。" }],
-						details: { jobId, pages: 0 } as Record<string, unknown>,
-					};
-				}
-
-				return {
-					content: [{ type: "text" as const, text: markdown }],
+				const markdown = await fetchResult(jsonUrl, requestSignal(signal));
+				const completion: OcrCompletion = markdown.trim() ? {
+					text: markdown,
 					details: {
 						jobId,
 						pages: (markdown.match(/^---$/gm) || []).length + 1,
 						textLength: markdown.length,
-					} as Record<string, unknown>,
+					},
+				} : {
+					text: "OCR 完成，但未从图片中提取到任何文字。",
+					details: { jobId, pages: 0 },
 				};
+				if (durable && operationId) {
+					saveCheckpoint(durable.checkpointDir, { operationId, filePath, jobId, completion });
+				}
+				return completedResult(completion);
 			} catch (err) {
 				logger.warn({ err, filePath }, "ocr_image: overall failed");
 				const msg = err instanceof Error ? err.message : String(err);

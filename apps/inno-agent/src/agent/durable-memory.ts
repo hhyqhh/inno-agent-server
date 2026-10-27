@@ -1,11 +1,10 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
-import type { JsonValue } from "@earendil-works/chord";
-import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
+import type { ToolRegistration } from "@earendil-works/pi-durable";
 import { createLearnerTools } from "../memory/learner/learner-tools.js";
 import { buildContextPack, formatContextPackForPrompt } from "../memory/learner/context-pack.js";
 import { isProfileEmpty, loadProfile, loadRecentEvents } from "../memory/learner/profile-store.js";
 import { createL2Tools } from "../memory/l2/l2-tools.js";
+import { createDurableToolRegistrations } from "./durable-tool-adapter.js";
 import { ONBOARDING_GUIDE } from "./system-prompt.js";
 
 export interface DurableMemoryToolOptions {
@@ -62,40 +61,10 @@ export function createDurableMemoryTools(options: DurableMemoryToolOptions): Too
 	return [...learnerTools, ...l2Tools];
 }
 
-/** Adapt only the memory tools above; their durable mode does not use the
- * legacy extension context's model registry or nested executeTool surface. */
+/** Adapt the memory tools above; durable L2 mode does not use the legacy
+ * extension context's model registry or nested executeTool surface. */
 export function createDurableMemoryRegistrations(
 	options: DurableMemoryToolOptions,
 ): ToolRegistration[] {
-	return createDurableMemoryTools(options).map((tool) => defineTool({
-		name: tool.name,
-		description: tool.description,
-		parameters: tool.parameters,
-		replay: "safe",
-		executionMode: tool.executionMode,
-		...(tool.prepareArguments ? { prepareArguments: tool.prepareArguments } : {}),
-		...(tool.outputSchema ? { structuredOutputSchema: tool.outputSchema } : {}),
-		async execute(args, api, context) {
-			const onUpdate = (partial: { content: { type: string; text?: string }[]; details?: unknown }): void => {
-				for (const block of partial.content) {
-					if (block.type === "text" && block.text) api.output(block.text);
-				}
-				if (partial.details !== undefined) {
-					void api.details(partial.details as JsonValue, context).catch(() => undefined);
-				}
-			};
-			const legacyContext = { model: undefined, modelRegistry: undefined } as unknown as ExtensionToolContext;
-			const result = await tool.execute(api.callId, args, context.abortSignal, onUpdate, legacyContext);
-			return {
-				output: result.content,
-				...(result.details !== undefined ? { details: result.details as JsonValue } : {}),
-				...(tool.outputSchema && result.structuredContent !== undefined
-					? { structuredOutput: result.structuredContent as JsonValue }
-					: {}),
-				...(result.isError !== undefined ? { isError: result.isError } : {}),
-				...(result.usage ? { usage: result.usage } : {}),
-				...(result.terminate ? { control: { terminate: true } } : {}),
-			};
-		},
-	}));
+	return createDurableToolRegistrations(createDurableMemoryTools(options), { cwd: options.workspaceDir });
 }
