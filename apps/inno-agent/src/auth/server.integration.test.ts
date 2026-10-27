@@ -159,6 +159,33 @@ beforeAll(async () => {
 					return;
 				}
 			}
+			const durableHistoryPrompt = /durable-l3-history-(a|b)/.exec(body);
+			if (durableHistoryPrompt) {
+				const request = JSON.parse(body) as { messages?: Array<{ role?: string }> };
+				const toolResults = request.messages?.filter((message) => message.role === "tool").length ?? 0;
+				if (toolResults === 0) {
+					res.writeHead(200, { "Content-Type": "text/event-stream" });
+					res.end([
+						`data: ${JSON.stringify({
+							id: "tenant-stub", object: "chat.completion.chunk", created: 0, model: "tenant-model",
+							choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{
+								index: 0, id: `durable-l3-history-call-${durableHistoryPrompt[1]}`, type: "function",
+								function: { name: "l3_recall", arguments: JSON.stringify({ query: "durable-topic-first" }) },
+							}] }, finish_reason: null }],
+						})}`,
+						"",
+						`data: ${JSON.stringify({
+							id: "tenant-stub", object: "chat.completion.chunk", created: 0, model: "tenant-model",
+							choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+						})}`,
+						"",
+						"data: [DONE]",
+						"",
+						"",
+					].join("\n"));
+					return;
+				}
+			}
 			const memoryPrompt = /durable-memory-(a|b)/.exec(body);
 			if (memoryPrompt) {
 				const request = JSON.parse(body) as { messages?: Array<{ role?: string }> };
@@ -1288,6 +1315,53 @@ describe("durable session HTTP boundary", () => {
 		expect(await regenerated.json()).toMatchObject({ name: "租户 A 学习目标", runtime: "durable", topicPendingUpgrade: false });
 		expect(providerRequests.filter((request) => request.authorization === "Bearer durable-topic-a-secret"
 			&& request.body.includes("请用一句简短的中文短语概括"))).toHaveLength(2);
+	}, 60_000);
+
+	it("indexes durable history for tenant-scoped L3 recall", async () => {
+		const [cookieA, cookieB] = await Promise.all([
+			registerUser("durable-l3-index-a@example.com"),
+			registerUser("durable-l3-index-b@example.com"),
+		]);
+		const configure = async (cookie: string, apiKey: string) => {
+			expect((await api(cookie, "/api/settings/providers", {
+				method: "PUT",
+				body: JSON.stringify({
+					providerId: "shared", baseUrl: providerOrigin, apiKey, api: "openai-completions",
+					models: [{ id: "tenant-model", name: "Tenant model", contextWindow: 32_000, maxTokens: 2_000 }],
+				}),
+			})).status).toBe(200);
+		};
+		await Promise.all([configure(cookieA, "durable-l3-index-a-secret"), configure(cookieB, "durable-l3-index-b-secret")]);
+		const createDurable = async (cookie: string) => {
+			const response = await api(cookie, "/api/sessions", { method: "POST", body: JSON.stringify({ runtime: "durable" }) });
+			expect(response.status).toBe(201);
+			return response.json() as Promise<{ id: string }>;
+		};
+		const chat = async (cookie: string, sessionId: string, prompt: string, requestId: string) => {
+			const response = await api(cookie, "/api/chat", {
+				method: "POST", body: JSON.stringify({ sessionId, prompt, clientRequestId: requestId }),
+			});
+			expect(response.status).toBe(200);
+		};
+		const [historyA, historyB, recallA, recallB] = await Promise.all([
+			createDurable(cookieA), createDurable(cookieB), createDurable(cookieA), createDurable(cookieB),
+		]);
+		await Promise.all([
+			chat(cookieA, historyA.id, "durable-topic-first-a", "durable-l3-history-source-a"),
+			chat(cookieB, historyB.id, "durable-topic-first-b", "durable-l3-history-source-b"),
+		]);
+		await Promise.all([
+			chat(cookieA, recallA.id, "durable-l3-history-a", "durable-l3-history-request-a"),
+			chat(cookieB, recallB.id, "durable-l3-history-b", "durable-l3-history-request-b"),
+		]);
+		const finalA = providerRequests.find((request) => request.authorization === "Bearer durable-l3-index-a-secret"
+			&& request.body.includes("durable-l3-history-a") && request.body.includes("durable-topic-first-a"));
+		const finalB = providerRequests.find((request) => request.authorization === "Bearer durable-l3-index-b-secret"
+			&& request.body.includes("durable-l3-history-b") && request.body.includes("durable-topic-first-b"));
+		expect(finalA).toBeDefined();
+		expect(finalB).toBeDefined();
+		expect(finalA?.body).not.toContain("durable-topic-first-b");
+		expect(finalB?.body).not.toContain("durable-topic-first-a");
 	}, 60_000);
 
 	it("passes validated attachments and inline images without exposing model-only context as user text", async () => {

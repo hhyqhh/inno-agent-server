@@ -16,7 +16,7 @@ import { logger } from "../../logger.js";
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { openL3Store, type L3Store } from "./sqlite-store.js";
-import { indexAllSessions, indexSession } from "./indexer.js";
+import { indexAllSessions, indexSession, indexSessionMessages, type L3IndexMessage } from "./indexer.js";
 import { recall, formatRecallForPrompt, type RecallResult } from "./recall.js";
 import { join } from "node:path";
 import { getCurrentTenant, getCurrentTenantStore } from "../../tenants/current.js";
@@ -72,6 +72,18 @@ export class L3Memory {
 		}
 	}
 
+	/** Incrementally index a projected durable history by committed revision. */
+	async indexMessages(sessionId: string, messages: L3IndexMessage[], revision: number): Promise<void> {
+		if (!sessionId) return;
+		const store = await this.ensureStore();
+		if (!store) return;
+		try {
+			indexSessionMessages(store, sessionId, messages, revision);
+		} catch (err) {
+			logger.warn({ err }, `[L3] index durable ${sessionId} failed: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
 	/** Threshold-gated recall for prompt injection. */
 	async recall(query: string, excludeSessionId?: string): Promise<RecallResult[]> {
 		const store = await this.ensureStore();
@@ -120,6 +132,15 @@ export class ScopedL3Memory {
 			if (!store || !await store.ownsResource(tenant, "session", ownershipSessionId(sessionId))) return;
 		}
 		await this.memory().indexById(sessionId);
+	}
+
+	async indexMessages(sessionId: string, messages: L3IndexMessage[], revision: number): Promise<void> {
+		const tenant = getCurrentTenant();
+		if (tenant) {
+			const store = getCurrentTenantStore();
+			if (!store || !await store.ownsResource(tenant, "session", sessionId)) return;
+		}
+		await this.memory().indexMessages(sessionId, messages, revision);
 	}
 
 	async recall(query: string, excludeSessionId?: string): Promise<RecallResult[]> {

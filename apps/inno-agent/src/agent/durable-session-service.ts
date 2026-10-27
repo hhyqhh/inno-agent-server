@@ -7,7 +7,7 @@ import type { InnoConfig } from "../config.js";
 import type { ChannelRegistry } from "../channels/channel.js";
 import { readJson, writeJson } from "../storage/file-store.js";
 import { resolveCurrentTenantConfig } from "../tenants/config.js";
-import { runInTenantContext } from "../tenants/current.js";
+import { runInTenantContext, runWithoutTenantContext } from "../tenants/current.js";
 import { getRequestTenant } from "../tenants/http.js";
 import { resolveRequestTenantDataRoot } from "../tenants/paths.js";
 import type { TenantStore } from "../tenants/store.js";
@@ -465,6 +465,29 @@ export class DurableSessionService {
 		}
 	}
 
+	private async indexL3Snapshot(
+		req: IncomingMessage,
+		id: string,
+		messages: SessionMessageSummary[],
+		revision: number,
+	): Promise<void> {
+		const config = resolveCurrentTenantConfig(this.options.dataDir, this.options.getLocalConfig());
+		if (config.memory?.l3Enabled === false) return;
+		const scoped = new ScopedL3Memory(this.options.dataDir, join(this.options.dataDir, "sessions"));
+		const tenant = getRequestTenant(req);
+		try {
+			if (tenant) {
+				if (!this.options.tenantStore) throw new Error("Authenticated durable L3 indexing requires a tenant store");
+				await runInTenantContext(tenant, this.options.tenantStore, () => scoped.indexMessages(id, messages, revision));
+			} else {
+				await runWithoutTenantContext(() => scoped.indexMessages(id, messages, revision));
+			}
+		} catch (error) {
+			// L3 is derived, best-effort state; committed history remains authoritative.
+			logger.warn({ err: error, sessionId: id }, "failed to index durable history for L3");
+		}
+	}
+
 	async snapshot(req: IncomingMessage, id: string): Promise<{
 		summary: DurableSessionSummary;
 		messages: ReturnType<typeof durableEntriesToMessages>;
@@ -487,6 +510,7 @@ export class DurableSessionService {
 				: record.updatedAt;
 			const next = this.update(req, id, { messageCount: messages.length, updatedAt });
 			const lastEntryId = snapshot.entries.at(-1)?.id ?? 0;
+			await this.indexL3Snapshot(req, id, messages, lastEntryId);
 			const pendingQuestion = this.pendingQuestion(req, id);
 			return {
 				summary: toSummary(next),

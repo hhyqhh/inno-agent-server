@@ -31,6 +31,12 @@ interface ExtractedMessage {
 	ts: number;
 }
 
+export interface L3IndexMessage {
+	role: "user" | "assistant";
+	content: string;
+	timestamp: number;
+}
+
 /** Pull plain text out of a PI message content value (array of blocks or string). */
 function textFromMessageContent(content: unknown): string {
 	if (typeof content === "string") return content;
@@ -173,12 +179,40 @@ export function indexSession(store: L3Store, filePath: string): number {
 		return 0;
 	}
 
+	return replaceSessionChunks(store, sessionId, messages, stat.size, mtimeMs);
+}
+
+function replaceSessionChunks(
+	store: L3Store,
+	sessionId: string,
+	messages: ExtractedMessage[],
+	revisionOffset: number,
+	revision: number,
+): number {
 	const chunks = buildChunks(sessionId, messages);
 	// Re-index cleanly: drop old chunks for this session, then insert current.
 	store.deleteSession(sessionId);
 	if (chunks.length > 0) store.upsertChunks(chunks);
-	store.setIndexState(sessionId, stat.size, mtimeMs, chunks.length);
+	store.setIndexState(sessionId, revisionOffset, revision, chunks.length);
 	return chunks.length;
+}
+
+/** Index an already projected durable history. The committed entry revision is
+ * the incremental gate; user-visible projection has already removed hidden
+ * attachment/OCR context, thinking, and tool payloads. */
+export function indexSessionMessages(
+	store: L3Store,
+	sessionId: string,
+	messages: L3IndexMessage[],
+	revision: number,
+): number {
+	const previous = store.getIndexState(sessionId);
+	if (previous?.lastMtimeMs === revision && previous.lastOffset === messages.length) return 0;
+	return replaceSessionChunks(store, sessionId, messages.map((message) => ({
+		role: message.role,
+		text: message.content,
+		ts: message.timestamp,
+	})), messages.length, revision);
 }
 
 /**

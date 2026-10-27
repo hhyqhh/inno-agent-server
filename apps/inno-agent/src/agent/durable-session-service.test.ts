@@ -9,6 +9,7 @@ import { normalizeConfig } from "../config.js";
 import { runInTenantContext, runWithoutTenantContext, getCurrentTenant } from "../tenants/current.js";
 import { saveTenantConfig } from "../tenants/config.js";
 import { loadEvents } from "../memory/learner/profile-store.js";
+import { closeL3Memory, ScopedL3Memory } from "../memory/l3/l3-tools.js";
 import { ChannelRegistry } from "../channels/channel.js";
 import { setRequestTenant } from "../tenants/http.js";
 import type { TenantContext, TenantStore } from "../tenants/store.js";
@@ -16,6 +17,7 @@ import { DurableRuntimeDisabledError, DurableSessionService } from "./durable-se
 import { DurableSessionRuntime, type DurableSessionRuntimeOptions } from "./durable-runtime.js";
 
 const roots: string[] = [];
+const l3Dirs: string[] = [];
 const services: DurableSessionService[] = [];
 const tenantStore = {} as TenantStore;
 
@@ -43,16 +45,17 @@ function tenant(id: string): TenantContext {
 	return { tenantId: id, userId: `user-${id}`, role: "owner" };
 }
 
-function inTenant<T>(context: TenantContext, operation: (req: IncomingMessage) => T): T {
+function inTenant<T>(context: TenantContext, operation: (req: IncomingMessage) => T, store: TenantStore = tenantStore): T {
 	const req = { headers: {} } as IncomingMessage;
 	return runWithoutTenantContext(() => {
-		setRequestTenant(req, context, tenantStore);
-		return runInTenantContext(context, tenantStore, () => operation(req));
+		setRequestTenant(req, context, store);
+		return runInTenantContext(context, store, () => operation(req));
 	});
 }
 
 afterEach(async () => {
 	await Promise.all(services.splice(0).map((service) => service.close()));
+	for (const path of l3Dirs.splice(0)) closeL3Memory(path);
 	for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
@@ -261,6 +264,39 @@ describe("DurableSessionService", () => {
 			await reopen();
 			expect(instructionSnapshots[1]).toContain("使用更新后的工作区规则。");
 			expect(instructionSnapshots[1]).not.toContain("先使用工作区术语表。");
+		});
+	});
+
+	it("indexes committed durable snapshots for L3 recall outside the current session", async () => {
+		await runWithoutTenantContext(async () => {
+			const base = root();
+			l3Dirs.push(join(base, "l3"));
+			const faux = fauxProvider();
+			faux.setResponses([fauxAssistantMessage("复习监督学习和梯度下降")]);
+			const service = new DurableSessionService({
+				dataDir: base,
+				getLocalConfig: () => config("local"),
+				enabled: true,
+				resolveWorkspaceDir: () => base,
+				openRuntime: async (options) => {
+					const models = createModels();
+					models.setProvider(faux.provider);
+					return DurableSessionRuntime.open({ ...options, models, model: { provider: faux.provider.id, modelId: faux.getModel().id } });
+				},
+			});
+			services.push(service);
+			const req = { headers: {} } as IncomingMessage;
+			const session = service.create(req, { workspaceId: "workspace" });
+			const lease = await service.lease(req, session.id);
+			try {
+				const submission = await lease.runtime.submit("之前学习了机器学习的基本概念", "durable-l3-index");
+				await lease.runtime.waitForSubmission(submission.id);
+			} finally { await lease.release(); }
+			await service.snapshot(req, session.id);
+			const memory = new ScopedL3Memory(base, join(base, "sessions"));
+			const recalled = await memory.recall("机器学习", "durable-current");
+			expect(recalled.some((result) => result.sessionId === session.id)).toBe(true);
+			expect(await memory.recall("机器学习", session.id)).toEqual([]);
 		});
 	});
 

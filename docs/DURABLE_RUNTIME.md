@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: durable generated session topics (3M)
+## Current stage: durable-history L3 indexing (3N)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -61,8 +61,9 @@ The current durable slice supports:
 - replay-safe, tenant-local L1 context/event/evidence tools, direct profile
   patch/update mutations, and L2 archive, query, and lint tools;
 - tenant-local L1 profile/recent-event context in durable instructions;
-- explicit `l3_recall` over ownership-filtered legacy history, with verified
-  tenant ALS restored when durable work resumes outside the HTTP request;
+- explicit `l3_recall` over ownership-filtered legacy and committed durable
+  history, with verified tenant ALS restored when durable work resumes outside
+  the HTTP request;
 - the same workspace `agent.md` and `.skills/` prompt sections as legacy,
   reloaded whenever the durable runtime opens;
 - `ocr_image` with tenant credentials, canonical workspace file checks,
@@ -124,12 +125,17 @@ and manifest records resume incomplete archives. Durable query skips the legacy
 append-only query log. L1/L2 feature gates and tenant data roots are preserved;
 memory writes never use the legacy global tenant root in authenticated mode.
 
-Durable L3 recall reuses the tenant-scoped legacy-session index and excludes the
-active durable session. Authenticated tool execution re-enters the verified
-tenant context before backfill, ownership checks, and reads. Index updates are
-idempotent derived state, so the read-only tool is replay-safe. Durable SQLite
-history is not indexed yet, and automatic per-turn threshold-gated recall
-injection remains pending; this slice adds only the explicit `l3_recall` tool.
+Durable L3 recall reuses the tenant-scoped session index and excludes the
+active durable session. Every committed durable snapshot incrementally indexes
+its projected user/assistant text into the same tenant-local L3 store, gated by
+the last committed entry revision. Repeating a revision is a no-op; a newer
+snapshot replaces that session's derived chunks. Hidden attachment/OCR context,
+thinking, and tool payloads do not enter the index. Snapshots are indexed when
+history is read or a turn completes; recall does **not** bulk-open every durable
+runtime, which could otherwise resume unrelated unfinished work. Authenticated
+indexing and recall re-enter the verified tenant context and check session
+ownership. Index updates are idempotent derived state, so replay is safe.
+Automatic per-turn threshold-gated recall injection remains pending.
 
 Durable topics share the legacy excerpt, cleaning, and fallback helpers. The
 first submission records a generated first-message preview; a completed turn
@@ -244,7 +250,8 @@ workspace/symlink containment, read-only fail-closed behavior, workspace
 `agent.md`/private-skill injection and reload, attachment-context history
 projection, inline-image retry path stability and OCR hint construction,
 tenant-scoped attachment/image sidecar caching and request-ID dedup,
-replay-safe L1/L2 execution, explicit L3 recall, direct profile patch/update retry dedup,
+replay-safe L1/L2 execution, explicit L3 recall, revision-idempotent durable-history
+indexing with current-session exclusion, direct profile patch/update retry dedup,
 durable topic upgrade dedup, pinned-model selection, and manual-rename protection,
 L1 event/profile crash-gap recovery, deterministic L2 archive,
 OCR completion caching and job-ID resume, channel payload/completion caching,
@@ -263,7 +270,8 @@ creation, concurrent authenticated durable sessions, per-tenant provider and
 OCR Authorization headers, cross-tenant 404s, completed request-ID retries,
 lack of legacy JSONL creation, SSE disconnect/reconnect replay, tenant-local
 L1/L2/OCR writes, replay-safe direct profile patch/update, and tenant-scoped L3
-recall through the authenticated HTTP boundary, automatic and manual durable
+recall through the authenticated HTTP boundary, tenant-isolated recall of
+previously committed durable sessions, automatic and manual durable
 topic generation with per-tenant credentials and pinned-model selection,
 original-run question
 answers with cross-tenant 404 and stale-turn 409 responses, non-streaming
@@ -275,5 +283,4 @@ cleanup.
 
 Still pending: application-persisted SSE replay after restart, durable
 permissions, provider-rejection image fallback, outbox and
-question retention/cleanup, durable-history L3 indexing and automatic recall
-injection, scheduler integration, and sharded single-owner deployment.
+question retention/cleanup, automatic durable recall injection, scheduler integration, and sharded single-owner deployment.

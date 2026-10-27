@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { indexAllSessions, indexSession } from "./indexer.js";
+import { indexAllSessions, indexSession, indexSessionMessages } from "./indexer.js";
 import { formatRecallForPrompt, recall } from "./recall.js";
 import { openL3Store, segmentForFts, type L3Store } from "./sqlite-store.js";
 
@@ -202,6 +202,21 @@ describe.skipIf(!nodeSqliteFts5Available())("L3 store + recall (node:sqlite + FT
 		const promptSection = formatRecallForPrompt(results);
 		expect(promptSection).toContain("相关历史对话");
 		expect(promptSection).toContain("机器学习");
+	});
+
+	it("indexes projected durable messages idempotently by committed revision", () => {
+		const messages = [
+			{ role: "user" as const, content: "之前学习了机器学习的基本概念", timestamp: 1 },
+			{ role: "assistant" as const, content: "我们从监督学习开始复习", timestamp: 2 },
+		];
+		expect(indexSessionMessages(store!, "durable-a", messages, 2)).toBe(2);
+		expect(indexSessionMessages(store!, "durable-a", messages, 2)).toBe(0);
+		expect(recall(store, "机器学习", { excludeSessionId: "durable-current" })).toHaveLength(1);
+		expect(recall(store, "机器学习", { excludeSessionId: "durable-a" })).toHaveLength(0);
+
+		const updated = [...messages, { role: "user" as const, content: "接着复习线性代数", timestamp: 3 }];
+		expect(indexSessionMessages(store!, "durable-a", updated, 3)).toBe(3);
+		expect(store!.getIndexState("durable-a")).toMatchObject({ lastOffset: 3, lastMtimeMs: 3, chunkCount: 3 });
 	});
 
 	it("formatRecallForPrompt returns empty string when there is nothing to inject", () => {
