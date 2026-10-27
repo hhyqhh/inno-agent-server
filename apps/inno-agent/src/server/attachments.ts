@@ -140,6 +140,14 @@ export function validateChatAttachments(
 	return { bindings, loose };
 }
 
+const CHAT_ATTACHMENT_CONTEXT_PREFIX = "[用户本轮附带文件（";
+
+/** Durable stores this model-only block separately from the raw prompt. The
+ * history projection uses the marker to hide it without hiding the user text. */
+export function isChatAttachmentContext(text: string): boolean {
+	return text.startsWith(CHAT_ATTACHMENT_CONTEXT_PREFIX);
+}
+
 /**
  * Build the context block appended to the model-visible copy of the user's
  * message. Paths are workspace-relative (the agent's cwd), so tools such as
@@ -161,5 +169,5 @@ export function buildAttachmentContext(attachments: ChatAttachments): string {
 	if (looseLines.length > 0) {
 		sections.push(`普通附件：\n${looseLines.join("\n")}`);
 	}
-	return `[用户本轮附带文件（路径均为当前工作区根目录下的相对路径；调用文件工具时请原样使用，不要添加工作区绝对路径、/ 或 ./ 前缀）：\n${sections.join("\n")}]`;
+	return `${CHAT_ATTACHMENT_CONTEXT_PREFIX}路径均为当前工作区根目录下的相对路径；调用文件工具时请原样使用，不要添加工作区绝对路径、/ 或 ./ 前缀）：\n${sections.join("\n")}]`;
 }

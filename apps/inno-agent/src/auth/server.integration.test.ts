@@ -1186,6 +1186,81 @@ describe("durable session HTTP boundary", () => {
 		expect(recovered.messages.some((message) => message.role === "assistant" && message.content === "tenant stub response")).toBe(true);
 	}, 60_000);
 
+	it("passes validated workspace attachments without exposing their context as user text", async () => {
+		const cookieA = await registerUser("durable-attachments@example.com");
+		expect((await api(cookieA, "/api/settings/providers", {
+			method: "PUT",
+			body: JSON.stringify({
+				providerId: "shared",
+				baseUrl: providerOrigin,
+				apiKey: "durable-attachments-secret",
+				api: "openai-completions",
+				models: [{ id: "tenant-model", name: "Tenant model", contextWindow: 32_000, maxTokens: 2_000 }],
+			}),
+		})).status).toBe(200);
+		const workspace = await (await api(cookieA, "/api/workspaces", {
+			method: "POST", body: JSON.stringify({ name: "Durable attachments" }),
+		})).json() as { id: string };
+		expect((await api(cookieA, "/api/workspace/create", {
+			method: "POST", body: JSON.stringify({ workspaceId: workspace.id, path: "notes.txt", type: "file" }),
+		})).status, "create attachment file").toBe(201);
+		const workspaceFile = await api(cookieA, "/api/workspace/file", {
+			method: "PUT", body: JSON.stringify({ workspaceId: workspace.id, path: "notes.txt", content: "workspace attachment" }),
+		});
+		expect(workspaceFile.status, "write attachment file").toBe(200);
+		const sessionResponse = await api(cookieA, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ runtime: "durable", workspaceId: workspace.id }),
+		});
+		expect(sessionResponse.status, "create durable session in existing workspace").toBe(201);
+		const session = await sessionResponse.json() as { id: string };
+		const attachments = {
+			bindings: [{ word: "资料", wordIndex: 0, files: [{ path: "notes.txt", kind: "file", source: "workspace" }] }],
+			loose: [
+				{ path: "notes.txt", kind: "file", source: "workspace" },
+				{ path: "../outside.txt", kind: "file", source: "workspace" },
+			],
+		};
+		const streamed = await api(cookieA, "/api/chat/stream", {
+			method: "POST",
+			body: JSON.stringify({ sessionId: session.id, prompt: "总结资料", clientRequestId: "durable-attachments-request", attachments }),
+		});
+		expect(streamed.status).toBe(200);
+		expect(await streamed.text()).toContain('"persisted":true');
+		const providerBody = providerRequests.find((request) => request.body.includes("总结资料"))?.body ?? "";
+		expect(providerBody).toContain("用户本轮附带文件");
+		expect(providerBody).toContain("第1个「资料」→ notes.txt");
+		expect(providerBody).not.toContain("outside.txt");
+		const detail = await (await api(cookieA, `/api/sessions/${session.id}`)).json() as {
+			messages: Array<{ role: string; content: string; attachments?: typeof attachments }>;
+		};
+		const user = detail.messages.find((message) => message.role === "user");
+		expect(user?.content).toBe("总结资料");
+		expect(user?.attachments).toEqual({
+			bindings: attachments.bindings,
+			loose: [attachments.loose[0]],
+		});
+
+		const nonStreaming = await api(cookieA, "/api/chat", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId: session.id,
+				prompt: "durable-nonstream-attachment",
+				clientRequestId: "durable-nonstream-attachment-request",
+				attachments: { bindings: [], loose: [attachments.loose[0]] },
+			}),
+		});
+		expect(nonStreaming.status).toBe(200);
+		expect(providerRequests.find((request) => request.body.includes("durable-nonstream-attachment"))?.body).toContain("普通附件");
+		expect((await api(cookieA, "/api/chat", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId: session.id,
+				prompt: "durable-inline-image-still-disabled",
+				images: [{ data: "aW1hZ2U=", mimeType: "image/png" }],
+			}),
+		})).status).toBe(400);
+	}, 60_000);
+
 	it("resumes the original durable run from an authenticated question answer", async () => {
 		const [cookieA, cookieB] = await Promise.all([
 			registerUser("durable-question-a@example.com"),

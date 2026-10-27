@@ -2,12 +2,23 @@ import type { AgentEvent, EntryRecord, SnapshotEvent } from "@earendil-works/pi-
 import type { AssistantMessage, Message, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { ChatStreamEvent } from "../chat/stream-registry.js";
 import type { SessionMessageSummary, SessionSummary } from "../server/session-model.js";
+import { isChatAttachmentContext } from "../server/attachments.js";
 
 function textContent(message: Message): string {
 	const content = message.content;
 	if (typeof content === "string") return content;
 	return content
 		.filter((block) => block.type === "text")
+		.map((block) => block.text)
+		.join("\n")
+		.trim();
+}
+
+function userTextContent(message: Extract<Message, { role: "user" }>): string {
+	if (typeof message.content === "string") return message.content;
+	const textBlocks = message.content.filter((block) => block.type === "text");
+	return textBlocks
+		.filter((block, index) => index === 0 || !isChatAttachmentContext(block.text))
 		.map((block) => block.text)
 		.join("\n")
 		.trim();
@@ -33,7 +44,7 @@ export function durableEntriesToMessages(entries: readonly EntryRecord[]): Sessi
 		if (message.role === "user") {
 			messages.push({
 				role: "user",
-				content: textContent(message),
+				content: userTextContent(message),
 				timestamp: message.timestamp,
 				entryId: String(entry.id),
 			});

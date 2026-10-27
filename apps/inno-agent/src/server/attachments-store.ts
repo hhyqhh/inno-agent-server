@@ -19,24 +19,25 @@ export interface SessionAttachmentEntry {
 	timestamp: number;
 	/** Workspace that contained the attached files when the turn was accepted. */
 	workspaceId?: string;
+	/** Durable request ID deduplicates sidecar metadata on HTTP retries. */
+	requestId?: string;
 }
 
 export type SessionAttachmentsMetadata = Record<string, SessionAttachmentEntry[]>;
 
-// In-memory cache mirroring the questions.json pattern: read once, then
-// updated in memory on every write. Avoids a readFileSync on every
-// session-detail request.
-let cache: SessionAttachmentsMetadata | null = null;
+// In-memory cache is scoped by tenant/local data root. Keeping only the
+// metadata would let one tenant's sidecar satisfy another tenant's reads.
+let cache: { dataDir: string; metadata: SessionAttachmentsMetadata } | null = null;
 
 function read(dataDir: string): SessionAttachmentsMetadata {
-	if (cache === null) {
-		cache = readJson<SessionAttachmentsMetadata>(attachmentsMetadataPath(dataDir), {});
+	if (!cache || cache.dataDir !== dataDir) {
+		cache = { dataDir, metadata: readJson<SessionAttachmentsMetadata>(attachmentsMetadataPath(dataDir), {}) };
 	}
-	return cache;
+	return cache.metadata;
 }
 
 function write(dataDir: string, meta: SessionAttachmentsMetadata): void {
-	cache = meta;
+	cache = { dataDir, metadata: meta };
 	writeJson(attachmentsMetadataPath(dataDir), meta);
 }
 
@@ -55,7 +56,9 @@ export function recordSessionAttachments(
 	entry: SessionAttachmentEntry,
 ): void {
 	const meta = { ...read(dataDir) };
-	meta[sessionId] = [...(meta[sessionId] ?? []), entry];
+	const existing = meta[sessionId] ?? [];
+	if (entry.requestId && existing.some((candidate) => candidate.requestId === entry.requestId)) return;
+	meta[sessionId] = [...existing, entry];
 	write(dataDir, meta);
 }
 

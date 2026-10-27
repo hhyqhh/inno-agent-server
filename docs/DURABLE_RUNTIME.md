@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: workspace prompt context (3H)
+## Current stage: structured workspace attachments (3I)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -71,16 +71,18 @@ The current durable slice supports:
   answers, SSE turn rebinding, and original-run recovery after restart;
 - scoped active-turn cancellation through the existing chat abort endpoint,
   including pending-question cleanup and persisted pi-durable abort marks;
+- structured workspace attachments on streaming and non-streaming chat, with
+  canonical path validation and request-ID-deduplicated UI sidecar metadata;
 - graceful shutdown of open durable runtimes.
 
 Shell, workspace mutations, MCP, subagents, codemode, and computer-use remain
 disabled. Direct `patch_learner_profile` and `update_learner_profile` mutations
-are not exposed on the durable path yet. Attachments, durable permissions,
-branching/editing, showcase export, and generated topics are not implemented on
-this path yet; unsupported operations fail explicitly rather than falling back
-to legacy execution. Workspace-private skills are injected as prompt resources;
-they do not alter the process-global PI resource loader or enable otherwise
-unsupported durable tools.
+are not exposed on the durable path yet. Inline `images`, native vision input,
+durable permissions, branching/editing, showcase export, and generated topics
+are not implemented on this path yet; unsupported operations fail explicitly
+rather than falling back to legacy execution. Workspace-private skills are
+injected as prompt resources; they do not alter the process-global PI resource
+loader or enable otherwise unsupported durable tools.
 
 ## Recovery and delivery semantics
 
@@ -131,6 +133,18 @@ APIs have no common idempotency key, so a crash after external delivery but
 before the completion commit can send the file again: delivery is
 **at-least-once**, not exactly-once. Outbox snapshots and completion records are
 currently retained; retention/cleanup policy is still pending.
+
+Durable structured attachments accept the existing `body.attachments` bindings
+and loose-file shape on both chat endpoints. Every path is resolved against the
+session workspace with canonical/symlink containment; missing or out-of-workspace
+paths are dropped. The durable user input preserves the raw visible prompt as its
+first text block and appends validated attachment relationships as a separate
+model-only text block. History hides only that context block, then merges the
+validated attachment metadata back into the matching user message for the UI.
+Sidecar caches are scoped by tenant data root and `clientRequestId` deduplicates
+retried metadata writes. Sidecar and SQLite commits are not a distributed
+transaction; unmatched sidecar entries remain inert. Inline `body.images` still
+returns 400 and no native vision or provider-rejection fallback is claimed yet.
 
 Durable questions use the stable operation ID
 `ask_user_question:<sessionId>:<toolCallId>`. Records live under the
@@ -185,7 +199,9 @@ It covers concurrent session/tenant roots, isolated configured model/auth
 runtimes, request deduplication across idle close/reopen, stable committed
 revisions, busy-delete rejection, legacy JSONL non-interference,
 workspace/symlink containment, read-only fail-closed behavior, workspace
-`agent.md`/private-skill injection and reload, replay-safe L1/L2 execution, L1 event/profile crash-gap recovery, deterministic L2 archive,
+`agent.md`/private-skill injection and reload, attachment-context history
+projection, tenant-scoped attachment sidecar caching and request-ID dedup,
+replay-safe L1/L2 execution, L1 event/profile crash-gap recovery, deterministic L2 archive,
 OCR completion caching and job-ID resume, channel payload/completion caching,
 verified tenant channel rebinding, and recovery after real child processes are
 killed with `SIGKILL` during a delayed model response, during an interrupted
@@ -203,10 +219,11 @@ OCR Authorization headers, cross-tenant 404s, completed request-ID retries,
 lack of legacy JSONL creation, SSE disconnect/reconnect replay, tenant-local
 L1/L2/OCR writes through the authenticated HTTP boundary, original-run question
 answers with cross-tenant 404 and stale-turn 409 responses, non-streaming
-`no_ui` question resolution, and scoped cancellation with cross-tenant abort
-denial and pending-card cleanup.
+`no_ui` question resolution, streaming/non-streaming validated workspace
+attachments with raw-text history and out-of-workspace path rejection, and scoped
+cancellation with cross-tenant abort denial and pending-card cleanup.
 
 Still pending: application-persisted SSE replay after restart, durable
-permissions, attachments, direct durable profile patch/update, outbox and
+permissions, inline images, direct durable profile patch/update, outbox and
 question retention/cleanup, scheduler integration, and sharded single-owner
 deployment.

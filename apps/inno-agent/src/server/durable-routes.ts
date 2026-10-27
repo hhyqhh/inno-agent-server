@@ -1,6 +1,7 @@
 import type { IncomingMessage as HttpReq, ServerResponse } from "node:http";
 import { unavailableContextUsage } from "../agent/context-usage.js";
-import { DurableRuntimeDisabledError, DurableSessionBusyError, type DurableSessionService } from "../agent/durable-session-service.js";
+import type { UserInput } from "@earendil-works/pi-durable";
+import { DurableRuntimeDisabledError, DurableSessionBusyError, type DurableSessionService, type PreparedDurableAttachments } from "../agent/durable-session-service.js";
 import { DurableSseProjector } from "../agent/durable-projection.js";
 import type { QuestionBridgeResult } from "../agent/question-bridge.js";
 import { hasCompleteTurnAfterBaseline, streamRegistry, type SessionStreamState } from "../chat/stream-registry.js";
@@ -102,11 +103,22 @@ function startSse(res: ServerResponse): void {
 	});
 }
 
+function durableUserInput(prompt: string, attachments: PreparedDurableAttachments | null): UserInput {
+	if (!attachments) return prompt;
+	// The model receives both blocks. The first preserves the visible/raw user
+	// prompt; the second carries validated workspace attachment relationships.
+	return [
+		{ type: "text", text: prompt },
+		{ type: "text", text: attachments.context },
+	];
+}
+
 async function streamDurableTurn(
 	req: HttpReq,
 	state: SessionStreamState,
 	prompt: string,
 	service: DurableSessionService,
+	attachments: PreparedDurableAttachments | null,
 ): Promise<void> {
 	const projector = new DurableSseProjector();
 	let lease: Awaited<ReturnType<DurableSessionService["lease"]>> | undefined;
@@ -137,7 +149,7 @@ async function streamDurableTurn(
 			}, { persisted: false });
 			return;
 		}
-		const submission = await lease.runtime.submit(prompt, state.clientRequestId);
+		const submission = await lease.runtime.submit(durableUserInput(prompt, attachments), state.clientRequestId);
 		service.noteSubmission(req, state.sessionId, prompt);
 		// Cancellation can race durable admission. Re-apply the abort after the
 		// submission commits so an admitted queued input cannot escape it.
@@ -262,8 +274,8 @@ export async function handleDurableChatRoutes(
 		const prompt = typeof body.prompt === "string" ? body.prompt : "";
 		const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
 		if (!prompt || !sessionId) { json(res, 400, { error: "Missing prompt or sessionId" }); return true; }
-		if (Array.isArray(body.images) && body.images.length > 0 || body.attachments) {
-			json(res, 400, { error: "Durable chat attachments are not enabled in this migration slice" });
+		if (Array.isArray(body.images) && body.images.length > 0) {
+			json(res, 400, { error: "Durable inline images are not enabled in this migration slice" });
 			return true;
 		}
 		if (streamRegistry.getActiveForSession(sessionId)) {
@@ -274,6 +286,7 @@ export async function handleDurableChatRoutes(
 			json(res, 409, { error: "This session has a pending question; answer it through the streaming UI" });
 			return true;
 		}
+		const attachments = ctx.service.prepareAttachments(req, sessionId, body.attachments);
 		let lease: Awaited<ReturnType<DurableSessionService["lease"]>> | undefined;
 		try {
 			lease = await ctx.service.lease(req, sessionId);
@@ -281,7 +294,8 @@ export async function handleDurableChatRoutes(
 				? body.clientRequestId
 				: `http-${crypto.randomUUID()}`;
 			lease.runtime.bindQuestionTurn({ turnId: requestId, noUi: true });
-			const submission = await lease.runtime.submit(prompt, requestId);
+			if (attachments) ctx.service.recordAttachments(req, sessionId, attachments, prompt, requestId);
+			const submission = await lease.runtime.submit(durableUserInput(prompt, attachments), requestId);
 			ctx.service.noteSubmission(req, sessionId, prompt);
 			const result = await lease.runtime.waitForSubmission(submission.id);
 			if (result.status !== "done") throw new Error(`Durable submission was unanswered: ${result.reason}`);
@@ -305,8 +319,8 @@ export async function handleDurableChatRoutes(
 		json(res, 400, { error: "Missing prompt, sessionId or clientRequestId" });
 		return true;
 	}
-	if (Array.isArray(body.images) && body.images.length > 0 || body.attachments) {
-		json(res, 400, { error: "Durable chat attachments are not enabled in this migration slice" });
+	if (Array.isArray(body.images) && body.images.length > 0) {
+		json(res, 400, { error: "Durable inline images are not enabled in this migration slice" });
 		return true;
 	}
 	if (streamRegistry.getActiveForSession(sessionId)) {
@@ -316,6 +330,7 @@ export async function handleDurableChatRoutes(
 	const workspaceId = ctx.workspaceRegistry.getSessionWorkspaceId(sessionId);
 	const workspaceRoot = ctx.workspaceRegistry.resolveWorkspaceDir(workspaceId);
 	if (!workspaceRoot) { json(res, 404, { error: "Session workspace not found" }); return true; }
+	const attachments = ctx.service.prepareAttachments(req, sessionId, body.attachments);
 	let baseline: Awaited<ReturnType<DurableSessionService["snapshot"]>>;
 	try {
 		baseline = await ctx.service.snapshot(req, sessionId);
@@ -330,7 +345,7 @@ export async function handleDurableChatRoutes(
 			clientRequestId,
 			workspaceId,
 			workspaceRoot,
-			inputSnapshot: { prompt, submittedAt: new Date().toISOString(), images: [] },
+			inputSnapshot: { prompt, submittedAt: new Date().toISOString(), images: [], ...(attachments ? { attachments: attachments.attachments } : {}) },
 			baselineMessageCount: baseline.messages.length,
 			baselineSessionRevision: baseline.revision,
 		});
@@ -338,6 +353,7 @@ export async function handleDurableChatRoutes(
 		json(res, 409, { error: "Session already has an active chat turn" });
 		return true;
 	}
+	if (attachments) ctx.service.recordAttachments(req, sessionId, attachments, prompt, clientRequestId);
 	streamRegistry.publishStreamEvent(state, { type: "stream_state", status: "queued" });
 	startSse(res);
 	let ended = false;
@@ -359,7 +375,7 @@ export async function handleDurableChatRoutes(
 		clearInterval(heartbeat);
 		unsubscribe();
 	});
-	await streamDurableTurn(req, state, prompt, ctx.service);
+	await streamDurableTurn(req, state, prompt, ctx.service, attachments);
 	finish();
 	streamRegistry.cleanupExpiredTurns();
 	return true;

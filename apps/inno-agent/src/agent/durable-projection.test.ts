@@ -1,6 +1,7 @@
-import type { AgentEvent } from "@earendil-works/pi-durable";
+import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
-import { DurableSseProjector } from "./durable-projection.js";
+import { buildAttachmentContext } from "../server/attachments.js";
+import { durableEntriesToMessages, DurableSseProjector } from "./durable-projection.js";
 
 function event(value: Record<string, unknown>): AgentEvent {
 	return value as unknown as AgentEvent;
@@ -60,5 +61,23 @@ describe("DurableSseProjector", () => {
 			type: "message_update",
 			changes: [{ type: "message", message: { role: "assistant", content: [] } }],
 		}))).toEqual([]);
+	});
+
+	it("hides the durable attachment context while preserving the raw prompt", () => {
+		const context = buildAttachmentContext({
+			bindings: [{ word: "资料", wordIndex: 0, files: [{ path: "notes.pdf", kind: "pdf", source: "workspace" }] }],
+			loose: [],
+		});
+		const entries = [{
+			id: 1,
+			model: [{
+				role: "user",
+				content: [{ type: "text", text: "总结资料" }, { type: "text", text: context }],
+				timestamp: 1,
+			}],
+		}] as unknown as EntryRecord[];
+		expect(durableEntriesToMessages(entries)).toEqual([
+			{ role: "user", content: "总结资料", timestamp: 1, entryId: "1" },
+		]);
 	});
 });

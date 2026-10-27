@@ -257,4 +257,22 @@ describe("attachments sidecar store", () => {
 		const kept = mergeSessionAttachments(dataDir, "s2", [{ role: "user", content: "p", timestamp: 2 }]);
 		expect(kept[0].attachments).toEqual(attachments);
 	});
+
+	it("scopes the cache by data root and deduplicates durable request IDs", () => {
+		const otherRoot = join(dataDir, "tenant-b");
+		mkdirSync(join(otherRoot, "sessions"), { recursive: true });
+		const otherAttachments: ChatAttachments = { bindings: [], loose: [{ path: "b.txt", kind: "file", source: "workspace" }] };
+		recordSessionAttachments(dataDir, "shared-session", { promptContent: "p", attachments, timestamp: 1, requestId: "request-a" });
+		recordSessionAttachments(dataDir, "shared-session", { promptContent: "p", attachments, timestamp: 2, requestId: "request-a" });
+		recordSessionAttachments(otherRoot, "shared-session", { promptContent: "p", attachments: otherAttachments, timestamp: 3, requestId: "request-b" });
+
+		const first = mergeSessionAttachments(dataDir, "shared-session", [
+			{ role: "user", content: "p", timestamp: 1 },
+			{ role: "user", content: "p", timestamp: 2 },
+		]);
+		expect(first[0].attachments).toEqual(attachments);
+		expect(first[1].attachments).toBeUndefined();
+		const second = mergeSessionAttachments(otherRoot, "shared-session", [{ role: "user", content: "p", timestamp: 3 }]);
+		expect(second[0].attachments).toEqual(otherAttachments);
+	});
 });

@@ -11,6 +11,18 @@ import { getRequestTenant } from "../tenants/http.js";
 import { resolveRequestTenantDataRoot } from "../tenants/paths.js";
 import type { TenantStore } from "../tenants/store.js";
 import type { SessionSummary } from "../server/session-model.js";
+import {
+	buildAttachmentContext,
+	parseChatAttachments,
+	validateChatAttachments,
+	type ChatAttachments,
+} from "../server/attachments.js";
+import {
+	clearSessionAttachments,
+	mergeSessionAttachments,
+	recordSessionAttachments,
+} from "../server/attachments-store.js";
+import { clearWorkspaceActivity, recordWorkspaceAttachmentActivity } from "../server/workspace-activity-store.js";
 import { createConfiguredDurableModels } from "./durable-models.js";
 import { buildDurableInstructions } from "./durable-memory.js";
 import { durableEntriesToMessages } from "./durable-projection.js";
@@ -43,6 +55,13 @@ export interface DurableSessionSummary extends SessionSummary {
 export interface DurableSessionLease {
 	runtime: DurableSessionRuntime;
 	release(): Promise<void>;
+}
+
+export interface PreparedDurableAttachments {
+	attachments: ChatAttachments;
+	context: string;
+	workspaceId: string;
+	workspaceRoot: string;
 }
 
 interface RuntimeEntry {
@@ -277,6 +296,36 @@ export class DurableSessionService {
 		});
 	}
 
+	prepareAttachments(req: IncomingMessage, id: string, raw: unknown): PreparedDurableAttachments | null {
+		const parsed = parseChatAttachments(raw);
+		if (!parsed) return null;
+		const record = this.get(req, id);
+		if (!record) throw new Error("Durable session not found");
+		const workspaceRoot = this.options.resolveWorkspaceDir(id, record.workspaceId);
+		if (!workspaceRoot) throw new Error(`Durable session workspace not found: ${record.workspaceId}`);
+		const attachments = validateChatAttachments(parsed, workspaceRoot);
+		const context = buildAttachmentContext(attachments);
+		if (!context) return null;
+		return { attachments, context, workspaceId: record.workspaceId, workspaceRoot };
+	}
+
+	recordAttachments(req: IncomingMessage, id: string, prepared: PreparedDurableAttachments, prompt: string, requestId: string): void {
+		const dataRoot = resolveRequestTenantDataRoot(req, this.options.dataDir);
+		recordSessionAttachments(dataRoot, id, {
+			promptContent: prompt,
+			attachments: prepared.attachments,
+			timestamp: Date.now(),
+			workspaceId: prepared.workspaceId,
+			requestId,
+		});
+		recordWorkspaceAttachmentActivity(dataRoot, {
+			sessionId: id,
+			workspaceId: prepared.workspaceId,
+			workspaceRoot: prepared.workspaceRoot,
+			attachments: prepared.attachments,
+		});
+	}
+
 	async snapshot(req: IncomingMessage, id: string): Promise<{
 		summary: DurableSessionSummary;
 		messages: ReturnType<typeof durableEntriesToMessages>;
@@ -286,7 +335,11 @@ export class DurableSessionService {
 		const lease = await this.lease(req, id);
 		try {
 			const snapshot = await lease.runtime.snapshot();
-			const messages = durableEntriesToMessages(snapshot.entries);
+			const messages = mergeSessionAttachments(
+				resolveRequestTenantDataRoot(req, this.options.dataDir),
+				id,
+				durableEntriesToMessages(snapshot.entries),
+			);
 			const record = this.get(req, id);
 			if (!record) throw new Error("Durable session not found");
 			const lastMessageAt = messages.at(-1)?.timestamp;
@@ -405,6 +458,9 @@ export class DurableSessionService {
 		}
 		this.writeCatalog(req, this.catalog(req).filter((record) => record.id !== id));
 		this.questionStores.delete(key);
+		const dataRoot = resolveRequestTenantDataRoot(req, this.options.dataDir);
+		clearSessionAttachments(dataRoot, id);
+		clearWorkspaceActivity(dataRoot, id);
 		await rm(join(this.root(req), "storage", id), { recursive: true, force: true });
 		await rm(this.questionDir(req, id), { recursive: true, force: true });
 	}
