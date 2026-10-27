@@ -1,8 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import {
-	formatSkillsForPrompt,
-	loadSkillsFromDir,
 	type ExtensionAPI,
 	type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
@@ -38,6 +34,7 @@ import type { RunRecordStore } from "../terminal/run-record-store.js";
 import { resolveCurrentTenantDataDir, resolveCurrentTenantDataRoot } from "../tenants/paths.js";
 import { getCurrentTenant } from "../tenants/current.js";
 import { saveTenantConfig } from "../tenants/config.js";
+import { buildWorkspaceContextSections } from "./workspace-context.js";
 
 const INNO_VERSION = "0.0.1";
 
@@ -66,11 +63,6 @@ export interface InnoExtensionDeps {
 	sharedExtensionsDisabled?: boolean;
 }
 
-/** File name for per-workspace agent context, loaded into the prompt each turn. */
-const WORKSPACE_AGENT_FILE = "agent.md";
-/** Directory holding per-workspace private skills (merged with global skills). */
-const WORKSPACE_SKILLS_DIR = ".skills";
-
 /**
  * Resolve the directory of the workspace bound to the active session.
  * Server: maps the current session id → workspace via the registry.
@@ -91,46 +83,6 @@ function resolveActiveWorkspaceDir(paths: RuntimePaths, deps?: InnoExtensionDeps
 		}
 	}
 	return paths.workspaceDir;
-}
-
-/**
- * Build extra system-prompt sections for the active workspace:
- * - the workspace's `agent.md` content (if present)
- * - a private-skills block discovered under `<workspace>/.skills`
- */
-function buildWorkspaceContextSections(workspaceDir: string): string[] {
-	const sections: string[] = [];
-
-	const agentFile = join(workspaceDir, WORKSPACE_AGENT_FILE);
-	if (existsSync(agentFile)) {
-		try {
-			const content = readFileSync(agentFile, "utf-8").trim();
-			if (content) {
-				sections.push(`# 工作区上下文 (${WORKSPACE_AGENT_FILE})\n\n${content}`);
-			}
-		} catch (err) {
-			logger.warn({ err }, "failed to read workspace agent.md");
-			// Ignore unreadable agent.md
-		}
-	}
-
-	const skillsDir = join(workspaceDir, WORKSPACE_SKILLS_DIR);
-	if (existsSync(skillsDir)) {
-		try {
-			const { skills } = loadSkillsFromDir({ dir: skillsDir, source: "path" });
-			if (skills.length > 0) {
-				const block = formatSkillsForPrompt(skills);
-				if (block.trim()) {
-					sections.push(`# 本工作区私有技能\n${block}`);
-				}
-			}
-		} catch (err) {
-			logger.warn({ err }, "failed to discover workspace skills");
-			// Ignore skill discovery failures
-		}
-	}
-
-	return sections;
 }
 
 function formatWorkspaceFileInstructions(workspaceDir: string): string {

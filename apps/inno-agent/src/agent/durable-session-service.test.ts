@@ -214,6 +214,56 @@ describe("DurableSessionService", () => {
 		});
 	});
 
+	it("loads workspace agent and private-skill context afresh on reopen", async () => {
+		const base = root();
+		const workspace = join(base, "workspace");
+		mkdirSync(join(workspace, ".skills", "helper"), { recursive: true });
+		writeFileSync(join(workspace, "agent.md"), "先使用工作区术语表。 ");
+		writeFileSync(join(workspace, ".skills", "helper", "SKILL.md"), [
+			"---",
+			"name: durable-helper",
+			"description: 工作区专用技能",
+			"---",
+			"",
+			"# Helper",
+			"遵循本工作区的特殊工作流程。",
+		].join("\n"));
+		const faux = fauxProvider();
+		const instructionSnapshots: string[] = [];
+		const service = new DurableSessionService({
+			dataDir: base,
+			getLocalConfig: () => config("local"),
+			enabled: true,
+			resolveWorkspaceDir: () => workspace,
+			openRuntime: async (options) => {
+				instructionSnapshots.push(options.instructions ?? "");
+				const models = createModels();
+				models.setProvider(faux.provider);
+				return DurableSessionRuntime.open({ ...options, models, model: { provider: faux.provider.id, modelId: faux.getModel().id } });
+			},
+		});
+		services.push(service);
+		await runWithoutTenantContext(async () => {
+			const req = { headers: {} } as IncomingMessage;
+			const session = service.create(req, { workspaceId: "workspace" });
+			const reopen = async () => {
+				const lease = await service.lease(req, session.id);
+				await lease.release();
+			};
+			await reopen();
+			expect(instructionSnapshots[0]).toContain("# 工作区上下文 (agent.md)");
+			expect(instructionSnapshots[0]).toContain("先使用工作区术语表。");
+			expect(instructionSnapshots[0]).toContain("# 本工作区私有技能");
+			expect(instructionSnapshots[0]).toContain("durable-helper");
+			expect(instructionSnapshots[0]).toContain("工作区专用技能");
+
+			writeFileSync(join(workspace, "agent.md"), "使用更新后的工作区规则。");
+			await reopen();
+			expect(instructionSnapshots[1]).toContain("使用更新后的工作区规则。");
+			expect(instructionSnapshots[1]).not.toContain("先使用工作区术语表。");
+		});
+	});
+
 	it("requires the explicit runtime gate and leaves legacy JSONL untouched", async () => {
 		const base = root();
 		const service = new DurableSessionService({

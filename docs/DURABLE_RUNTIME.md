@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: durable turn cancellation (3G)
+## Current stage: workspace prompt context (3H)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -61,6 +61,8 @@ The current durable slice supports:
 - replay-safe, tenant-local L1 context/event/evidence tools and L2 archive,
   query, and lint tools;
 - tenant-local L1 profile/recent-event context in durable instructions;
+- the same workspace `agent.md` and `.skills/` prompt sections as legacy,
+  reloaded whenever the durable runtime opens;
 - `ocr_image` with tenant credentials, canonical workspace file checks,
   persisted job-ID checkpoints, and cached final markdown;
 - `send_file_to_channel` with a tenant-local persistent outbox, payload
@@ -76,8 +78,9 @@ disabled. Direct `patch_learner_profile` and `update_learner_profile` mutations
 are not exposed on the durable path yet. Attachments, durable permissions,
 branching/editing, showcase export, and generated topics are not implemented on
 this path yet; unsupported operations fail explicitly rather than falling back
-to legacy execution. The workspace `agent.md` and private-skill prompt context
-are not injected yet.
+to legacy execution. Workspace-private skills are injected as prompt resources;
+they do not alter the process-global PI resource loader or enable otherwise
+unsupported durable tools.
 
 ## Recovery and delivery semantics
 
@@ -181,8 +184,8 @@ The PostgreSQL-free suite uses only `fauxProvider()` and temporary directories.
 It covers concurrent session/tenant roots, isolated configured model/auth
 runtimes, request deduplication across idle close/reopen, stable committed
 revisions, busy-delete rejection, legacy JSONL non-interference,
-workspace/symlink containment, read-only fail-closed behavior, replay-safe
-L1/L2 execution, L1 event/profile crash-gap recovery, deterministic L2 archive,
+workspace/symlink containment, read-only fail-closed behavior, workspace
+`agent.md`/private-skill injection and reload, replay-safe L1/L2 execution, L1 event/profile crash-gap recovery, deterministic L2 archive,
 OCR completion caching and job-ID resume, channel payload/completion caching,
 verified tenant channel rebinding, and recovery after real child processes are
 killed with `SIGKILL` during a delayed model response, during an interrupted
@@ -204,6 +207,6 @@ answers with cross-tenant 404 and stale-turn 409 responses, non-streaming
 denial and pending-card cleanup.
 
 Still pending: application-persisted SSE replay after restart, durable
-permissions, workspace prompt context and attachments, direct durable profile
-patch/update, outbox and question retention/cleanup, scheduler integration, and
-sharded single-owner deployment.
+permissions, attachments, direct durable profile patch/update, outbox and
+question retention/cleanup, scheduler integration, and sharded single-owner
+deployment.

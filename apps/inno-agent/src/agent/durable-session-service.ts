@@ -18,6 +18,7 @@ import { DurableQuestionStore } from "./durable-questions.js";
 import { DurableSessionRuntime } from "./durable-runtime.js";
 import type { PersistedQuestion, QuestionBridgeResult, QuestionResponseStatus } from "./question-bridge.js";
 import { INNO_SYSTEM_PROMPT } from "./system-prompt.js";
+import { buildWorkspaceContextSections } from "./workspace-context.js";
 
 const DURABLE_ID_PATTERN = /^durable-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -349,7 +350,10 @@ export class DurableSessionService {
 					return this.openRuntime({
 						storagePath: this.storagePath(req, id),
 						...selection,
-						instructions: buildDurableInstructions(INNO_SYSTEM_PROMPT, memory),
+						instructions: [
+							buildDurableInstructions(INNO_SYSTEM_PROMPT, memory),
+							...buildWorkspaceContextSections(workspaceDir),
+						].join("\n\n"),
 						workspaceDir,
 						readOnlyTools: true,
 						memory,
