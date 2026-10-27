@@ -267,7 +267,7 @@ describe("DurableSessionService", () => {
 		});
 	});
 
-	it("indexes committed durable snapshots for L3 recall outside the current session", async () => {
+	it("indexes durable snapshots and prepares recall outside the current session", async () => {
 		await runWithoutTenantContext(async () => {
 			const base = root();
 			l3Dirs.push(join(base, "l3"));
@@ -297,6 +297,11 @@ describe("DurableSessionService", () => {
 			const recalled = await memory.recall("机器学习", "durable-current");
 			expect(recalled.some((result) => result.sessionId === session.id)).toBe(true);
 			expect(await memory.recall("机器学习", session.id)).toEqual([]);
+			const next = service.create(req, { workspaceId: "workspace" });
+			const context = await service.prepareRecallContext(req, next.id, "机器学习");
+			expect(context).toContain("# 相关历史对话");
+			expect(context).toContain("之前学习了机器学习");
+			expect(await service.prepareRecallContext(req, session.id, "机器学习")).toBe("");
 		});
 	});
 

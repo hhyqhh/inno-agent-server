@@ -1317,7 +1317,7 @@ describe("durable session HTTP boundary", () => {
 			&& request.body.includes("请用一句简短的中文短语概括"))).toHaveLength(2);
 	}, 60_000);
 
-	it("indexes durable history for tenant-scoped L3 recall", async () => {
+	it("indexes and automatically injects durable history for tenant-scoped L3 recall", async () => {
 		const [cookieA, cookieB] = await Promise.all([
 			registerUser("durable-l3-index-a@example.com"),
 			registerUser("durable-l3-index-b@example.com"),
@@ -1343,8 +1343,8 @@ describe("durable session HTTP boundary", () => {
 			});
 			expect(response.status).toBe(200);
 		};
-		const [historyA, historyB, recallA, recallB] = await Promise.all([
-			createDurable(cookieA), createDurable(cookieB), createDurable(cookieA), createDurable(cookieB),
+		const [historyA, historyB, recallA, recallB, autoA] = await Promise.all([
+			createDurable(cookieA), createDurable(cookieB), createDurable(cookieA), createDurable(cookieB), createDurable(cookieA),
 		]);
 		await Promise.all([
 			chat(cookieA, historyA.id, "durable-topic-first-a", "durable-l3-history-source-a"),
@@ -1362,6 +1362,18 @@ describe("durable session HTTP boundary", () => {
 		expect(finalB).toBeDefined();
 		expect(finalA?.body).not.toContain("durable-topic-first-b");
 		expect(finalB?.body).not.toContain("durable-topic-first-a");
+
+		await chat(cookieA, autoA.id, "durable-topic-first followup", "durable-l3-auto-request");
+		const autoRequest = providerRequests.find((request) => request.authorization === "Bearer durable-l3-index-a-secret"
+			&& request.body.includes("durable-topic-first followup"));
+		expect(autoRequest?.body).toContain("# 相关历史对话");
+		expect(autoRequest?.body).toContain("durable-topic-first-a");
+		expect(autoRequest?.body).not.toContain("durable-topic-first-b");
+		const autoDetail = await (await api(cookieA, `/api/sessions/${autoA.id}`)).json() as {
+			messages: Array<{ role: string; content: string }>;
+		};
+		expect(autoDetail.messages.find((message) => message.role === "user")?.content).toBe("durable-topic-first followup");
+		expect(autoDetail.messages.find((message) => message.role === "user")?.content).not.toContain("# 相关历史对话");
 	}, 60_000);
 
 	it("passes validated attachments and inline images without exposing model-only context as user text", async () => {

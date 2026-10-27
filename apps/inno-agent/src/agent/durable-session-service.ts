@@ -34,7 +34,7 @@ import { DurableSessionRuntime } from "./durable-runtime.js";
 import type { PersistedQuestion, QuestionBridgeResult, QuestionResponseStatus } from "./question-bridge.js";
 import { INNO_SYSTEM_PROMPT } from "./system-prompt.js";
 import { buildWorkspaceContextSections } from "./workspace-context.js";
-import { ScopedL3Memory } from "../memory/l3/l3-tools.js";
+import { formatRecallForPrompt, ScopedL3Memory } from "../memory/l3/l3-tools.js";
 import { logger } from "../logger.js";
 
 const DURABLE_ID_PATTERN = /^durable-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -465,14 +465,34 @@ export class DurableSessionService {
 		}
 	}
 
+	/** Build threshold-gated recall as separate model-only input. The visible
+	 * prompt stays untouched and the current durable session is always excluded. */
+	async prepareRecallContext(req: IncomingMessage, id: string, prompt: string): Promise<string> {
+		if (!this.get(req, id)) throw new Error("Durable session not found");
+		try {
+			const config = resolveCurrentTenantConfig(this.options.dataDir, this.options.getLocalConfig());
+			if (config.memory?.l3Enabled === false || !prompt.trim()) return "";
+			const scoped = new ScopedL3Memory(this.options.dataDir, join(this.options.dataDir, "sessions"));
+			const tenant = getRequestTenant(req);
+			if (tenant && !this.options.tenantStore) throw new Error("Authenticated durable L3 recall requires a tenant store");
+			const recall = () => scoped.recall(prompt, id);
+			const results = tenant
+				? await runInTenantContext(tenant, this.options.tenantStore!, recall)
+				: await runWithoutTenantContext(recall);
+			return formatRecallForPrompt(results);
+		} catch (error) {
+			logger.warn({ err: error, sessionId: id }, "durable L3 recall failed (non-fatal)");
+			return "";
+		}
+	}
+
 	private async indexL3Snapshot(
 		req: IncomingMessage,
 		id: string,
 		messages: SessionMessageSummary[],
 		revision: number,
 	): Promise<void> {
-		const config = resolveCurrentTenantConfig(this.options.dataDir, this.options.getLocalConfig());
-		if (config.memory?.l3Enabled === false) return;
+		// Indexing continues while recall is disabled so re-enabling L3 has no gap.
 		const scoped = new ScopedL3Memory(this.options.dataDir, join(this.options.dataDir, "sessions"));
 		const tenant = getRequestTenant(req);
 		try {

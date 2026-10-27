@@ -128,6 +128,13 @@ function formatWhen(ts: number): string {
 	}
 }
 
+const RECALL_PROMPT_PREFIX = "# 相关历史对话（来自过往会话，仅供参考）";
+
+/** Identify the model-only recall block in structured durable user input. */
+export function isRecallPromptContext(text: string): boolean {
+	return text.startsWith(RECALL_PROMPT_PREFIX);
+}
+
 /**
  * Render recall results as an injectable system-prompt section. Returns "" when
  * there is nothing to inject, so the caller can append unconditionally.
@@ -135,7 +142,7 @@ function formatWhen(ts: number): string {
 export function formatRecallForPrompt(results: RecallResult[]): string {
 	if (results.length === 0) return "";
 	const lines: string[] = [
-		"# 相关历史对话（来自过往会话，仅供参考）",
+		RECALL_PROMPT_PREFIX,
 		"",
 		"以下片段来自你与该用户的早期对话，按相关度排序。若与当前问题相关可参考，不相关请忽略：",
 		"",

@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: durable-history L3 indexing (3N)
+## Current stage: automatic durable L3 recall injection (3O)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -61,9 +61,9 @@ The current durable slice supports:
 - replay-safe, tenant-local L1 context/event/evidence tools, direct profile
   patch/update mutations, and L2 archive, query, and lint tools;
 - tenant-local L1 profile/recent-event context in durable instructions;
-- explicit `l3_recall` over ownership-filtered legacy and committed durable
-  history, with verified tenant ALS restored when durable work resumes outside
-  the HTTP request;
+- explicit `l3_recall` and threshold-gated automatic recall over
+  ownership-filtered legacy and committed durable history, with verified tenant
+  ALS restored when durable work resumes outside the HTTP request;
 - the same workspace `agent.md` and `.skills/` prompt sections as legacy,
   reloaded whenever the durable runtime opens;
 - `ocr_image` with tenant credentials, canonical workspace file checks,
@@ -134,8 +134,14 @@ thinking, and tool payloads do not enter the index. Snapshots are indexed when
 history is read or a turn completes; recall does **not** bulk-open every durable
 runtime, which could otherwise resume unrelated unfinished work. Authenticated
 indexing and recall re-enter the verified tenant context and check session
-ownership. Index updates are idempotent derived state, so replay is safe.
-Automatic per-turn threshold-gated recall injection remains pending.
+ownership. Index updates are idempotent derived state and continue while recall
+is disabled, so re-enabling L3 has no indexing gap. Before each HTTP submission,
+the same threshold-gated recall and formatting used by legacy runs produces a
+separate model-only text block. The raw prompt remains the first user block;
+history projection and L3 indexing hide the injected recall section. The block
+is committed with the durable input, so recovery reuses the original context
+without another recall or a synthetic user turn. Recall failure is best-effort
+and leaves the prompt unchanged.
 
 Durable topics share the legacy excerpt, cleaning, and fallback helpers. The
 first submission records a generated first-message preview; a completed turn
@@ -251,7 +257,8 @@ workspace/symlink containment, read-only fail-closed behavior, workspace
 projection, inline-image retry path stability and OCR hint construction,
 tenant-scoped attachment/image sidecar caching and request-ID dedup,
 replay-safe L1/L2 execution, explicit L3 recall, revision-idempotent durable-history
-indexing with current-session exclusion, direct profile patch/update retry dedup,
+indexing with current-session exclusion and hidden automatic-recall projection,
+direct profile patch/update retry dedup,
 durable topic upgrade dedup, pinned-model selection, and manual-rename protection,
 L1 event/profile crash-gap recovery, deterministic L2 archive,
 OCR completion caching and job-ID resume, channel payload/completion caching,
@@ -270,8 +277,9 @@ creation, concurrent authenticated durable sessions, per-tenant provider and
 OCR Authorization headers, cross-tenant 404s, completed request-ID retries,
 lack of legacy JSONL creation, SSE disconnect/reconnect replay, tenant-local
 L1/L2/OCR writes, replay-safe direct profile patch/update, and tenant-scoped L3
-recall through the authenticated HTTP boundary, tenant-isolated recall of
-previously committed durable sessions, automatic and manual durable
+recall through the authenticated HTTP boundary, tenant-isolated explicit and
+automatic recall of previously committed durable sessions without exposing
+injected context as user history, automatic and manual durable
 topic generation with per-tenant credentials and pinned-model selection,
 original-run question
 answers with cross-tenant 404 and stale-turn 409 responses, non-streaming
@@ -283,4 +291,4 @@ cleanup.
 
 Still pending: application-persisted SSE replay after restart, durable
 permissions, provider-rejection image fallback, outbox and
-question retention/cleanup, automatic durable recall injection, scheduler integration, and sharded single-owner deployment.
+question retention/cleanup, scheduler integration, and sharded single-owner deployment.

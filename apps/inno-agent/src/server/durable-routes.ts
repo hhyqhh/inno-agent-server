@@ -115,12 +115,14 @@ function durableUserInput(
 	prompt: string,
 	attachments: PreparedDurableAttachments | null,
 	images: PreparedDurableImages | null,
+	recallContext: string,
 ): UserInput {
-	if (!attachments && !images) return prompt;
+	if (!attachments && !images && !recallContext) return prompt;
 	const content: Exclude<UserInput, string> = [{ type: "text", text: prompt }];
 	content.push(...(images?.nativeImages ?? []));
 	if (images?.fallbackContext) content.push({ type: "text", text: images.fallbackContext });
 	if (attachments) content.push({ type: "text", text: attachments.context });
+	if (recallContext) content.push({ type: "text", text: recallContext });
 	return content;
 }
 
@@ -131,6 +133,7 @@ async function streamDurableTurn(
 	service: DurableSessionService,
 	attachments: PreparedDurableAttachments | null,
 	images: PreparedDurableImages | null,
+	recallContext: string,
 ): Promise<void> {
 	const projector = new DurableSseProjector();
 	let lease: Awaited<ReturnType<DurableSessionService["lease"]>> | undefined;
@@ -161,7 +164,7 @@ async function streamDurableTurn(
 			}, { persisted: false });
 			return;
 		}
-		const submission = await lease.runtime.submit(durableUserInput(prompt, attachments, images), state.clientRequestId);
+		const submission = await lease.runtime.submit(durableUserInput(prompt, attachments, images, recallContext), state.clientRequestId);
 		service.noteSubmission(req, state.sessionId, prompt);
 		// Cancellation can race durable admission. Re-apply the abort after the
 		// submission commits so an admitted queued input cannot escape it.
@@ -300,12 +303,13 @@ export async function handleDurableChatRoutes(
 			: `http-${crypto.randomUUID()}`;
 		const attachments = ctx.service.prepareAttachments(req, sessionId, body.attachments);
 		const images = ctx.service.prepareImages(req, sessionId, body.images, requestId);
+		const recallContext = await ctx.service.prepareRecallContext(req, sessionId, prompt);
 		let lease: Awaited<ReturnType<DurableSessionService["lease"]>> | undefined;
 		try {
 			lease = await ctx.service.lease(req, sessionId);
 			lease.runtime.bindQuestionTurn({ turnId: requestId, noUi: true });
 			ctx.service.recordTurnMetadata(req, sessionId, attachments, images, prompt, requestId);
-			const submission = await lease.runtime.submit(durableUserInput(prompt, attachments, images), requestId);
+			const submission = await lease.runtime.submit(durableUserInput(prompt, attachments, images, recallContext), requestId);
 			ctx.service.noteSubmission(req, sessionId, prompt);
 			const result = await lease.runtime.waitForSubmission(submission.id);
 			if (result.status !== "done") throw new Error(`Durable submission was unanswered: ${result.reason}`);
@@ -346,6 +350,7 @@ export async function handleDurableChatRoutes(
 		json(res, errorStatus(error), { error: error instanceof Error ? error.message : String(error) });
 		return true;
 	}
+	const recallContext = await ctx.service.prepareRecallContext(req, sessionId, prompt);
 	let state: SessionStreamState;
 	try {
 		state = streamRegistry.createTurn({
@@ -383,7 +388,7 @@ export async function handleDurableChatRoutes(
 		clearInterval(heartbeat);
 		unsubscribe();
 	});
-	await streamDurableTurn(req, state, prompt, ctx.service, attachments, images);
+	await streamDurableTurn(req, state, prompt, ctx.service, attachments, images, recallContext);
 	finish();
 	streamRegistry.cleanupExpiredTurns();
 	return true;

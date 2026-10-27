@@ -1,6 +1,7 @@
 import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { buildAttachmentContext } from "../server/attachments.js";
+import { formatRecallForPrompt } from "../memory/l3/recall.js";
 import { durableEntriesToMessages, DurableSseProjector } from "./durable-projection.js";
 
 function event(value: Record<string, unknown>): AgentEvent {
@@ -63,7 +64,7 @@ describe("DurableSseProjector", () => {
 		}))).toEqual([]);
 	});
 
-	it("hides model-only attachment and image-fallback context while preserving the raw prompt", () => {
+	it("hides model-only attachment, image-fallback, and recall context while preserving the raw prompt", () => {
 		const context = buildAttachmentContext({
 			bindings: [{ word: "资料", wordIndex: 0, files: [{ path: "notes.pdf", kind: "pdf", source: "workspace" }] }],
 			loose: [],
@@ -77,6 +78,7 @@ describe("DurableSseProjector", () => {
 					{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
 					{ type: "text", text: "[用户本轮上传了 1 张图片，已保存到工作区：\n- .chat-images/a.png\n请调用 ocr_image。]" },
 					{ type: "text", text: context },
+					{ type: "text", text: formatRecallForPrompt([{ sessionId: "durable-old", role: "user", text: "之前的历史", ts: 1, score: 1 }]) },
 				],
 				timestamp: 1,
 			}],
