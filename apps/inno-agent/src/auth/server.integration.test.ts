@@ -141,7 +141,7 @@ beforeAll(async () => {
 			if (memoryPrompt) {
 				const request = JSON.parse(body) as { messages?: Array<{ role?: string }> };
 				const toolResults = request.messages?.filter((message) => message.role === "tool").length ?? 0;
-				if (toolResults < 5) {
+				if (toolResults < 6) {
 					const tenant = memoryPrompt[1];
 					const toolCalls = [{
 						id: `durable-memory-event-${tenant}`,
@@ -171,6 +171,10 @@ beforeAll(async () => {
 						id: `durable-ocr-call-${tenant}`,
 						name: "ocr_image",
 						arguments: { filePath: `https://images.local/durable-ocr-${tenant}.png` },
+					}, {
+						id: `durable-l3-recall-${tenant}`,
+						name: "l3_recall",
+						arguments: { query: `durable-topic-${tenant}` },
 					}];
 					const toolCall = toolCalls[toolResults]!;
 					res.writeHead(200, { "Content-Type": "text/event-stream" });

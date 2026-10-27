@@ -33,6 +33,7 @@ import { DurableSessionRuntime } from "./durable-runtime.js";
 import type { PersistedQuestion, QuestionBridgeResult, QuestionResponseStatus } from "./question-bridge.js";
 import { INNO_SYSTEM_PROMPT } from "./system-prompt.js";
 import { buildWorkspaceContextSections } from "./workspace-context.js";
+import { ScopedL3Memory } from "../memory/l3/l3-tools.js";
 
 const DURABLE_ID_PATTERN = /^durable-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -432,6 +433,18 @@ export class DurableSessionService {
 					const workspaceDir = this.options.resolveWorkspaceDir(id, record.workspaceId);
 					if (!workspaceDir) throw new Error(`Durable session workspace not found: ${record.workspaceId}`);
 					const tenantDataRoot = resolveRequestTenantDataRoot(req, this.options.dataDir);
+					const scopedL3 = new ScopedL3Memory(this.options.dataDir, join(this.options.dataDir, "sessions"));
+					const tenant = getRequestTenant(req);
+					if (tenant && !this.options.tenantStore) throw new Error("Authenticated durable L3 recall requires a tenant store");
+					const l3Memory = tenant
+						? {
+							recall: (query: string, excludeSessionId?: string) => runInTenantContext(
+								tenant,
+								this.options.tenantStore!,
+								() => scopedL3.recall(query, excludeSessionId),
+							),
+						}
+						: scopedL3;
 					const memory = {
 						sessionId: id,
 						learnerDataDir: join(tenantDataRoot, "learner"),
@@ -439,6 +452,7 @@ export class DurableSessionService {
 						workspaceDir,
 						l1Enabled: config.memory?.l1Enabled !== false,
 						l2Enabled: config.memory?.l2Enabled !== false,
+						l3: { memory: l3Memory, enabled: config.memory?.l3Enabled !== false },
 					};
 					const ocr = {
 						sessionId: id,

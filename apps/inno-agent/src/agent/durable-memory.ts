@@ -4,6 +4,7 @@ import { createLearnerTools } from "../memory/learner/learner-tools.js";
 import { buildContextPack, formatContextPackForPrompt } from "../memory/learner/context-pack.js";
 import { isProfileEmpty, loadProfile, loadRecentEvents } from "../memory/learner/profile-store.js";
 import { createL2Tools } from "../memory/l2/l2-tools.js";
+import { createL3Tools, type ScopedL3Memory } from "../memory/l3/l3-tools.js";
 import { createDurableToolRegistrations } from "./durable-tool-adapter.js";
 import { ONBOARDING_GUIDE } from "./system-prompt.js";
 
@@ -14,6 +15,10 @@ export interface DurableMemoryToolOptions {
 	workspaceDir: string;
 	l1Enabled: boolean;
 	l2Enabled: boolean;
+	l3?: {
+		memory: Pick<ScopedL3Memory, "recall">;
+		enabled: boolean;
+	};
 }
 
 const DURABLE_L1_TOOLS = new Set([
@@ -60,7 +65,10 @@ export function createDurableMemoryTools(options: DurableMemoryToolOptions): Too
 		true,
 		true,
 	);
-	return [...learnerTools, ...l2Tools];
+	const l3Tools = options.l3
+		? createL3Tools(options.l3.memory, () => options.sessionId, () => options.l3!.enabled)
+		: [];
+	return [...learnerTools, ...l2Tools, ...l3Tools];
 }
 
 /** Adapt the memory tools above; durable L2 mode does not use the legacy

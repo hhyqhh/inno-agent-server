@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: replay-safe direct learner profile mutations (3K)
+## Current stage: tenant-scoped L3 recall tool (3L)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -61,6 +61,8 @@ The current durable slice supports:
 - replay-safe, tenant-local L1 context/event/evidence tools, direct profile
   patch/update mutations, and L2 archive, query, and lint tools;
 - tenant-local L1 profile/recent-event context in durable instructions;
+- explicit `l3_recall` over ownership-filtered legacy history, with verified
+  tenant ALS restored when durable work resumes outside the HTTP request;
 - the same workspace `agent.md` and `.skills/` prompt sections as legacy,
   reloaded whenever the durable runtime opens;
 - `ocr_image` with tenant credentials, canonical workspace file checks,
@@ -118,6 +120,13 @@ nested summarization/rich-page model calls. Existing content-hash deduplication
 and manifest records resume incomplete archives. Durable query skips the legacy
 append-only query log. L1/L2 feature gates and tenant data roots are preserved;
 memory writes never use the legacy global tenant root in authenticated mode.
+
+Durable L3 recall reuses the tenant-scoped legacy-session index and excludes the
+active durable session. Authenticated tool execution re-enters the verified
+tenant context before backfill, ownership checks, and reads. Index updates are
+idempotent derived state, so the read-only tool is replay-safe. Durable SQLite
+history is not indexed yet, and automatic per-turn threshold-gated recall
+injection remains pending; this slice adds only the explicit `l3_recall` tool.
 
 Durable OCR stores checkpoints under the tenant-local `ocr/` directory, keyed
 by a hash of the session/tool-call operation ID. It writes the remote `jobId`
@@ -219,7 +228,7 @@ workspace/symlink containment, read-only fail-closed behavior, workspace
 `agent.md`/private-skill injection and reload, attachment-context history
 projection, inline-image retry path stability and OCR hint construction,
 tenant-scoped attachment/image sidecar caching and request-ID dedup,
-replay-safe L1/L2 execution, direct profile patch/update retry dedup,
+replay-safe L1/L2 execution, explicit L3 recall, direct profile patch/update retry dedup,
 L1 event/profile crash-gap recovery, deterministic L2 archive,
 OCR completion caching and job-ID resume, channel payload/completion caching,
 verified tenant channel rebinding, and recovery after real child processes are
@@ -236,8 +245,8 @@ The real-PostgreSQL integration suite additionally covers explicit HTTP
 creation, concurrent authenticated durable sessions, per-tenant provider and
 OCR Authorization headers, cross-tenant 404s, completed request-ID retries,
 lack of legacy JSONL creation, SSE disconnect/reconnect replay, tenant-local
-L1/L2/OCR writes and replay-safe direct profile patch/update through the
-authenticated HTTP boundary, original-run question
+L1/L2/OCR writes, replay-safe direct profile patch/update, and tenant-scoped L3
+recall through the authenticated HTTP boundary, original-run question
 answers with cross-tenant 404 and stale-turn 409 responses, non-streaming
 `no_ui` question resolution, streaming/non-streaming validated workspace
 attachments with raw-text history and out-of-workspace path rejection, native
@@ -247,5 +256,5 @@ cleanup.
 
 Still pending: application-persisted SSE replay after restart, durable
 permissions, provider-rejection image fallback, outbox and
-question retention/cleanup, scheduler integration, and sharded single-owner
-deployment.
+question retention/cleanup, durable-history L3 indexing and automatic recall
+injection, scheduler integration, and sharded single-owner deployment.

@@ -106,6 +106,28 @@ describe("durable memory tools", () => {
 		]);
 	});
 
+	it("exposes tenant-scoped L3 recall with the durable session excluded", async () => {
+		const base = root();
+		const calls: Array<{ query: string; exclude?: string }> = [];
+		const tools = createDurableMemoryTools({
+			...options(base, "durable-current"),
+			l3: {
+				enabled: true,
+				memory: {
+					recall: async (query, exclude) => {
+						calls.push({ query, exclude });
+						return [{ sessionId: "legacy-owned", role: "user" as const, text: "之前的机器学习计划", ts: 1, score: 1 }];
+					},
+				},
+			},
+		});
+		const tool = tools.find((item) => item.name === "l3_recall")!;
+		const result = await (tool.execute as (...args: any[]) => Promise<any>)("l3-call", { query: "机器学习" }, undefined, undefined, {});
+		expect(calls).toEqual([{ query: "机器学习", exclude: "durable-current" }]);
+		expect(result.content[0].text).toContain("之前的机器学习计划");
+		expect(result.details).toEqual({ results: 1 });
+	});
+
 	it("adds tenant-local learner context to durable instructions", async () => {
 		const base = root();
 		await recordGoal(base, "durable-a");
