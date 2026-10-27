@@ -22,6 +22,8 @@ const DURABLE_L1_TOOLS = new Set([
 	"record_learning_evidence",
 	"assess_learning_prerequisites",
 	"review_learner_profile",
+	"patch_learner_profile",
+	"update_learner_profile",
 ]);
 
 export function buildDurableInstructions(
@@ -39,8 +41,8 @@ export function buildDurableInstructions(
 
 /** Memory surface for opt-in durable sessions. Event/evidence writes use the
  * stable durable tool-call identity; L2 archive resumes by content hash and
- * manifest without nested model calls. Direct profile patch/update tools stay
- * unavailable until they have the same crash-recovery contract. */
+ * manifest without nested model calls. Direct profile patch/update mutations
+ * use the same per-session/tool-call operation markers and atomic profile write. */
 export function createDurableMemoryTools(options: DurableMemoryToolOptions): ToolDefinition[] {
 	const learnerTools = createLearnerTools(
 		options.learnerDataDir,

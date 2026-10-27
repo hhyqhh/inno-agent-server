@@ -93,6 +93,28 @@ export function recordEventAndApplyProfileOnce<T>(
 	return { profile, event: persistedEvent, value, duplicate: false };
 }
 
+export interface IdempotentProfileResult {
+	profile: LearnerProfile;
+	duplicate: boolean;
+}
+
+/** Apply a direct profile mutation and its replay marker in one atomic profile
+ * write. This is required for append/delta operations replayed by pi-durable. */
+export function applyProfileOperationOnce(
+	dataDir: string,
+	operationId: string,
+	apply: (profile: LearnerProfile) => void,
+): IdempotentProfileResult {
+	const id = operationId.trim();
+	if (!id) throw new Error("An idempotent profile mutation requires an operation ID");
+	const profile = loadProfile(dataDir);
+	if (profile.applied_operation_ids?.includes(id)) return { profile, duplicate: true };
+	apply(profile);
+	profile.applied_operation_ids = [...(profile.applied_operation_ids ?? []), id];
+	saveProfile(dataDir, profile);
+	return { profile, duplicate: false };
+}
+
 /**
  * Check whether the learner profile is effectively empty (new user).
  * Returns true when no goals, knowledge states, summary, or preferences

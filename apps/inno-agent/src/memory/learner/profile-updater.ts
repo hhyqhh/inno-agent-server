@@ -73,10 +73,10 @@ function mergeById<T>(
  * - preferences: shallow merged
  * - profile_summary: overwritten
  *
- * After updating, saves the profile and refreshes the context cache.
+ * `updateProfile` persists the result; durable callers can instead include this
+ * pure mutation in their idempotent atomic write.
  */
-export function updateProfile(dataDir: string, update: ProfileUpdate): LearnerProfile {
-	const profile = loadProfile(dataDir);
+export function applyProfileUpdate(profile: LearnerProfile, update: ProfileUpdate): void {
 
 	if (update.goals) {
 		profile.goals = mergeById<LearningGoal>(profile.goals, update.goals, "goal_id");
@@ -109,13 +109,16 @@ export function updateProfile(dataDir: string, update: ProfileUpdate): LearnerPr
 		profile.profile_summary = update.profile_summary;
 	}
 
-	saveProfile(dataDir, profile);
+}
 
+export function updateProfile(dataDir: string, update: ProfileUpdate): LearnerProfile {
+	const profile = loadProfile(dataDir);
+	applyProfileUpdate(profile, update);
+	saveProfile(dataDir, profile);
 	return profile;
 }
 
-export function patchProfile(dataDir: string, patch: ProfilePatch): LearnerProfile {
-	const profile = loadProfile(dataDir);
+export function applyProfilePatch(profile: LearnerProfile, patch: ProfilePatch): void {
 
 	if (patch.concept_id) {
 		let state = profile.knowledge_states.find((ks) => ks.concept_id === patch.concept_id);
@@ -176,7 +179,11 @@ export function patchProfile(dataDir: string, patch: ProfilePatch): LearnerProfi
 		];
 		profile.profile_summary = lines.slice(Math.max(0, lines.length - 10)).join("\n");
 	}
+}
 
+export function patchProfile(dataDir: string, patch: ProfilePatch): LearnerProfile {
+	const profile = loadProfile(dataDir);
+	applyProfilePatch(profile, patch);
 	saveProfile(dataDir, profile);
 	return profile;
 }

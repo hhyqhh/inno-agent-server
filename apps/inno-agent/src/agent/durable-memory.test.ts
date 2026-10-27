@@ -56,7 +56,7 @@ describe("durable memory tools", () => {
 		]);
 	});
 
-	it("exposes recovery-safe memory tools without direct profile mutations", () => {
+	it("exposes replay-safe event and direct profile mutation tools", () => {
 		const base = root();
 		const names = createDurableMemoryTools(options(base, "durable-a")).map((tool) => tool.name);
 		expect(names).toEqual(expect.arrayContaining([
@@ -65,12 +65,45 @@ describe("durable memory tools", () => {
 			"record_learning_evidence",
 			"assess_learning_prerequisites",
 			"review_learner_profile",
+			"patch_learner_profile",
+			"update_learner_profile",
 			"l2_archive",
 			"l2_query",
 			"l2_lint",
 		]));
-		expect(names).not.toContain("patch_learner_profile");
-		expect(names).not.toContain("update_learner_profile");
+	});
+
+	it("applies direct profile patch and update once across stable-call retries", async () => {
+		const base = root();
+		const tools = createDurableMemoryTools(options(base, "durable-a"));
+		const execute = (name: string, params: Record<string, unknown>) => {
+			const tool = tools.find((item) => item.name === name)!;
+			return (tool.execute as (...args: any[]) => Promise<any>)("shared-profile-call", params, undefined, undefined, {});
+		};
+		const patch = {
+			concept_id: "rust.ownership",
+			mastery_delta: 0.1,
+			profile_summary_append: "需要更多练习",
+		};
+		const patched = await execute("patch_learner_profile", patch);
+		const patchRetry = await execute("patch_learner_profile", patch);
+		expect(patched.details.duplicate).toBe(false);
+		expect(patchRetry.details.duplicate).toBe(true);
+		expect(patchRetry.details.version).toBe(patched.details.version);
+		let profile = loadProfile(join(base, "learner"));
+		expect(profile.profile_summary).toBe("需要更多练习");
+		expect(profile.knowledge_states[0].mastery).toBeCloseTo(0.15);
+
+		const update = { profile_summary: "用户明确修正后的画像" };
+		await execute("update_learner_profile", update);
+		const updateRetry = await execute("update_learner_profile", update);
+		expect(updateRetry.details.duplicate).toBe(true);
+		profile = loadProfile(join(base, "learner"));
+		expect(profile.profile_summary).toBe("用户明确修正后的画像");
+		expect(profile.applied_operation_ids).toEqual([
+			"patch_learner_profile:durable-a:shared-profile-call",
+			"update_learner_profile:durable-a:shared-profile-call",
+		]);
 	});
 
 	it("adds tenant-local learner context to durable instructions", async () => {

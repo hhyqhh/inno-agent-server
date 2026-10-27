@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: inline workspace images (3J)
+## Current stage: replay-safe direct learner profile mutations (3K)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -58,8 +58,8 @@ The current durable slice supports:
 - concurrent independent sessions without the legacy global prompt queue;
 - committed snapshots and existing Inno history/SSE event shapes;
 - the workspace-read-only `read` tool, including canonical symlink containment;
-- replay-safe, tenant-local L1 context/event/evidence tools and L2 archive,
-  query, and lint tools;
+- replay-safe, tenant-local L1 context/event/evidence tools, direct profile
+  patch/update mutations, and L2 archive, query, and lint tools;
 - tenant-local L1 profile/recent-event context in durable instructions;
 - the same workspace `agent.md` and `.skills/` prompt sections as legacy,
   reloaded whenever the durable runtime opens;
@@ -79,9 +79,7 @@ The current durable slice supports:
 - graceful shutdown of open durable runtimes.
 
 Shell, workspace mutations, MCP, subagents, codemode, and computer-use remain
-disabled. Direct `patch_learner_profile` and `update_learner_profile` mutations
-are not exposed on the durable path yet. Automatic fallback after a provider
-rejects a native image payload, durable permissions, branching/editing, showcase
+disabled. Automatic fallback after a provider rejects a native image payload, durable permissions, branching/editing, showcase
 export, and generated topics are not implemented on this path yet; unsupported
 operations fail explicitly rather than falling back to legacy execution.
 Workspace-private skills are injected as prompt resources; they do not alter the
@@ -108,6 +106,12 @@ crash between the event append and profile commit instead reuses the persisted
 event and applies its signals once. This closes the event/profile crash gap
 within the single-process/single-owner boundary; it is not a general
 exactly-once guarantee for model calls or external effects.
+
+Direct `patch_learner_profile` and `update_learner_profile` use operation IDs
+namespaced by tool, session, and stable tool-call ID. Their pure profile mutation
+and `applied_operation_ids` marker are committed by the same atomic profile write,
+so replay cannot repeat append/delta operations or increment the version twice.
+Legacy callers retain the original non-durable mutation path.
 
 Durable L2 archive uses deterministic conversion and page generation, disabling
 nested summarization/rich-page model calls. Existing content-hash deduplication
@@ -215,7 +219,8 @@ workspace/symlink containment, read-only fail-closed behavior, workspace
 `agent.md`/private-skill injection and reload, attachment-context history
 projection, inline-image retry path stability and OCR hint construction,
 tenant-scoped attachment/image sidecar caching and request-ID dedup,
-replay-safe L1/L2 execution, L1 event/profile crash-gap recovery, deterministic L2 archive,
+replay-safe L1/L2 execution, direct profile patch/update retry dedup,
+L1 event/profile crash-gap recovery, deterministic L2 archive,
 OCR completion caching and job-ID resume, channel payload/completion caching,
 verified tenant channel rebinding, and recovery after real child processes are
 killed with `SIGKILL` during a delayed model response, during an interrupted
@@ -231,7 +236,8 @@ The real-PostgreSQL integration suite additionally covers explicit HTTP
 creation, concurrent authenticated durable sessions, per-tenant provider and
 OCR Authorization headers, cross-tenant 404s, completed request-ID retries,
 lack of legacy JSONL creation, SSE disconnect/reconnect replay, tenant-local
-L1/L2/OCR writes through the authenticated HTTP boundary, original-run question
+L1/L2/OCR writes and replay-safe direct profile patch/update through the
+authenticated HTTP boundary, original-run question
 answers with cross-tenant 404 and stale-turn 409 responses, non-streaming
 `no_ui` question resolution, streaming/non-streaming validated workspace
 attachments with raw-text history and out-of-workspace path rejection, native
@@ -240,6 +246,6 @@ dedup, and scoped cancellation with cross-tenant abort denial and pending-card
 cleanup.
 
 Still pending: application-persisted SSE replay after restart, durable
-permissions, provider-rejection image fallback, direct durable profile patch/update, outbox and
+permissions, provider-rejection image fallback, outbox and
 question retention/cleanup, scheduler integration, and sharded single-owner
 deployment.

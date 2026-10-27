@@ -141,7 +141,7 @@ beforeAll(async () => {
 			if (memoryPrompt) {
 				const request = JSON.parse(body) as { messages?: Array<{ role?: string }> };
 				const toolResults = request.messages?.filter((message) => message.role === "tool").length ?? 0;
-				if (toolResults < 3) {
+				if (toolResults < 5) {
 					const tenant = memoryPrompt[1];
 					const toolCalls = [{
 						id: `durable-memory-event-${tenant}`,
@@ -159,6 +159,14 @@ beforeAll(async () => {
 							content: `durable-content-${tenant}`,
 							sourceType: "markdown",
 						},
+					}, {
+						id: `durable-profile-patch-${tenant}`,
+						name: "patch_learner_profile",
+						arguments: { profile_summary_append: `durable-patch-${tenant}` },
+					}, {
+						id: `durable-profile-update-${tenant}`,
+						name: "update_learner_profile",
+						arguments: { profile_summary: `durable-profile-${tenant}` },
 					}, {
 						id: `durable-ocr-call-${tenant}`,
 						name: "ocr_image",
@@ -1530,12 +1538,13 @@ describe("durable session HTTP boundary", () => {
 		}
 		const rootA = join(home, "data", "tenants", tenantA);
 		const rootB = join(home, "data", "tenants", tenantB);
-		const [eventsA, eventsB, manifestA, manifestB, profileA] = await Promise.all([
+		const [eventsA, eventsB, manifestA, manifestB, profileA, profileB] = await Promise.all([
 			readFile(join(rootA, "learner", "events.jsonl"), "utf-8"),
 			readFile(join(rootB, "learner", "events.jsonl"), "utf-8"),
 			readFile(join(rootA, "l2", "manifest.jsonl"), "utf-8"),
 			readFile(join(rootB, "l2", "manifest.jsonl"), "utf-8"),
 			readFile(join(rootA, "learner", "profile.json"), "utf-8"),
+			readFile(join(rootB, "learner", "profile.json"), "utf-8"),
 		]);
 		expect(eventsA).toContain("durable-concept-a");
 		expect(eventsA).not.toContain("durable-concept-b");
@@ -1546,6 +1555,12 @@ describe("durable session HTTP boundary", () => {
 		expect(manifestB).toContain("durable-archive-b");
 		expect(manifestB).not.toContain("durable-archive-a");
 		expect(profileA).toContain("record_learning_event:");
+		expect(profileA).toContain("patch_learner_profile:");
+		expect(profileA).toContain("update_learner_profile:");
+		expect(profileA).toContain("durable-profile-a");
+		expect(profileA).not.toContain("durable-profile-b");
+		expect(profileB).toContain("durable-profile-b");
+		expect(profileB).not.toContain("durable-profile-a");
 		const readOcrCheckpoints = async (tenantRoot: string) => {
 			const directory = join(tenantRoot, "ocr");
 			const files = await readdir(directory);

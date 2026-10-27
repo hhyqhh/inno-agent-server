@@ -1,11 +1,11 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { loadEvents, loadProfile, saveProfile } from "./profile-store.js";
+import { applyProfileOperationOnce, loadEvents, loadProfile, saveProfile } from "./profile-store.js";
 import { recordEventAndApplyProfileOnce, recordEventAndUpdateProfile } from "./profile-store.js";
 import { applyLearningEventToProfile } from "./auto-profile.js";
 import { buildContextPack } from "./context-pack.js";
-import { patchProfile, updateProfile } from "./profile-updater.js";
+import { applyProfilePatch, applyProfileUpdate, patchProfile, updateProfile } from "./profile-updater.js";
 import { createLearningEvent } from "./types.js";
 import { createLearningEvidenceEvent } from "./evidence.js";
 import {
@@ -375,10 +375,17 @@ export function createLearnerTools(
 			preferences_append: Type.Optional(PreferencesSchema),
 			profile_summary_append: Type.Optional(Type.String({ description: "One concise sentence to append to profile summary" })),
 		}),
-		async execute(_toolCallId, params) {
+		async execute(toolCallId, params) {
 			try {
 				if (isEnabled && !isEnabled()) return disabledResult();
-				const updated = patchProfile(resolveDataDir(), params);
+				const mutation = getDurableOperationId
+					? applyProfileOperationOnce(
+						resolveDataDir(),
+						`patch_learner_profile:${getDurableOperationId(toolCallId)}`,
+						(profile) => applyProfilePatch(profile, params),
+					)
+					: { profile: patchProfile(resolveDataDir(), params), duplicate: false };
+				const updated = mutation.profile;
 				return {
 					content: [
 						{
@@ -386,7 +393,7 @@ export function createLearnerTools(
 							text: `学习者画像已局部更新至版本 ${updated.version}`,
 						},
 					],
-					details: { version: updated.version },
+					details: { version: updated.version, duplicate: mutation.duplicate },
 				};
 			} catch (err) {
 				logger.warn({ err, params }, "patch_learner_profile tool failed");
@@ -407,10 +414,17 @@ export function createLearnerTools(
 			preferences: Type.Optional(PreferencesSchema),
 			profile_summary: Type.Optional(Type.String({ description: "Updated profile summary text" })),
 		}),
-		async execute(_toolCallId, params) {
+		async execute(toolCallId, params) {
 			try {
 				if (isEnabled && !isEnabled()) return disabledResult();
-				const updated = updateProfile(resolveDataDir(), params);
+				const mutation = getDurableOperationId
+					? applyProfileOperationOnce(
+						resolveDataDir(),
+						`update_learner_profile:${getDurableOperationId(toolCallId)}`,
+						(profile) => applyProfileUpdate(profile, params),
+					)
+					: { profile: updateProfile(resolveDataDir(), params), duplicate: false };
+				const updated = mutation.profile;
 				return {
 					content: [
 						{
@@ -418,7 +432,7 @@ export function createLearnerTools(
 							text: `学习者画像已更新至版本 ${updated.version}`,
 						},
 					],
-					details: { version: updated.version },
+					details: { version: updated.version, duplicate: mutation.duplicate },
 				};
 			} catch (err) {
 				logger.warn({ err, params }, "update_learner_profile tool failed");
