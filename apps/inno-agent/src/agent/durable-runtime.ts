@@ -23,6 +23,7 @@ import {
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createReadTool } from "@earendil-works/pi-durable/tools";
 import { WorkspaceReadOnlyEnv } from "./durable-env.js";
+import { withNativeImageFallback } from "./native-image-fallback.js";
 import { createDurableChannelRegistrations, type DurableChannelToolOptions } from "./durable-channels.js";
 import { createDurableMemoryRegistrations, type DurableMemoryToolOptions } from "./durable-memory.js";
 import { createDurableOcrRegistrations, type DurableOcrToolOptions } from "./durable-ocr.js";
@@ -167,7 +168,7 @@ export class DurableSessionRuntime {
 			const harness = await Harness.open(
 				await openNodeSqliteStorage(storagePath),
 				{
-					models: options.models,
+					models: withNativeImageFallback(options.models),
 					registry,
 					env: options.workspaceDir
 						? () => new WorkspaceReadOnlyEnv(options.workspaceDir!)

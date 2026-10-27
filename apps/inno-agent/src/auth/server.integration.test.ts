@@ -126,6 +126,11 @@ beforeAll(async () => {
 				].join("\n"));
 				return;
 			}
+			if (body.includes("durable-image-provider-rejection") && body.includes("image_url")) {
+				res.writeHead(400, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ error: { message: "unknown variant 'image_url', expected 'text'" } }));
+				return;
+			}
 			if (body.includes("durable-reconnect")) {
 				await new Promise((resolveDelay) => setTimeout(resolveDelay, 400));
 			}
@@ -1477,6 +1482,45 @@ describe("durable session HTTP boundary", () => {
 		expect(nativeUser?.images).toHaveLength(1);
 		expect(nativeUser?.images?.[0].previewUrl).toContain("/api/workspace/raw?");
 		expect((await api(cookieA, nativeUser!.images![0].previewUrl)).status).toBe(200);
+
+		const rejectedNative = await api(cookieA, "/api/chat/stream", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId: session.id,
+				prompt: "durable-image-provider-rejection",
+				clientRequestId: "durable-image-provider-rejection-request",
+				images: [{ data: "aW1hZ2U=", mimeType: "image/png" }],
+			}),
+		});
+		expect(rejectedNative.status).toBe(200);
+		expect(await rejectedNative.text()).toContain('"persisted":true');
+		const rejectionRequests = providerRequests.filter((request) =>
+			request.body.includes("durable-image-provider-rejection"));
+		expect(rejectionRequests).toHaveLength(2);
+		expect(rejectionRequests[0].body).toContain("image_url");
+		expect(rejectionRequests[0].body).not.toContain("用户本轮上传了");
+		expect(rejectionRequests[1].body).not.toContain("image_url");
+		expect(rejectionRequests[1].body).toContain("用户本轮上传了 1 张图片");
+		expect(rejectionRequests[1].body).toContain(".chat-images/");
+		const rejectedRetry = await api(cookieA, "/api/chat/stream", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId: session.id,
+				prompt: "durable-image-provider-rejection",
+				clientRequestId: "durable-image-provider-rejection-request",
+				images: [{ data: "aW1hZ2U=", mimeType: "image/png" }],
+			}),
+		});
+		expect(await rejectedRetry.text()).toContain('"persisted":true');
+		expect(providerRequests.filter((request) =>
+			request.body.includes("durable-image-provider-rejection"))).toHaveLength(2);
+		const rejectedDetail = await (await api(cookieA, `/api/sessions/${session.id}`)).json() as {
+			messages: Array<{ role: string; content: string }>;
+		};
+		expect(rejectedDetail.messages.filter((message) =>
+			message.content === "durable-image-provider-rejection")).toHaveLength(1);
+		expect(rejectedDetail.messages.find((message) =>
+			message.content === "durable-image-provider-rejection")?.content).not.toContain("用户本轮上传了");
 
 		expect((await api(cookieA, "/api/settings/providers", {
 			method: "PUT",

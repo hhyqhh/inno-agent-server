@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: automatic durable L3 recall injection (3O)
+## Current stage: durable provider-rejection image fallback (3P)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -78,14 +78,15 @@ The current durable slice supports:
   canonical path validation and request-ID-deduplicated UI sidecar metadata;
 - inline images persisted under `.chat-images/`, native image blocks for
   vision-capable models, OCR path hints for explicitly text-only models, and
-  workspace preview restoration through the same deduplicated sidecar;
+  same-submission OCR fallback when a provider rejects a native payload;
+  workspace previews restore through the same deduplicated sidecar;
 - first-message fallback topics, automatic richer upgrades after six messages,
   and explicit `POST /api/sessions/:id/generate-topic`, all using the durable
   session's pinned provider/model and isolated tenant credentials;
 - graceful shutdown of open durable runtimes.
 
 Shell, workspace mutations, MCP, subagents, codemode, and computer-use remain
-disabled. Automatic fallback after a provider rejects a native image payload, durable permissions, branching/editing, and showcase
+disabled. Durable permissions, branching/editing, and showcase
 export are not implemented on this path yet; unsupported
 operations fail explicitly rather than falling back to legacy execution.
 Workspace-private skills are injected as prompt resources; they do not alter the
@@ -195,10 +196,16 @@ directory. Durable filenames hash the request ID, image index, and bytes, so an
 identical retry reuses the path while a conflicting retry cannot overwrite the
 original file. Models whose resolved tenant config includes `input: ["image"]`
 receive native image blocks; explicitly text-only models instead receive the
-workspace paths and OCR hint as a separate hidden context block. Both modes merge
-workspace preview URLs into user history through the request-ID-deduplicated
-sidecar. Automatic retry without image blocks after a provider rejects a native
-payload is not implemented yet.
+workspace paths and OCR hint as a separate hidden context block. Native attempts
+hide that committed hint. If the provider rejects the image payload, the model
+stream wrapper retries the same generation with every image block removed and
+the OCR hints restored; it does not create another durable submission, request
+ID, or visible user message. A capability rejection is cached for the current
+runtime, while malformed payloads do not permanently disable native images.
+The cache is in memory, so recovery after a restart can make one new native
+attempt before falling back again. Both modes merge workspace preview URLs into
+user history through the request-ID-deduplicated sidecar. Provider calls remain
+at-least-once across crashes; the fallback does not claim exactly-once billing.
 
 Durable questions use the stable operation ID
 `ask_user_question:<sessionId>:<toolCallId>`. Records live under the
@@ -254,7 +261,8 @@ runtimes, request deduplication across idle close/reopen, stable committed
 revisions, busy-delete rejection, legacy JSONL non-interference,
 workspace/symlink containment, read-only fail-closed behavior, workspace
 `agent.md`/private-skill injection and reload, attachment-context history
-projection, inline-image retry path stability and OCR hint construction,
+projection, inline-image retry path stability, provider-rejection OCR fallback
+in the same submission with capability caching and request-ID dedup,
 tenant-scoped attachment/image sidecar caching and request-ID dedup,
 replay-safe L1/L2 execution, explicit L3 recall, revision-idempotent durable-history
 indexing with current-session exclusion and hidden automatic-recall projection,
@@ -286,9 +294,10 @@ answers with cross-tenant 404 and stale-turn 409 responses, non-streaming
 `no_ui` question resolution, streaming/non-streaming validated workspace
 attachments with raw-text history and out-of-workspace path rejection, native
 vision and text-only inline-image requests with workspace previews and retry
-dedup, and scoped cancellation with cross-tenant abort denial and pending-card
+dedup, provider-rejection native-image fallback without duplicate user history,
+and scoped cancellation with cross-tenant abort denial and pending-card
 cleanup.
 
 Still pending: application-persisted SSE replay after restart, durable
-permissions, provider-rejection image fallback, outbox and
-question retention/cleanup, scheduler integration, and sharded single-owner deployment.
+permissions, outbox and question retention/cleanup, scheduler integration, and
+sharded single-owner deployment.

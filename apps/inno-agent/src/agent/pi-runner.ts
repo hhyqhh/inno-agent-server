@@ -31,6 +31,13 @@ import type { ChannelRegistry } from "../channels/channel.js";
 import { logger } from "../logger.js";
 import { getCurrentTenant } from "../tenants/current.js";
 import { resolveCurrentTenantConfig } from "../tenants/config.js";
+import {
+	isNativeImageCapabilityError,
+	isNativeImagePayloadError,
+	isOversizedPayloadError,
+} from "./native-image-fallback.js";
+
+export { isNativeImageCapabilityError, isNativeImagePayloadError, isOversizedPayloadError } from "./native-image-fallback.js";
 
 let _runtime: AgentSessionRuntime | null = null;
 let _queue: Promise<void> = Promise.resolve();
@@ -852,41 +859,6 @@ async function promptWithTrimmedHistoryImages(
 	} finally {
 		session.agent.transformContext = originalTransform;
 	}
-}
-
-export function isNativeImagePayloadError(message: string | undefined): boolean {
-	if (!message) return false;
-	const normalized = message.toLowerCase();
-	// Text-only deployments that answer image requests with a plain
-	// "model only support(s) text input" 400 — no image keyword at all.
-	if (/only supports? text( |-)?input/.test(normalized)) return true;
-	const mentionsImagePayload = /image_url|image message|image input|image content|vision/.test(normalized);
-	const rejectsPayload = /unknown variant|expected [`'"]?text|unsupported|not support|does not support|invalid|malformed|decode failed|too large/.test(normalized);
-	return mentionsImagePayload && rejectsPayload;
-}
-
-export function isNativeImageCapabilityError(message: string | undefined): boolean {
-	if (!message) return false;
-	const normalized = message.toLowerCase();
-	if (/only supports? text( |-)?input/.test(normalized)) return true;
-	if (/unknown variant.{0,80}image_url|image_url.{0,80}unknown variant/.test(normalized)) return true;
-	if (/expected [`'"]?text.{0,80}(?:image|vision)|(?:image|vision).{0,80}expected [`'"]?text/.test(normalized)) {
-		return true;
-	}
-	return /(?:image|vision).{0,80}(?:unsupported|not support|does not support)|(?:unsupported|not support|does not support).{0,80}(?:image|vision)/.test(normalized) &&
-		!/format|mime|base64|decode|dimension|resolution|too large|file size/.test(normalized);
-}
-
-/**
- * HTTP 413-style rejections. Reverse proxies (e.g. nginx in front of a
- * provider) answer an oversized base64 image request with a bare
- * "413 Request Entity Too Large" page that never mentions images, so
- * isNativeImagePayloadError cannot catch it. Only treat this as an image
- * payload error when the turn actually carried native images.
- */
-export function isOversizedPayloadError(message: string | undefined): boolean {
-	if (!message) return false;
-	return /^\s*413\b|\brequest entity too large\b|\bpayload too large\b|\bcontent too large\b/i.test(message);
 }
 
 function eventErrorMessage(event: AgentSessionEvent): string | undefined {

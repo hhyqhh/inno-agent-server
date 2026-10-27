@@ -421,7 +421,7 @@ export class DurableSessionService {
 		return {
 			nativeImages: native ? parsed : [],
 			images: parsed.map((image, index) => ({ mimeType: image.mimeType, workspacePath: paths[index] })),
-			fallbackContext: native ? "" : buildImagePathsHint(paths),
+			fallbackContext: buildImagePathsHint(paths),
 			workspaceId: record.workspaceId,
 			workspaceRoot,
 		};

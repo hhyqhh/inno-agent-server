@@ -16,6 +16,7 @@ import { loadEvents, loadProfile } from "../memory/learner/profile-store.js";
 import { readManifest } from "../memory/l2/manifest-store.js";
 import { ChannelRegistry } from "../channels/channel.js";
 import { DurableQuestionStore } from "./durable-questions.js";
+import { buildImagePathsHint } from "../server/inline-images.js";
 
 interface FauxRuntime {
 	faux: FauxProviderHandle;
@@ -138,6 +139,53 @@ describe("DurableSessionRuntime", () => {
 		expect(await waitForText(runtime, first.id)).toBe("only once");
 		expect(provider.faux.state.callCount).toBe(1);
 		expect(durableEntriesToMessages((await runtime.snapshot()).entries).filter((message) => message.role === "user")).toHaveLength(1);
+	});
+
+	it("retries rejected native images with committed OCR context in the same submission", async () => {
+		const root = tempRoot();
+		const provider = fauxRuntime();
+		const image = { type: "image" as const, data: "aW1hZ2U=", mimeType: "image/png" };
+		const hint = buildImagePathsHint([".chat-images/image.png"]);
+		provider.faux.setResponses([
+			(context) => {
+				const body = JSON.stringify(context);
+				expect(body).toContain('"type":"image"');
+				expect(body).not.toContain("用户本轮上传了");
+				return fauxAssistantMessage([], {
+					stopReason: "error", errorMessage: "unknown variant 'image_url', expected 'text'",
+				});
+			},
+			(context) => {
+				const body = JSON.stringify(context);
+				expect(body).not.toContain('"type":"image"');
+				expect(body).toContain("用户本轮上传了");
+				expect(body).toContain(".chat-images/image.png");
+				return fauxAssistantMessage("fallback complete");
+			},
+			(context) => {
+				// Capability rejections skip native images for later turns in this runtime.
+				expect(JSON.stringify(context)).not.toContain('"type":"image"');
+				return fauxAssistantMessage("next fallback complete");
+			},
+		]);
+		const runtime = await open({ storagePath: join(root, "image-fallback.sqlite"), ...provider });
+		const content = [{ type: "text" as const, text: "inspect image" }, image, { type: "text" as const, text: hint }];
+		const submission = await runtime.submit(content, "image-fallback-request");
+		expect(await waitForText(runtime, submission.id)).toBe("fallback complete");
+		expect(provider.faux.state.callCount).toBe(2);
+
+		const duplicate = await runtime.submit(content, "image-fallback-request");
+		expect(duplicate.id).toBe(submission.id);
+		expect(await waitForText(runtime, duplicate.id)).toBe("fallback complete");
+		expect(provider.faux.state.callCount).toBe(2);
+		const next = await runtime.submit([
+			{ type: "text", text: "inspect another image" }, image, { type: "text", text: hint },
+		], "next-image-fallback-request");
+		expect(await waitForText(runtime, next.id)).toBe("next fallback complete");
+		expect(provider.faux.state.callCount).toBe(3);
+		expect(durableEntriesToMessages((await runtime.snapshot()).entries)
+			.filter((message) => message.role === "user").map((message) => message.content))
+			.toEqual(["inspect image", "inspect another image"]);
 	});
 
 	it("persists turn cancellation across close and reopen", async () => {

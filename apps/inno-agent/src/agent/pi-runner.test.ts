@@ -39,7 +39,7 @@ describe("prompt run finalization", () => {
 	});
 });
 
-describe("native image fallback classification", () => {
+describe("shared native image fallback classification", () => {
 	it.each([
 		"unknown variant 'image_url', expected 'text'",
 		"This model does not support image input",
