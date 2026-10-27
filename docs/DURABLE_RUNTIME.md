@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: recoverable OCR jobs (3D)
+## Current stage: persistent channel outbox (3E)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -63,6 +63,8 @@ The current durable slice supports:
 - tenant-local L1 profile/recent-event context in durable instructions;
 - `ocr_image` with tenant credentials, canonical workspace file checks,
   persisted job-ID checkpoints, and cached final markdown;
+- `send_file_to_channel` with a tenant-local persistent outbox, payload
+  snapshots, original-target recovery, and cached completion results;
 - graceful shutdown of open durable runtimes.
 
 Shell, workspace mutations, MCP, subagents, codemode, and computer-use remain
@@ -110,6 +112,19 @@ after the remote service accepts a submission but before the local `jobId`
 commit can still duplicate that one remote job. Recovery is therefore
 exactly-once only after the job ID is persisted, not for external submission.
 
+Durable channel file sends snapshot the payload and persist the channel, chat
+ID, original path, and optional file name under the tenant-local
+`channels/outbox/` directory before external delivery. Recovery uses that
+snapshot and original target even if the workspace file disappears or the
+tenant's default target changes. A successful send commits a completion marker;
+a completed retry returns the cached result before channel lookup or another
+send. Authenticated registry lookups re-enter the verified tenant context when
+durable work resumes outside the original HTTP request's async context. Channel
+APIs have no common idempotency key, so a crash after external delivery but
+before the completion commit can send the file again: delivery is
+**at-least-once**, not exactly-once. Outbox snapshots and completion records are
+currently retained; retention/cleanup policy is still pending.
+
 One durable storage has **one owner at a time**. The in-process guard does not
 replace deployment routing, lease/fencing, or an ordered old-owner shutdown.
 Never mount the same SQLite database into active-active workers or share it
@@ -139,10 +154,12 @@ runtimes, request deduplication across idle close/reopen, stable committed
 revisions, busy-delete rejection, legacy JSONL non-interference,
 workspace/symlink containment, read-only fail-closed behavior, replay-safe
 L1/L2 execution, L1 event/profile crash-gap recovery, deterministic L2 archive,
-OCR completion caching and job-ID resume, and recovery after real child
-processes are killed with `SIGKILL` during a delayed model response, during an
-interrupted memory tool, and while a submitted OCR job is still running. No paid
-model endpoint is used.
+OCR completion caching and job-ID resume, channel payload/completion caching,
+verified tenant channel rebinding, and recovery after real child processes are
+killed with `SIGKILL` during a delayed model response, during an interrupted
+memory tool, while a submitted OCR job is still running, and after a channel
+send but before its outbox completion commit. No paid model endpoint or real
+external channel is used.
 
 The real-PostgreSQL integration suite additionally covers explicit HTTP
 creation, concurrent authenticated durable sessions, per-tenant provider and
@@ -152,5 +169,5 @@ L1/L2/OCR writes through the authenticated HTTP boundary.
 
 Still pending: application-persisted SSE replay after restart, durable
 questions/permissions/cancellation, workspace prompt context and attachments,
-direct durable profile patch/update, channel outbox, scheduler integration, and
-sharded single-owner deployment.
+direct durable profile patch/update, outbox retention/cleanup, scheduler
+integration, and sharded single-owner deployment.

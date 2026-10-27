@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -68,5 +68,42 @@ describe("tenant-safe channel file tools", () => {
 
 		expect(result.details).toMatchObject({ error: "workspace_unavailable" });
 		expect(sends).toEqual([]);
+	});
+
+	it("caches durable delivery completion and retains a snapshot of the sent file", async () => {
+		const workspace = tempDir();
+		const source = join(workspace, "report.txt");
+		writeFileSync(source, "snapshot contents");
+		const registry = new ChannelRegistry();
+		const sends: Array<{ filePath: string; fileName?: string }> = [];
+		registry.register({
+			name: "feishu",
+			verify: async () => true,
+			parse: async () => null,
+			reply: async () => {},
+			push: async () => {},
+			sendFile: async (_target, filePath, fileName) => { sends.push({ filePath, fileName }); },
+		});
+		registry.setDefaultTarget({ channel: "feishu", chatId: "tenant-chat" });
+		const tool = createChannelTools({
+			channelRegistry: registry,
+			workspaceDir: workspace,
+			durable: {
+				outboxDir: join(workspace, "outbox"),
+				getOperationId: (callId) => `send_file_to_channel:durable-session:${callId}`,
+			},
+		})[0];
+		const execute = () => tool.execute("stable-call", { filePath: "report.txt" }, undefined, undefined, {} as never);
+
+		const first = await execute();
+		expect(sends).toHaveLength(1);
+		expect(sends[0]).toMatchObject({ fileName: "report.txt" });
+		expect(sends[0]!.filePath).not.toBe(source);
+		expect(readFileSync(sends[0]!.filePath, "utf-8")).toBe("snapshot contents");
+		rmSync(source);
+		const retry = await execute();
+
+		expect(retry).toEqual(first);
+		expect(sends).toHaveLength(1);
 	});
 });

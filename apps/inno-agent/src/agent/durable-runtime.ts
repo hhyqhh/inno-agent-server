@@ -22,12 +22,14 @@ import {
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createReadTool } from "@earendil-works/pi-durable/tools";
 import { WorkspaceReadOnlyEnv } from "./durable-env.js";
+import { createDurableChannelRegistrations, type DurableChannelToolOptions } from "./durable-channels.js";
 import { createDurableMemoryRegistrations, type DurableMemoryToolOptions } from "./durable-memory.js";
 import { createDurableOcrRegistrations, type DurableOcrToolOptions } from "./durable-ocr.js";
 
 const READ_ONLY_EXTENSION_NAME = "inno.read-only";
 const MEMORY_EXTENSION_NAME = "inno.memory";
 const OCR_EXTENSION_NAME = "inno.ocr";
+const CHANNEL_EXTENSION_NAME = "inno.channels";
 
 /** Durable SQLite is single-owner. This guard covers accidental double-open in
  * one process; deployment routing must still prevent cross-process owners. */
@@ -52,6 +54,8 @@ export interface DurableSessionRuntimeOptions {
 	memory?: DurableMemoryToolOptions;
 	/** Remote OCR recovery checkpoints; submission remains at-least-once. */
 	ocr?: DurableOcrToolOptions;
+	/** Persistent file-delivery outbox; external sends remain at-least-once. */
+	channels?: DurableChannelToolOptions;
 	registry?: Registry;
 }
 
@@ -83,6 +87,7 @@ function createSessionRegistry(
 	readOnlyTools: boolean,
 	memory?: DurableMemoryToolOptions,
 	ocr?: DurableOcrToolOptions,
+	channels?: DurableChannelToolOptions,
 ): Registry {
 	const registry = createRegistry();
 	if (readOnlyTools) {
@@ -101,6 +106,12 @@ function createSessionRegistry(
 		registry.install(defineExtension({
 			name: OCR_EXTENSION_NAME,
 			tools: createDurableOcrRegistrations(ocr),
+		}));
+	}
+	if (channels) {
+		registry.install(defineExtension({
+			name: CHANNEL_EXTENSION_NAME,
+			tools: createDurableChannelRegistrations(channels),
 		}));
 	}
 	return registry;
@@ -127,10 +138,11 @@ export class DurableSessionRuntime {
 		openStoragePaths.add(storagePath);
 		try {
 			const readOnlyTools = options.readOnlyTools === true;
-			const registry = options.registry ?? createSessionRegistry(readOnlyTools, options.memory, options.ocr);
+			const registry = options.registry ?? createSessionRegistry(readOnlyTools, options.memory, options.ocr, options.channels);
 			const memoryTools = options.memory ? createDurableMemoryRegistrations(options.memory) : [];
 			const ocrTools = options.ocr ? createDurableOcrRegistrations(options.ocr) : [];
-			const tools = [...memoryTools, ...ocrTools];
+			const channelTools = options.channels ? createDurableChannelRegistrations(options.channels) : [];
+			const tools = [...memoryTools, ...ocrTools, ...channelTools];
 			const harness = await Harness.open(
 				await openNodeSqliteStorage(storagePath),
 				{

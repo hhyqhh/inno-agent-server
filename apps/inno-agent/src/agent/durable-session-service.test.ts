@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,9 +6,10 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxProviderHandle } from "@earendil-works/pi-ai/providers/faux";
 import { afterEach, describe, expect, it } from "vitest";
 import { normalizeConfig } from "../config.js";
-import { runInTenantContext, runWithoutTenantContext } from "../tenants/current.js";
+import { runInTenantContext, runWithoutTenantContext, getCurrentTenant } from "../tenants/current.js";
 import { saveTenantConfig } from "../tenants/config.js";
 import { loadEvents } from "../memory/learner/profile-store.js";
+import { ChannelRegistry } from "../channels/channel.js";
 import { setRequestTenant } from "../tenants/http.js";
 import type { TenantContext, TenantStore } from "../tenants/store.js";
 import { DurableRuntimeDisabledError, DurableSessionService } from "./durable-session-service.js";
@@ -64,11 +65,40 @@ describe("DurableSessionService", () => {
 		saveTenantConfig(base, "tenant-a", config("key-a"));
 		saveTenantConfig(base, "tenant-b", config("key-b"));
 		const providers = new Map<string, FauxProviderHandle>();
+		writeFileSync(join(workspace, "shared.txt"), "tenant channel payload");
+		const channelSends: Array<{ tenantId: string; chatId: string }> = [];
+		const channelFor = (tenantId: string) => ({
+			name: "feishu",
+			verify: async () => true,
+			parse: async () => null,
+			reply: async () => {},
+			push: async () => {},
+			sendFile: async (target: { chatId: string }) => { channelSends.push({ tenantId, chatId: target.chatId }); },
+		});
+		const scopedChannelRegistry = {
+			all: () => {
+				const tenantId = getCurrentTenant()?.tenantId;
+				if (!tenantId) throw new Error("Missing tenant during channel lookup");
+				return [channelFor(tenantId)];
+			},
+			get: () => {
+				const tenantId = getCurrentTenant()?.tenantId;
+				if (!tenantId) throw new Error("Missing tenant during channel lookup");
+				return channelFor(tenantId);
+			},
+			getDefaultTarget: () => {
+				const tenantId = getCurrentTenant()?.tenantId;
+				if (!tenantId) throw new Error("Missing tenant during target lookup");
+				return { channel: "feishu", chatId: `chat-${tenantId}` };
+			},
+		} as unknown as ChannelRegistry;
 		const service = new DurableSessionService({
 			dataDir: base,
 			getLocalConfig: () => localConfig,
 			enabled: true,
 			resolveWorkspaceDir: () => workspace,
+			getChannelRegistry: () => scopedChannelRegistry,
+			tenantStore,
 			openRuntime: async (options: DurableSessionRuntimeOptions) => {
 				let faux = providers.get(options.storagePath);
 				if (!faux) {
@@ -80,6 +110,10 @@ describe("DurableSessionService", () => {
 							context: { concept_ids: [tenantConcept] },
 							payload: { topic: tenantConcept },
 						}, { id: `event-${tenantConcept}` }), { stopReason: "toolUse" }),
+						fauxAssistantMessage(fauxToolCall("send_file_to_channel", {
+							filePath: "shared.txt",
+							channel: "feishu",
+						}, { id: `channel-${tenantConcept}` }), { stopReason: "toolUse" }),
 						fauxAssistantMessage(options.storagePath.includes("tenant-a") ? "answer A" : "answer B"),
 					]);
 					providers.set(options.storagePath, faux);
@@ -129,6 +163,13 @@ describe("DurableSessionService", () => {
 		expect(eventsB).toHaveLength(1);
 		expect(eventsA[0]!.context.concept_ids).toEqual(["concept-a"]);
 		expect(eventsB[0]!.context.concept_ids).toEqual(["concept-b"]);
+		expect(channelSends).toEqual(expect.arrayContaining([
+			{ tenantId: "tenant-a", chatId: "chat-tenant-a" },
+			{ tenantId: "tenant-b", chatId: "chat-tenant-b" },
+		]));
+		expect(channelSends).toHaveLength(2);
+		expect(readdirSync(join(base, "tenants", "tenant-a", "channels", "outbox"))).toHaveLength(2);
+		expect(readdirSync(join(base, "tenants", "tenant-b", "channels", "outbox"))).toHaveLength(2);
 	});
 
 	it("keeps request deduplication across idle runtime close/reopen", async () => {

@@ -1511,6 +1511,8 @@ const durableSessions = new DurableSessionService({
 	resolveWorkspaceDir: (sessionId, fallbackWorkspaceId) => workspaceRegistry.resolveWorkspaceDir(
 		workspaceRegistry.getSessionWorkspaceId(sessionId) || fallbackWorkspaceId,
 	) ?? undefined,
+	getChannelRegistry: () => channelRegistry,
+	tenantStore: auth.tenantStore,
 });
 
 const { dispatch: dispatchRoutes } = createRouteDispatcher({

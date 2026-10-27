@@ -3,9 +3,13 @@ import { rm } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import { join } from "node:path";
 import type { InnoConfig } from "../config.js";
+import type { ChannelRegistry } from "../channels/channel.js";
 import { readJson, writeJson } from "../storage/file-store.js";
 import { resolveCurrentTenantConfig } from "../tenants/config.js";
+import { runInTenantContext } from "../tenants/current.js";
+import { getRequestTenant } from "../tenants/http.js";
 import { resolveRequestTenantDataRoot } from "../tenants/paths.js";
+import type { TenantStore } from "../tenants/store.js";
 import type { SessionSummary } from "../server/session-model.js";
 import { createConfiguredDurableModels } from "./durable-models.js";
 import { buildDurableInstructions } from "./durable-memory.js";
@@ -48,7 +52,28 @@ export interface DurableSessionServiceOptions {
 	getLocalConfig: () => InnoConfig;
 	enabled: boolean;
 	resolveWorkspaceDir: (sessionId: string, fallbackWorkspaceId: string) => string | undefined;
+	/** Lazy because the server's channel registry is built during agent bootstrap. */
+	getChannelRegistry?: () => ChannelRegistry | undefined;
+	tenantStore?: TenantStore | null;
 	openRuntime?: typeof DurableSessionRuntime.open;
+}
+
+function bindChannelRegistry(
+	req: IncomingMessage,
+	registry: ChannelRegistry,
+	tenantStore: TenantStore | null | undefined,
+): ChannelRegistry {
+	const tenant = getRequestTenant(req);
+	if (!tenant) return registry;
+	if (!tenantStore) throw new Error("Authenticated durable channels require a tenant store");
+	const run = <T>(operation: () => T): T => runInTenantContext(tenant, tenantStore, operation);
+	// Channel tool lookups re-enter the verified tenant even when pi-durable
+	// resumes outside the original HTTP request's async context.
+	return {
+		all: () => run(() => registry.all()),
+		get: (name) => run(() => registry.get(name)),
+		getDefaultTarget: (name) => run(() => registry.getDefaultTarget(name)),
+	} as ChannelRegistry;
 }
 
 export class DurableRuntimeDisabledError extends Error {
@@ -251,6 +276,13 @@ export class DurableSessionService {
 						workspaceDir,
 						ocrApi: config.ocrApi,
 					};
+					const baseChannelRegistry = this.options.getChannelRegistry?.();
+					const channels = baseChannelRegistry ? {
+						sessionId: id,
+						outboxDir: join(tenantDataRoot, "channels", "outbox"),
+						workspaceDir,
+						channelRegistry: bindChannelRegistry(req, baseChannelRegistry, this.options.tenantStore),
+					} : undefined;
 					return this.openRuntime({
 						storagePath: this.storagePath(req, id),
 						...selection,
@@ -259,6 +291,7 @@ export class DurableSessionService {
 						readOnlyTools: true,
 						memory,
 						ocr,
+						channels,
 					});
 				})();
 				this.openings.set(key, opening);

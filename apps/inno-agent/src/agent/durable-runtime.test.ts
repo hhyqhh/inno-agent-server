@@ -14,6 +14,7 @@ import { durableEntriesToMessages } from "./durable-projection.js";
 import { DurableSessionRuntime, DurableStorageOwnerError } from "./durable-runtime.js";
 import { loadEvents, loadProfile } from "../memory/learner/profile-store.js";
 import { readManifest } from "../memory/l2/manifest-store.js";
+import { ChannelRegistry } from "../channels/channel.js";
 
 interface FauxRuntime {
 	faux: FauxProviderHandle;
@@ -387,5 +388,62 @@ describe("DurableSessionRuntime", () => {
 		} finally {
 			await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
 		}
+	}, 20_000);
+
+	it("replays an unconfirmed channel send from its outbox snapshot after SIGKILL", async () => {
+		const root = tempRoot();
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		const source = join(workspace, "report.txt");
+		writeFileSync(source, "outbox snapshot contents");
+		const storagePath = join(root, "channel-crash.sqlite");
+		const outboxDir = join(root, "tenant", "channels", "outbox");
+		const fixture = fileURLToPath(new URL("./durable-channel-crash-fixture.ts", import.meta.url));
+		const child = spawn(process.execPath, ["--import", "tsx", fixture, storagePath, outboxDir, workspace], {
+			cwd: process.cwd(),
+			env: { ...process.env },
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		children.add(child);
+		const output = await waitForOutput(child, "file-sent-before-outbox-commit");
+		const submissionId = Number(/submission:(\d+)/.exec(output)?.[1]) as SubmissionId;
+		expect(output).toContain("file-sent-before-outbox-commit:outbox snapshot contents");
+		await once(child, "exit");
+		children.delete(child);
+		rmSync(source);
+
+		const sends: Array<{ chatId: string; fileName?: string; contents: string }> = [];
+		const channelRegistry = new ChannelRegistry();
+		channelRegistry.register({
+			name: "feishu",
+			verify: async () => true,
+			parse: async () => null,
+			reply: async () => {},
+			push: async () => {},
+			sendFile: async (target, filePath, fileName) => {
+				sends.push({ chatId: target.chatId, fileName, contents: readFileSync(filePath, "utf-8") });
+			},
+		});
+		channelRegistry.setDefaultTarget({ channel: "feishu", chatId: "changed-default-chat" });
+		const provider = fauxRuntime();
+		provider.faux.setResponses([fauxAssistantMessage("channel recovered")]);
+		const runtime = await open({
+			storagePath,
+			workspaceDir: workspace,
+			channels: {
+				sessionId: "durable-crash-channel",
+				outboxDir,
+				workspaceDir: workspace,
+				channelRegistry,
+			},
+			...provider,
+		});
+		const recovered = await runtime.waitForSubmission(submissionId);
+
+		expect(recovered).toMatchObject({ status: "done", text: "channel recovered" });
+		expect(sends).toEqual([{ chatId: "crash-chat", fileName: "report.txt", contents: "outbox snapshot contents" }]);
+		const messages = durableEntriesToMessages((await runtime.snapshot()).entries);
+		const tool = messages.flatMap((message) => message.tools ?? []).find((call) => call.toolCallId === "crash-channel-call");
+		expect(JSON.stringify(tool?.result)).toContain("已把文件 report.txt");
 	}, 20_000);
 });

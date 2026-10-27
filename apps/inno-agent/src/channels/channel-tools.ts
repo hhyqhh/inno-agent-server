@@ -1,9 +1,16 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { ChannelRegistry, FileSendNotSupportedError } from "./channel.js";
+import {
+	channelOutboxPayloadPath,
+	completeChannelOutbox,
+	loadChannelOutbox,
+	prepareChannelOutbox,
+	type ChannelOutboxRecord,
+} from "./channel-outbox.js";
 import type { ChannelName } from "./types.js";
 import type { WorkspaceRegistry } from "../workspace/workspace-registry.js";
 import { logger } from "../logger.js";
@@ -22,6 +29,12 @@ export interface ChannelToolsDeps {
 	 * successful file send so the session picks up the channel badge in the UI.
 	 */
 	recordChannelInteraction?: (channel: ChannelName) => void;
+	/** Durable sends persist a payload snapshot and completion marker. External
+	 * delivery remains at-least-once across the send/completion crash window. */
+	durable?: {
+		outboxDir: string;
+		getOperationId: (toolCallId: string) => string;
+	};
 }
 
 /**
@@ -93,7 +106,27 @@ export function createChannelTools(deps: ChannelToolsDeps): ToolDefinition[] {
 				Type.String({ description: "发送时显示的文件名（可选），默认用文件本身的名字。" }),
 			),
 		}),
-		async execute(_toolCallId, params) {
+		async execute(toolCallId, params) {
+			const durable = deps.durable;
+			const operationId = durable?.getOperationId(toolCallId);
+			let outbox: ChannelOutboxRecord | undefined;
+			if (durable && operationId) {
+				try {
+					outbox = loadChannelOutbox(durable.outboxDir, operationId);
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					return {
+						content: [{ type: "text" as const, text: `渠道发送恢复失败：${msg}` }],
+						details: { error: "outbox_failed", message: msg } as Record<string, unknown>,
+					};
+				}
+				if (outbox?.completion) {
+					return {
+						content: [{ type: "text" as const, text: outbox.completion.text }],
+						details: outbox.completion.details,
+					};
+				}
+			}
 			const registered = deps.channelRegistry.all();
 			if (registered.length === 0) {
 				return {
@@ -105,8 +138,8 @@ export function createChannelTools(deps: ChannelToolsDeps): ToolDefinition[] {
 				};
 			}
 
-			// Resolve the target channel: explicit param → unique registered channel.
-			let channelName: ChannelName | undefined = params.channel as ChannelName | undefined;
+			// Resolve the target channel: persisted intent → explicit param → unique registered channel.
+			let channelName: ChannelName | undefined = outbox?.channel ?? params.channel as ChannelName | undefined;
 			if (!channelName) {
 				if (registered.length === 1) {
 					channelName = registered[0].name as ChannelName;
@@ -143,9 +176,10 @@ export function createChannelTools(deps: ChannelToolsDeps): ToolDefinition[] {
 				};
 			}
 
-			// Resolve the push target.
-			const chatId = params.chatId?.trim()
-				|| deps.channelRegistry.getDefaultTarget(channelName)?.chatId;
+			// Resolve the push target. Recovered sends keep the original target even
+			// if the tenant's default changed while the process was down.
+			const chatId = outbox?.chatId ?? (params.chatId?.trim()
+				|| deps.channelRegistry.getDefaultTarget(channelName)?.chatId);
 			if (!chatId) {
 				return {
 					content: [{
@@ -156,36 +190,70 @@ export function createChannelTools(deps: ChannelToolsDeps): ToolDefinition[] {
 				};
 			}
 
-			// Resolve and validate the file path within the workspace.
-			const workspaceDir = resolveWorkspaceDir(deps);
-			if (!workspaceDir) {
-				return {
-					content: [{ type: "text" as const, text: "无法确定当前会话的工作区，已停止发送文件。" }],
-					details: { error: "workspace_unavailable" } as Record<string, unknown>,
-				};
-			}
-			const resolved = safeResolveInWorkspace(workspaceDir, params.filePath);
-			if (!resolved) {
-				return {
-					content: [{
-						type: "text" as const,
-						text: `文件路径不合法或超出了工作区范围：${params.filePath}`,
-					}],
-					details: { error: "invalid_path", filePath: params.filePath } as Record<string, unknown>,
-				};
-			}
-			if (!existsSync(resolved) || !statSync(resolved).isFile()) {
-				return {
-					content: [{
-						type: "text" as const,
-						text: `工作区里找不到这个文件：${params.filePath}`,
-					}],
-					details: { error: "file_not_found", filePath: params.filePath } as Record<string, unknown>,
-				};
+			let resolved: string;
+			if (outbox && durable && operationId) {
+				resolved = channelOutboxPayloadPath(durable.outboxDir, operationId);
+				if (!existsSync(resolved) || !statSync(resolved).isFile()) {
+					return {
+						content: [{ type: "text" as const, text: "渠道 outbox 的文件快照丢失，已停止恢复发送。" }],
+						details: { error: "outbox_payload_missing", filePath: outbox.filePath } as Record<string, unknown>,
+					};
+				}
+			} else {
+				// Resolve and validate the file path within the workspace.
+				const workspaceDir = resolveWorkspaceDir(deps);
+				if (!workspaceDir) {
+					return {
+						content: [{ type: "text" as const, text: "无法确定当前会话的工作区，已停止发送文件。" }],
+						details: { error: "workspace_unavailable" } as Record<string, unknown>,
+					};
+				}
+				const workspaceFile = safeResolveInWorkspace(workspaceDir, params.filePath);
+				if (!workspaceFile) {
+					return {
+						content: [{
+							type: "text" as const,
+							text: `文件路径不合法或超出了工作区范围：${params.filePath}`,
+						}],
+						details: { error: "invalid_path", filePath: params.filePath } as Record<string, unknown>,
+					};
+				}
+				if (!existsSync(workspaceFile) || !statSync(workspaceFile).isFile()) {
+					return {
+						content: [{
+							type: "text" as const,
+							text: `工作区里找不到这个文件：${params.filePath}`,
+						}],
+						details: { error: "file_not_found", filePath: params.filePath } as Record<string, unknown>,
+					};
+				}
+				resolved = workspaceFile;
+				if (durable && operationId) {
+					outbox = {
+						operationId,
+						channel: channelName,
+						chatId,
+						filePath: params.filePath,
+						fileName: params.fileName,
+					};
+					try {
+						resolved = prepareChannelOutbox(durable.outboxDir, outbox, workspaceFile);
+					} catch (err) {
+						const msg = err instanceof Error ? err.message : String(err);
+						return {
+							content: [{ type: "text" as const, text: `渠道 outbox 写入失败：${msg}` }],
+							details: { error: "outbox_failed", filePath: params.filePath, message: msg } as Record<string, unknown>,
+						};
+					}
+				}
 			}
 
 			try {
-				await channel.sendFile({ channel: channelName, chatId }, resolved, params.fileName);
+				await channel.sendFile(
+					{ channel: channelName, chatId },
+					resolved,
+					outbox ? outbox.fileName ?? basename(outbox.filePath) : params.fileName,
+				);
 			} catch (err) {
 				logger.warn({ err, channel: channelName, filePath: params.filePath }, "send_file_to_channel tool failed");
 				if (err instanceof FileSendNotSupportedError) {
@@ -204,6 +272,22 @@ export function createChannelTools(deps: ChannelToolsDeps): ToolDefinition[] {
 				};
 			}
 
+			const completion = {
+				text: `已把文件 ${params.fileName ?? params.filePath} 发送到「${channelName}」。`,
+				details: { channel: channelName, chatId, filePath: params.filePath } as Record<string, unknown>,
+			};
+			if (durable && outbox) {
+				try {
+					completeChannelOutbox(durable.outboxDir, outbox, completion);
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					return {
+						content: [{ type: "text" as const, text: `文件已发送，但渠道 outbox 完成标记写入失败：${msg}` }],
+						details: { error: "outbox_completion_failed", channel: channelName, message: msg } as Record<string, unknown>,
+					};
+				}
+			}
+
 			// Tag the active session as having interacted with this channel so the
 			// UI shows the channel badge (best-effort — never fail the send on this).
 			try {
@@ -214,11 +298,8 @@ export function createChannelTools(deps: ChannelToolsDeps): ToolDefinition[] {
 			}
 
 			return {
-				content: [{
-					type: "text" as const,
-					text: `已把文件 ${params.fileName ?? params.filePath} 发送到「${channelName}」。`,
-				}],
-				details: { channel: channelName, chatId, filePath: params.filePath } as Record<string, unknown>,
+				content: [{ type: "text" as const, text: completion.text }],
+				details: completion.details,
 			};
 		},
 	});
