@@ -56,3 +56,36 @@ export async function createConfiguredDurableModels(
 	}
 	return { models, model: selection };
 }
+
+/** Stateless metadata completion through the same isolated configured runtime as
+ * the durable session. It never consults the legacy active session or registry. */
+export async function completeConfiguredDurablePrompt(
+	config: InnoConfig,
+	selection: { provider: string; modelId: string },
+	prompt: string,
+	maxTokens = 1024,
+	timeoutMs = 20_000,
+): Promise<string> {
+	const { models } = await createConfiguredDurableModels(config, selection);
+	const model = models.getModel(selection.provider, selection.modelId);
+	if (!model) throw new Error(`Durable model registration failed: ${selection.provider}/${selection.modelId}`);
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), timeoutMs);
+	try {
+		const response = await models.completeSimple(model, {
+			messages: [{
+				role: "user",
+				content: [{ type: "text", text: prompt }],
+				timestamp: Date.now(),
+			}],
+		}, { maxTokens, signal: controller.signal, timeoutMs });
+		if (response.stopReason === "error" || response.stopReason === "aborted") return "";
+		return response.content
+			.filter((item): item is { type: "text"; text: string } => item.type === "text")
+			.map((item) => item.text)
+			.join("\n")
+			.trim();
+	} finally {
+		clearTimeout(timer);
+	}
+}

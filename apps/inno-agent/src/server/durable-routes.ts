@@ -51,6 +51,14 @@ export async function handleDurableSessionResourceRoutes(
 		}
 		return true;
 	}
+	if (matchRoute("POST", method, url, "/api/sessions/:id/generate-topic")) {
+		try {
+			json(res, 200, await ctx.service.generateTopic(req, id));
+		} catch (error) {
+			json(res, errorStatus(error), { error: error instanceof Error ? error.message : String(error) });
+		}
+		return true;
+	}
 	if (matchRoute("PATCH", method, url, "/api/sessions/:id")) {
 		const body = await readBody(req) as Record<string, unknown>;
 		const name = typeof body.name === "string" ? body.name.trim() : "";
@@ -180,6 +188,7 @@ async function streamDurableTurn(
 			finalSessionRevision: detail.revision,
 		};
 		if (result.status === "done" && persisted && !state.cancelRequested) {
+			void service.maybeAutoGenerateTopic(req, state.sessionId);
 			streamRegistry.finishTurn(state, "completed", { type: "done", fullText: result.text }, persistence);
 		} else if (state.cancelRequested) {
 			streamRegistry.finishTurn(state, "aborted", {
@@ -301,6 +310,7 @@ export async function handleDurableChatRoutes(
 			const result = await lease.runtime.waitForSubmission(submission.id);
 			if (result.status !== "done") throw new Error(`Durable submission was unanswered: ${result.reason}`);
 			await ctx.service.snapshot(req, sessionId);
+			void ctx.service.maybeAutoGenerateTopic(req, sessionId);
 			json(res, 200, { response: result.text });
 		} catch (error) {
 			json(res, errorStatus(error), { error: error instanceof Error ? error.message : String(error) });

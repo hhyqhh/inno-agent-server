@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: tenant-scoped L3 recall tool (3L)
+## Current stage: durable generated session topics (3M)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -78,11 +78,14 @@ The current durable slice supports:
 - inline images persisted under `.chat-images/`, native image blocks for
   vision-capable models, OCR path hints for explicitly text-only models, and
   workspace preview restoration through the same deduplicated sidecar;
+- first-message fallback topics, automatic richer upgrades after six messages,
+  and explicit `POST /api/sessions/:id/generate-topic`, all using the durable
+  session's pinned provider/model and isolated tenant credentials;
 - graceful shutdown of open durable runtimes.
 
 Shell, workspace mutations, MCP, subagents, codemode, and computer-use remain
-disabled. Automatic fallback after a provider rejects a native image payload, durable permissions, branching/editing, showcase
-export, and generated topics are not implemented on this path yet; unsupported
+disabled. Automatic fallback after a provider rejects a native image payload, durable permissions, branching/editing, and showcase
+export are not implemented on this path yet; unsupported
 operations fail explicitly rather than falling back to legacy execution.
 Workspace-private skills are injected as prompt resources; they do not alter the
 process-global PI resource loader or enable otherwise unsupported durable tools.
@@ -127,6 +130,19 @@ tenant context before backfill, ownership checks, and reads. Index updates are
 idempotent derived state, so the read-only tool is replay-safe. Durable SQLite
 history is not indexed yet, and automatic per-turn threshold-gated recall
 injection remains pending; this slice adds only the explicit `l3_recall` tool.
+
+Durable topics share the legacy excerpt, cleaning, and fallback helpers. The
+first submission records a generated first-message preview; a completed turn
+with at least six messages triggers one background richer upgrade. Generation
+uses a stateless `ModelRuntime.completeSimple()` call built from the verified
+tenant configuration captured at launch and the catalog's pinned
+provider/model, not the legacy active session or a later default-model change.
+It does not append to durable history. Per-tenant/session promises deduplicate
+concurrent generation, and automatic writes recheck the catalog so a manual
+rename wins even when a completion is already in flight. Manual generation is
+available through the existing generate-topic endpoint. Generated/upgraded
+markers live in the tenant-local durable catalog; older records without those
+markers are treated as final and are not automatically overwritten.
 
 Durable OCR stores checkpoints under the tenant-local `ocr/` directory, keyed
 by a hash of the session/tool-call operation ID. It writes the remote `jobId`
@@ -229,6 +245,7 @@ workspace/symlink containment, read-only fail-closed behavior, workspace
 projection, inline-image retry path stability and OCR hint construction,
 tenant-scoped attachment/image sidecar caching and request-ID dedup,
 replay-safe L1/L2 execution, explicit L3 recall, direct profile patch/update retry dedup,
+durable topic upgrade dedup, pinned-model selection, and manual-rename protection,
 L1 event/profile crash-gap recovery, deterministic L2 archive,
 OCR completion caching and job-ID resume, channel payload/completion caching,
 verified tenant channel rebinding, and recovery after real child processes are
@@ -246,7 +263,9 @@ creation, concurrent authenticated durable sessions, per-tenant provider and
 OCR Authorization headers, cross-tenant 404s, completed request-ID retries,
 lack of legacy JSONL creation, SSE disconnect/reconnect replay, tenant-local
 L1/L2/OCR writes, replay-safe direct profile patch/update, and tenant-scoped L3
-recall through the authenticated HTTP boundary, original-run question
+recall through the authenticated HTTP boundary, automatic and manual durable
+topic generation with per-tenant credentials and pinned-model selection,
+original-run question
 answers with cross-tenant 404 and stale-turn 409 responses, non-streaming
 `no_ui` question resolution, streaming/non-streaming validated workspace
 attachments with raw-text history and out-of-workspace path rejection, native

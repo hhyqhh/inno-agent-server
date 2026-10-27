@@ -104,6 +104,28 @@ beforeAll(async () => {
 		req.on("data", (chunk) => { body += chunk; });
 		req.on("end", async () => {
 			providerRequests.push({ authorization: req.headers.authorization ?? "", body });
+			if (body.includes("请用一句简短的中文短语概括")) {
+				const topic = req.headers.authorization === "Bearer durable-topic-a-secret"
+					? "租户 A 学习目标"
+					: "租户 B 学习目标";
+				res.writeHead(200, { "Content-Type": "text/event-stream" });
+				res.end([
+					`data: ${JSON.stringify({
+						id: "tenant-topic", object: "chat.completion.chunk", created: 0, model: "tenant-model",
+						choices: [{ index: 0, delta: { role: "assistant", content: topic }, finish_reason: null }],
+					})}`,
+					"",
+					`data: ${JSON.stringify({
+						id: "tenant-topic", object: "chat.completion.chunk", created: 0, model: "tenant-model",
+						choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+					})}`,
+					"",
+					"data: [DONE]",
+					"",
+					"",
+				].join("\n"));
+				return;
+			}
 			if (body.includes("durable-reconnect")) {
 				await new Promise((resolveDelay) => setTimeout(resolveDelay, 400));
 			}
@@ -1198,6 +1220,76 @@ describe("durable session HTTP boundary", () => {
 		expect(recovered.messages.some((message) => message.role === "assistant" && message.content === "tenant stub response")).toBe(true);
 	}, 60_000);
 
+	it("generates durable topics with tenant credentials and the session's pinned model", async () => {
+		const [cookieA, cookieB] = await Promise.all([
+			registerUser("durable-topic-a@example.com"),
+			registerUser("durable-topic-b@example.com"),
+		]);
+		const configure = async (cookie: string, apiKey: string) => {
+			expect((await api(cookie, "/api/settings/providers", {
+				method: "PUT",
+				body: JSON.stringify({
+					providerId: "shared",
+					baseUrl: providerOrigin,
+					apiKey,
+					api: "openai-completions",
+					models: [
+						{ id: "tenant-model", name: "Tenant model", contextWindow: 32_000, maxTokens: 2_000 },
+						{ id: "other-model", name: "Other model", contextWindow: 32_000, maxTokens: 2_000 },
+					],
+				}),
+			})).status).toBe(200);
+		};
+		await Promise.all([configure(cookieA, "durable-topic-a-secret"), configure(cookieB, "durable-topic-b-secret")]);
+		const createDurable = async (cookie: string) => {
+			const response = await api(cookie, "/api/sessions", {
+				method: "POST", body: JSON.stringify({ runtime: "durable" }),
+			});
+			expect(response.status).toBe(201);
+			return response.json() as Promise<{ id: string }>;
+		};
+		const [sessionA, sessionB] = await Promise.all([createDurable(cookieA), createDurable(cookieB)]);
+		expect((await api(cookieA, "/api/settings/model", {
+			method: "POST", body: JSON.stringify({ provider: "shared", model: "other-model" }),
+		})).status).toBe(200);
+		const turn = async (cookie: string, sessionId: string, prompt: string, requestId: string) => {
+			const response = await api(cookie, "/api/chat", {
+				method: "POST", body: JSON.stringify({ sessionId, prompt, clientRequestId: requestId }),
+			});
+			expect(response.status).toBe(200);
+		};
+		for (const [index, prompt] of ["durable-topic-first", "durable-topic-second", "durable-topic-third"].entries()) {
+			await Promise.all([
+				turn(cookieA, sessionA.id, `${prompt}-a`, `durable-topic-a-${index}`),
+				turn(cookieB, sessionB.id, `${prompt}-b`, `durable-topic-b-${index}`),
+			]);
+		}
+		const topicName = async (cookie: string, sessionId: string) => {
+			const response = await api(cookie, `/api/sessions/${sessionId}`);
+			const detail = await response.json() as { name?: string };
+			return detail.name;
+		};
+		await waitFor(async () => await topicName(cookieA, sessionA.id) === "租户 A 学习目标"
+			&& await topicName(cookieB, sessionB.id) === "租户 B 学习目标", "durable automatic topics");
+		const automaticTopics = providerRequests.filter((request) => request.body.includes("请用一句简短的中文短语概括"));
+		const topicA = automaticTopics.filter((request) => request.authorization === "Bearer durable-topic-a-secret");
+		const topicB = automaticTopics.filter((request) => request.authorization === "Bearer durable-topic-b-secret");
+		expect(topicA).toHaveLength(1);
+		expect(topicB).toHaveLength(1);
+		expect((JSON.parse(topicA[0]!.body) as { model: string }).model).toBe("tenant-model");
+		expect((JSON.parse(topicB[0]!.body) as { model: string }).model).toBe("tenant-model");
+		expect(topicA[0]?.body).toContain("durable-topic-first-a");
+		expect(topicA[0]?.body).toContain("durable-topic-third-a");
+		expect(topicB[0]?.body).not.toContain("durable-topic-first-a");
+
+		expect((await api(cookieB, `/api/sessions/${sessionA.id}/generate-topic`, { method: "POST" })).status).toBe(404);
+		const regenerated = await api(cookieA, `/api/sessions/${sessionA.id}/generate-topic`, { method: "POST" });
+		expect(regenerated.status).toBe(200);
+		expect(await regenerated.json()).toMatchObject({ name: "租户 A 学习目标", runtime: "durable", topicPendingUpgrade: false });
+		expect(providerRequests.filter((request) => request.authorization === "Bearer durable-topic-a-secret"
+			&& request.body.includes("请用一句简短的中文短语概括"))).toHaveLength(2);
+	}, 60_000);
+
 	it("passes validated attachments and inline images without exposing model-only context as user text", async () => {
 		const cookieA = await registerUser("durable-attachments@example.com");
 		expect((await api(cookieA, "/api/settings/providers", {
@@ -1289,7 +1381,8 @@ describe("durable session HTTP boundary", () => {
 		});
 		expect(nativeRetry.status).toBe(200);
 		expect(await nativeRetry.text()).toContain('"persisted":true');
-		expect(providerRequests.filter((request) => request.body.includes("durable-native-inline-image"))).toHaveLength(1);
+		expect(providerRequests.filter((request) => request.body.includes("durable-native-inline-image")
+			&& !request.body.includes("请用一句简短的中文短语概括"))).toHaveLength(1);
 		const nativeDetail = await (await api(cookieA, `/api/sessions/${session.id}`)).json() as {
 			messages: Array<{ role: string; content: string; images?: Array<{ previewUrl: string; mimeType: string }> }>;
 		};

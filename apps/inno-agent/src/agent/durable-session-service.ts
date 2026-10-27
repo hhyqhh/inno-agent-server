@@ -11,7 +11,7 @@ import { runInTenantContext } from "../tenants/current.js";
 import { getRequestTenant } from "../tenants/http.js";
 import { resolveRequestTenantDataRoot } from "../tenants/paths.js";
 import type { TenantStore } from "../tenants/store.js";
-import type { SessionSummary } from "../server/session-model.js";
+import { TOPIC_UPGRADE_MESSAGE_THRESHOLD, type SessionMessageSummary, type SessionSummary } from "../server/session-model.js";
 import {
 	buildAttachmentContext,
 	parseChatAttachments,
@@ -25,7 +25,8 @@ import {
 } from "../server/attachments-store.js";
 import { clearWorkspaceActivity, recordWorkspaceAttachmentActivity, recordWorkspaceFileAccess } from "../server/workspace-activity-store.js";
 import { buildImagePathsHint, parseInlineImages, persistInlineImages } from "../server/inline-images.js";
-import { createConfiguredDurableModels } from "./durable-models.js";
+import { fallbackTopicFromMessages, generateSessionTopicWithCompletion } from "../server/session-topic.js";
+import { completeConfiguredDurablePrompt, createConfiguredDurableModels } from "./durable-models.js";
 import { buildDurableInstructions } from "./durable-memory.js";
 import { durableEntriesToMessages } from "./durable-projection.js";
 import { DurableQuestionStore } from "./durable-questions.js";
@@ -34,6 +35,7 @@ import type { PersistedQuestion, QuestionBridgeResult, QuestionResponseStatus } 
 import { INNO_SYSTEM_PROMPT } from "./system-prompt.js";
 import { buildWorkspaceContextSections } from "./workspace-context.js";
 import { ScopedL3Memory } from "../memory/l3/l3-tools.js";
+import { logger } from "../logger.js";
 
 const DURABLE_ID_PATTERN = /^durable-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -47,6 +49,8 @@ export interface DurableSessionRecord {
 	preview: string;
 	provider: string;
 	modelId: string;
+	topicGenerated?: boolean;
+	topicUpgraded?: boolean;
 	archived: boolean;
 }
 
@@ -89,6 +93,7 @@ export interface DurableSessionServiceOptions {
 	getChannelRegistry?: () => ChannelRegistry | undefined;
 	tenantStore?: TenantStore | null;
 	openRuntime?: typeof DurableSessionRuntime.open;
+	completeTopic?: typeof completeConfiguredDurablePrompt;
 }
 
 function bindChannelRegistry(
@@ -131,6 +136,8 @@ function isRecord(value: unknown): value is DurableSessionRecord {
 		&& typeof record.createdAt === "string" && typeof record.updatedAt === "string"
 		&& typeof record.messageCount === "number" && typeof record.preview === "string"
 		&& typeof record.provider === "string" && typeof record.modelId === "string"
+		&& (record.topicGenerated === undefined || typeof record.topicGenerated === "boolean")
+		&& (record.topicUpgraded === undefined || typeof record.topicUpgraded === "boolean")
 		&& typeof record.archived === "boolean";
 }
 
@@ -145,6 +152,9 @@ function toSummary(record: DurableSessionRecord): DurableSessionSummary {
 		channels: ["web"],
 		origin: "web",
 		hasTopic: record.name !== "新对话",
+		topicPendingUpgrade: record.topicGenerated === true
+			&& record.topicUpgraded !== true
+			&& record.messageCount >= TOPIC_UPGRADE_MESSAGE_THRESHOLD,
 		runtime: "durable",
 		archived: record.archived,
 	};
@@ -157,6 +167,7 @@ export class DurableSessionService {
 	private readonly runtimes = new Map<string, RuntimeEntry>();
 	private readonly openings = new Map<string, Promise<DurableSessionRuntime>>();
 	private readonly questionStores = new Map<string, DurableQuestionStore>();
+	private readonly topicGenerations = new Map<string, Promise<DurableSessionSummary>>();
 	private readonly openRuntime: typeof DurableSessionRuntime.open;
 	private closing = false;
 
@@ -290,7 +301,12 @@ export class DurableSessionService {
 	}
 
 	rename(req: IncomingMessage, id: string, name: string): DurableSessionSummary {
-		return toSummary(this.update(req, id, { name, updatedAt: new Date().toISOString() }));
+		return toSummary(this.update(req, id, {
+			name,
+			topicGenerated: false,
+			topicUpgraded: false,
+			updatedAt: new Date().toISOString(),
+		}));
 	}
 
 	setArchived(req: IncomingMessage, id: string, archived: boolean): DurableSessionSummary {
@@ -300,11 +316,80 @@ export class DurableSessionService {
 	noteSubmission(req: IncomingMessage, id: string, prompt: string): void {
 		const record = this.get(req, id);
 		if (!record) throw new Error("Durable session not found");
+		const firstTopic = record.name === "新对话";
+		const firstMessage: SessionMessageSummary = { role: "user", content: prompt, timestamp: Date.now() };
 		this.update(req, id, {
 			preview: prompt.trim().slice(0, 200),
-			name: record.name === "新对话" ? prompt.trim().slice(0, 80) || record.name : record.name,
+			name: firstTopic ? fallbackTopicFromMessages([firstMessage], toSummary(record)) : record.name,
+			...(firstTopic ? { topicGenerated: true, topicUpgraded: false } : {}),
 			updatedAt: new Date().toISOString(),
 		});
+	}
+
+	generateTopic(req: IncomingMessage, id: string): Promise<DurableSessionSummary> {
+		return this.generateTopicInternal(req, id, false);
+	}
+
+	/** Upgrade only an automatic preview once the conversation has enough context.
+	 * The returned promise makes the fire-and-forget HTTP path deterministic in tests. */
+	async maybeAutoGenerateTopic(req: IncomingMessage, id: string): Promise<void> {
+		const record = this.get(req, id);
+		if (!record || record.topicGenerated !== true || record.topicUpgraded === true
+			|| record.messageCount < TOPIC_UPGRADE_MESSAGE_THRESHOLD) return;
+		try {
+			await this.generateTopicInternal(req, id, true);
+			const current = this.get(req, id);
+			if (current?.topicGenerated === true && current.topicUpgraded === true) {
+				logger.info(`[auto-topic] ${id} → ${current.name} (durable upgraded)`);
+			}
+		} catch (error) {
+			logger.warn({ err: error }, `auto-topic generation failed for ${id}`);
+		}
+	}
+
+	private generateTopicInternal(req: IncomingMessage, id: string, automatic: boolean): Promise<DurableSessionSummary> {
+		const initial = this.get(req, id);
+		if (!initial) throw new Error("Durable session not found");
+		const key = `${this.runtimeKey(req, id)}:topic`;
+		const pending = this.topicGenerations.get(key);
+		if (pending) return pending;
+		// Capture the verified tenant's configuration before background work can
+		// outlive its HTTP ALS scope. The catalog selection stays pinned even if
+		// the tenant later changes their default model.
+		const config = resolveCurrentTenantConfig(this.options.dataDir, this.options.getLocalConfig());
+		const complete = this.options.completeTopic ?? completeConfiguredDurablePrompt;
+		let operation: Promise<DurableSessionSummary>;
+		operation = (async () => {
+			const detail = await this.snapshot(req, id);
+			const before = this.get(req, id);
+			if (!before) throw new Error("Durable session not found");
+			if (automatic && (before.topicGenerated !== true || before.topicUpgraded === true)) {
+				return toSummary(before);
+			}
+			const expectedName = before.name;
+			const topic = await generateSessionTopicWithCompletion(
+				detail.summary,
+				detail.messages,
+				(prompt, maxTokens) => complete(config, { provider: before.provider, modelId: before.modelId }, prompt, maxTokens),
+			);
+			const current = this.get(req, id);
+			if (!current) throw new Error("Durable session not found");
+			// A manual rename (or another writer) wins over an in-flight generation.
+			if (current.name !== expectedName
+				|| (automatic && (current.topicGenerated !== true || current.topicUpgraded === true))) {
+				return toSummary(current);
+			}
+			return toSummary(this.update(req, id, {
+				name: topic,
+				topicGenerated: true,
+				topicUpgraded: true,
+				updatedAt: new Date().toISOString(),
+			}));
+		})().finally(() => {
+			if (this.topicGenerations.get(key) === operation) this.topicGenerations.delete(key);
+		});
+		this.topicGenerations.set(key, operation);
+		return operation;
 	}
 
 	prepareAttachments(req: IncomingMessage, id: string, raw: unknown): PreparedDurableAttachments | null {
@@ -535,10 +620,12 @@ export class DurableSessionService {
 	async close(): Promise<void> {
 		this.closing = true;
 		await Promise.all([...this.openings.values()].map((opening) => opening.catch(() => undefined)));
+		await Promise.all([...this.topicGenerations.values()].map((generation) => generation.catch(() => undefined)));
 		const entries = [...this.runtimes.values()];
 		this.runtimes.clear();
 		this.openings.clear();
 		this.questionStores.clear();
+		this.topicGenerations.clear();
 		await Promise.all(entries.map((entry) => entry.runtime.close().catch(() => undefined)));
 	}
 }

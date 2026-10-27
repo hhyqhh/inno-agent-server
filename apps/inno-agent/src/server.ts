@@ -66,7 +66,7 @@ import { handleCommandsRoutes } from "./server/routes/commands.js";
 import { handleBtwRoutes } from "./server/routes/btw.js";
 import { mergeSessionAgentCommands } from "./server/agent-command-store.js";
 import { recordToolWorkspaceActivity } from "./server/workspace-activity-store.js";
-import { stripUploadedImagesPrefix } from "./server/upload-prefix.js";
+import { fallbackTopicFromMessages, generateSessionTopicWithCompletion } from "./server/session-topic.js";
 import {
 	mergeChannels,
 	selectActiveSessionEntries,
@@ -1301,84 +1301,8 @@ function recordJobRunSession(sessionId: string): void {
 	writeJson(sessionChannelMetadataPath(), metadata);
 }
 
-function cleanGeneratedTopic(raw: string): string {
-	return raw
-		.replace(/^["'`“”‘’]+|["'`“”‘’]+$/g, "")
-		.replace(/^标题[:：]\s*/i, "")
-		.replace(/\s+/g, " ")
-		.trim()
-		.slice(0, 32);
-}
-
-/** Strip machine-injected prefixes (e.g. the image-upload hint prepended to
- *  user prompts) so titles reflect the user's actual words. */
-function stripInjectedPrefix(content: string): string {
-	return stripUploadedImagesPrefix(content);
-}
-
-function fallbackTopicFromMessages(messages: SessionMessageSummary[], summary: SessionSummary): string {
-	const source = stripInjectedPrefix(messages.find((message) => message.role === "user")?.content || "") || summary.preview || summary.name;
-	const cleaned = source.replace(/\s+/g, " ").trim();
-	return cleaned ? (cleaned.length > 28 ? `${cleaned.slice(0, 28)}...` : cleaned) : "New conversation";
-}
-
-/** Build the dialogue excerpt for topic generation: first 2 + last 4 usable
- *  messages (the opening states the goal, the tail captures where the
- *  conversation actually went), consecutive duplicates dropped (scheduler
- *  nudges repeat), machine prefixes stripped, ~2400 chars. */
-function buildTopicExcerpt(messages: SessionMessageSummary[]): string {
-	const usable = messages
-		.map((message) => ({
-			role: message.role,
-			content: stripInjectedPrefix(message.content).replace(/\s+/g, " ").trim(),
-		}))
-		.filter((message) => message.content)
-		.filter((message, index, all) => index === 0 || message.content !== all[index - 1].content);
-	const picked = usable.length <= 6 ? usable : [...usable.slice(0, 2), ...usable.slice(-4)];
-	return picked
-		.map((message) => `${message.role === "user" ? "用户" : "助手"}: ${message.content}`)
-		.join("\n")
-		.slice(0, 2400);
-}
-
 async function generateSessionTopic(summary: SessionSummary, messages: SessionMessageSummary[]): Promise<string> {
-	const excerpt = buildTopicExcerpt(messages);
-
-	if (!excerpt) return fallbackTopicFromMessages(messages, summary);
-
-	const prompt = `请用一句简短的中文短语概括下面学习对话中用户的学习目标或任务。
-要求：
-- 只输出标题本身，不要解释
-- 8 到 16 个中文字符
-- 聚焦用户想学的内容或要做的任务，忽略寒暄、客套话和系统提示
-- 不要使用引号、句号或冒号
-
-示例一：
-对话：
-用户: 你好
-助手: 你好！今天想学点什么？
-用户: 我一直搞不清贝叶斯定理，能举个生活中的例子讲讲吗
-标题：贝叶斯定理入门
-
-示例二：
-对话：
-用户: 帮我把这份教案改成 45 分钟公开课的版本
-助手: 好的，我先看看教案的结构……
-标题：教案改编公开课版
-
-对话：
-${excerpt}
-标题：`;
-
-	try {
-		// Reasoning models burn tokens on a thinking block before any visible
-		// text — a tiny maxTokens (e.g. 64) gets fully consumed by thinking and
-		// yields an empty title. 1024 leaves ample room for both.
-		const generated = cleanGeneratedTopic(await completePromptOnce(prompt, 1024));
-		return generated || fallbackTopicFromMessages(messages, summary);
-	} catch (err) {
-		return fallbackTopicFromMessages(messages, summary);
-	}
+	return generateSessionTopicWithCompletion(summary, messages, completePromptOnce);
 }
 
 /**

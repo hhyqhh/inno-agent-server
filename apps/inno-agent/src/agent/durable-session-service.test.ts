@@ -264,6 +264,127 @@ describe("DurableSessionService", () => {
 		});
 	});
 
+	it("upgrades automatic topics with the pinned model and preserves manual renames", async () => {
+		await runWithoutTenantContext(async () => {
+			const base = root();
+			const faux = fauxProvider();
+			faux.setResponses([
+				fauxAssistantMessage("answer 1"),
+				fauxAssistantMessage("answer 2"),
+				fauxAssistantMessage("answer 3"),
+				fauxAssistantMessage("answer 4"),
+			]);
+			let currentConfig = config("local");
+			const completions: Array<{ provider: string; modelId: string; prompt: string }> = [];
+			const service = new DurableSessionService({
+				dataDir: base,
+				getLocalConfig: () => currentConfig,
+				enabled: true,
+				resolveWorkspaceDir: () => base,
+				openRuntime: async (options) => {
+					const models = createModels();
+					models.setProvider(faux.provider);
+					return DurableSessionRuntime.open({ ...options, models, model: { provider: faux.provider.id, modelId: faux.getModel().id } });
+				},
+				completeTopic: async (_config, selection, prompt) => {
+					completions.push({ ...selection, prompt });
+					return "标题：Rust 所有权入门";
+				},
+			});
+			services.push(service);
+			const req = { headers: {} } as IncomingMessage;
+			const session = service.create(req, { workspaceId: "workspace" });
+			currentConfig = normalizeConfig({
+				...currentConfig,
+				defaultProvider: "other-provider",
+				defaultModel: "other-model",
+				providers: {
+					...currentConfig.providers,
+					"other-provider": {
+						baseUrl: "http://other.invalid/v1",
+						apiKey: "other-key",
+						models: [{ id: "other-model", name: "Other", reasoning: false, input: ["text"], contextWindow: 8_000, maxTokens: 1_000 }],
+					},
+				},
+			});
+			const turn = async (prompt: string, requestId: string) => {
+				const lease = await service.lease(req, session.id);
+				try {
+					const submission = await lease.runtime.submit(prompt, requestId);
+					expect((await lease.runtime.waitForSubmission(submission.id)).status).toBe("done");
+				} finally { await lease.release(); }
+				service.noteSubmission(req, session.id, prompt);
+				await service.snapshot(req, session.id);
+			};
+			await turn("学习 Rust 所有权", "topic-1");
+			await turn("理解借用检查器", "topic-2");
+			expect(service.list(req)[0]?.topicPendingUpgrade).toBe(false);
+			await turn("练习生命周期标注", "topic-3");
+			await Promise.all([
+				service.maybeAutoGenerateTopic(req, session.id),
+				service.maybeAutoGenerateTopic(req, session.id),
+			]);
+			expect(completions).toHaveLength(1);
+			expect(completions[0]).toMatchObject({ provider: "faux-configured", modelId: "faux-model" });
+			expect(completions[0]?.prompt).toContain("学习 Rust 所有权");
+			expect(completions[0]?.prompt).toContain("练习生命周期标注");
+			expect(service.list(req)[0]).toMatchObject({ name: "Rust 所有权入门", topicPendingUpgrade: false });
+
+			service.rename(req, session.id, "我的手动标题");
+			await turn("继续练习", "topic-4");
+			await service.maybeAutoGenerateTopic(req, session.id);
+			expect(completions).toHaveLength(1);
+			expect(service.list(req)[0]?.name).toBe("我的手动标题");
+		});
+	});
+
+	it("does not let an in-flight automatic topic overwrite a manual rename", async () => {
+		await runWithoutTenantContext(async () => {
+			const base = root();
+			const faux = fauxProvider();
+			faux.setResponses([fauxAssistantMessage("answer 1"), fauxAssistantMessage("answer 2"), fauxAssistantMessage("answer 3")]);
+			let finishTopic!: (value: string) => void;
+			let topicStarted = false;
+			const completion = new Promise<string>((resolve) => { finishTopic = resolve; });
+			const service = new DurableSessionService({
+				dataDir: base,
+				getLocalConfig: () => config("local"),
+				enabled: true,
+				resolveWorkspaceDir: () => base,
+				openRuntime: async (options) => {
+					const models = createModels();
+					models.setProvider(faux.provider);
+					return DurableSessionRuntime.open({ ...options, models, model: { provider: faux.provider.id, modelId: faux.getModel().id } });
+				},
+				completeTopic: async () => {
+					topicStarted = true;
+					return completion;
+				},
+			});
+			services.push(service);
+			const req = { headers: {} } as IncomingMessage;
+			const session = service.create(req, { workspaceId: "workspace" });
+			for (const [index, prompt] of ["first", "second", "third"].entries()) {
+				const lease = await service.lease(req, session.id);
+				try {
+					const submission = await lease.runtime.submit(prompt, `rename-topic-${index}`);
+					await lease.runtime.waitForSubmission(submission.id);
+				} finally { await lease.release(); }
+				service.noteSubmission(req, session.id, prompt);
+				await service.snapshot(req, session.id);
+			}
+			const generation = service.maybeAutoGenerateTopic(req, session.id);
+			for (let attempt = 0; attempt < 50 && !topicStarted; attempt += 1) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			expect(topicStarted).toBe(true);
+			service.rename(req, session.id, "手动保留");
+			finishTopic!("不应覆盖");
+			await generation;
+			expect(service.list(req)[0]).toMatchObject({ name: "手动保留", topicPendingUpgrade: false });
+		});
+	});
+
 	it("requires the explicit runtime gate and leaves legacy JSONL untouched", async () => {
 		const base = root();
 		const service = new DurableSessionService({
