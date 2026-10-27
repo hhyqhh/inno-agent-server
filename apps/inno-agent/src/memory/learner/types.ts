@@ -13,6 +13,9 @@ export interface LearnerProfile {
 	misconceptions: Misconception[];
 	preferences: LearnerPreferences;
 	profile_summary: string;
+	/** Durable tool operations already folded into this profile. Keeping the
+	 * marker in the same atomic profile write closes the event/profile crash gap. */
+	applied_operation_ids?: string[];
 }
 
 export interface LearningGoal {

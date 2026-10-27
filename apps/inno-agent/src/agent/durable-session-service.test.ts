@@ -3,11 +3,12 @@ import type { IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { fauxAssistantMessage, fauxProvider, type FauxProviderHandle } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxProviderHandle } from "@earendil-works/pi-ai/providers/faux";
 import { afterEach, describe, expect, it } from "vitest";
 import { normalizeConfig } from "../config.js";
 import { runInTenantContext, runWithoutTenantContext } from "../tenants/current.js";
 import { saveTenantConfig } from "../tenants/config.js";
+import { loadEvents } from "../memory/learner/profile-store.js";
 import { setRequestTenant } from "../tenants/http.js";
 import type { TenantContext, TenantStore } from "../tenants/store.js";
 import { DurableRuntimeDisabledError, DurableSessionService } from "./durable-session-service.js";
@@ -72,7 +73,15 @@ describe("DurableSessionService", () => {
 				let faux = providers.get(options.storagePath);
 				if (!faux) {
 					faux = fauxProvider();
-					faux.setResponses([fauxAssistantMessage(options.storagePath.includes("tenant-a") ? "answer A" : "answer B")]);
+					const tenantConcept = options.storagePath.includes("tenant-a") ? "concept-a" : "concept-b";
+					faux.setResponses([
+						fauxAssistantMessage(fauxToolCall("record_learning_event", {
+							event_type: "concept_explained",
+							context: { concept_ids: [tenantConcept] },
+							payload: { topic: tenantConcept },
+						}, { id: `event-${tenantConcept}` }), { stopReason: "toolUse" }),
+						fauxAssistantMessage(options.storagePath.includes("tenant-a") ? "answer A" : "answer B"),
+					]);
 					providers.set(options.storagePath, faux);
 				}
 				const models = createModels();
@@ -114,6 +123,12 @@ describe("DurableSessionService", () => {
 		expect(inTenant(b, () => service.list(boundB.req)).map((item) => item.id)).toEqual([boundB.summary.id]);
 		expect(readFileSync(join(base, "tenants", "tenant-a", "durable", "sessions.json"), "utf-8")).toContain(boundA.summary.id);
 		expect(readFileSync(join(base, "tenants", "tenant-b", "durable", "sessions.json"), "utf-8")).not.toContain(boundA.summary.id);
+		const eventsA = loadEvents(join(base, "tenants", "tenant-a", "learner"));
+		const eventsB = loadEvents(join(base, "tenants", "tenant-b", "learner"));
+		expect(eventsA).toHaveLength(1);
+		expect(eventsB).toHaveLength(1);
+		expect(eventsA[0]!.context.concept_ids).toEqual(["concept-a"]);
+		expect(eventsB[0]!.context.concept_ids).toEqual(["concept-b"]);
 	});
 
 	it("keeps request deduplication across idle runtime close/reopen", async () => {

@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: explicit HTTP opt-in (3B)
+## Current stage: replay-safe tenant memory (3C)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -58,14 +58,18 @@ The current durable slice supports:
 - concurrent independent sessions without the legacy global prompt queue;
 - committed snapshots and existing Inno history/SSE event shapes;
 - the workspace-read-only `read` tool, including canonical symlink containment;
+- replay-safe, tenant-local L1 context/event/evidence tools and L2 archive,
+  query, and lint tools;
+- tenant-local L1 profile/recent-event context in durable instructions;
 - graceful shutdown of open durable runtimes.
 
-Shell, mutations, MCP, subagents, codemode, and computer-use remain disabled.
-Attachments, L1/L2 tools, durable questions/permissions, branching/editing,
-showcase export, generated topics, and turn cancellation are not implemented on
-this path yet; unsupported operations fail explicitly rather than falling back
-to legacy execution. The workspace `agent.md` and private-skill prompt context
-are not injected yet.
+Shell, workspace mutations, MCP, subagents, codemode, and computer-use remain
+disabled. Direct `patch_learner_profile` and `update_learner_profile` mutations
+are not exposed on the durable path yet. Attachments, durable
+questions/permissions, branching/editing, showcase export, generated topics,
+and turn cancellation are not implemented on this path yet; unsupported
+operations fail explicitly rather than falling back to legacy execution. The
+workspace `agent.md` and private-skill prompt context are not injected yet.
 
 ## Recovery and delivery semantics
 
@@ -75,9 +79,25 @@ not an exactly-once guarantee for paid model calls or external side effects.
 
 A repeated `requestId` returns the original submission in the same conversation.
 After restart, `Harness.open()` followed by `resume()` continues unfinished
-work, and `harness.submission(id)` reacquires its receipt. Tool recovery depends
-on each tool's replay policy; the initial slice does not enable side-effecting
-tools.
+work, and `harness.submission(id)` reacquires its receipt. Memory tools are
+registered as replay-safe; an interrupted committed tool intent therefore
+re-executes with the same provider tool-call ID after reopen.
+
+Replay safety requires application-level idempotency. Durable L1 event and
+evidence operations use IDs namespaced by session and tool call. The event is
+appended first; all derived profile changes and an `applied_operation_ids`
+marker are then committed together through the existing atomic profile write.
+A retry with the marker returns the persisted result without reapplying it. A
+crash between the event append and profile commit instead reuses the persisted
+event and applies its signals once. This closes the event/profile crash gap
+within the single-process/single-owner boundary; it is not a general
+exactly-once guarantee for model calls or external effects.
+
+Durable L2 archive uses deterministic conversion and page generation, disabling
+nested summarization/rich-page model calls. Existing content-hash deduplication
+and manifest records resume incomplete archives. Durable query skips the legacy
+append-only query log. L1/L2 feature gates and tenant data roots are preserved;
+memory writes never use the legacy global tenant root in authenticated mode.
 
 One durable storage has **one owner at a time**. The in-process guard does not
 replace deployment routing, lease/fencing, or an ordered old-owner shutdown.
@@ -106,16 +126,19 @@ The PostgreSQL-free suite uses only `fauxProvider()` and temporary directories.
 It covers concurrent session/tenant roots, isolated configured model/auth
 runtimes, request deduplication across idle close/reopen, stable committed
 revisions, busy-delete rejection, legacy JSONL non-interference,
-workspace/symlink containment, read-only fail-closed behavior, and recovery
-after a real child process is killed with `SIGKILL` during a delayed model
-response. No paid model endpoint is used.
+workspace/symlink containment, read-only fail-closed behavior, replay-safe
+L1/L2 execution, L1 event/profile crash-gap recovery, deterministic L2 archive,
+and recovery after real child processes are killed with `SIGKILL` during a
+delayed model response and during an interrupted memory tool. No paid model
+endpoint is used.
 
 The real-PostgreSQL integration suite additionally covers explicit HTTP
 creation, concurrent authenticated durable sessions, per-tenant provider
 Authorization headers, cross-tenant 404s, completed request-ID retries, lack of
-legacy JSONL creation, and SSE disconnect/reconnect replay.
+legacy JSONL creation, SSE disconnect/reconnect replay, and tenant-local L1/L2
+writes through the authenticated HTTP boundary.
 
 Still pending: application-persisted SSE replay after restart, durable
 questions/permissions/cancellation, workspace prompt context and attachments,
-idempotent L1/L2 writes, channel outbox, scheduler integration, and sharded
-single-owner deployment.
+direct durable profile patch/update, channel outbox, scheduler integration, and
+sharded single-owner deployment.

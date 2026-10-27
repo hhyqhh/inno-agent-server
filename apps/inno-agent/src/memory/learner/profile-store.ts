@@ -61,6 +61,38 @@ export function recordEventAndUpdateProfile(dataDir: string, event: LearningEven
 	return profile;
 }
 
+export interface IdempotentLearningEventResult<T> {
+	profile: LearnerProfile;
+	event: LearningEvent;
+	value?: T;
+	duplicate: boolean;
+}
+
+/** Apply a durable event and every derived profile mutation exactly once per
+ * operation ID. The event is appended first; the applied marker and all profile
+ * changes are then persisted together. A retry after either write resumes
+ * without duplicating the event or folding its signals into the profile twice. */
+export function recordEventAndApplyProfileOnce<T>(
+	dataDir: string,
+	event: LearningEvent,
+	apply: (profile: LearnerProfile, persistedEvent: LearningEvent) => T,
+): IdempotentLearningEventResult<T> {
+	const operationId = event.dedupe_key?.trim();
+	if (!operationId) throw new Error("An idempotent learning event requires a dedupe_key");
+	const existing = loadEvents(dataDir).find((item) => item.dedupe_key === operationId);
+	const persistedEvent = existing ?? event;
+	const current = loadProfile(dataDir);
+	if (current.applied_operation_ids?.includes(operationId)) {
+		return { profile: current, event: persistedEvent, duplicate: true };
+	}
+	if (!existing) recordEvent(dataDir, event);
+	const profile = loadProfile(dataDir);
+	const value = apply(profile, persistedEvent);
+	profile.applied_operation_ids = [...(profile.applied_operation_ids ?? []), operationId];
+	saveProfile(dataDir, profile);
+	return { profile, event: persistedEvent, value, duplicate: false };
+}
+
 /**
  * Check whether the learner profile is effectively empty (new user).
  * Returns true when no goals, knowledge states, summary, or preferences

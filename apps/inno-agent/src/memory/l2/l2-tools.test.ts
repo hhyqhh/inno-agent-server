@@ -113,6 +113,23 @@ describe("l2_archive", () => {
 		expect(duplicate.details).toMatchObject({ duplicate: true });
 	});
 
+	it("keeps durable archive deterministic even when a model context is available", async () => {
+		const root = makeTempDir();
+		const tool = createL2Tools(root, undefined, fakeMemory(root), undefined, false, true)[0];
+		await (tool.execute as (...args: any[]) => Promise<any>)(
+			"durable-call-1",
+			{ title: "Durable 资料", content: "确定性归档正文", sourceType: "markdown" },
+			undefined,
+			undefined,
+			{ model: {}, modelRegistry: {} },
+		);
+
+		expect(summarizeContentMock).not.toHaveBeenCalled();
+		expect(generateRichWikiPagesMock).not.toHaveBeenCalled();
+		expect(readManifest(root)).toHaveLength(1);
+		expect(readManifest(root)[0].status).toBe("indexed");
+	});
+
 	it("re-ingests indexed content when a recorded wiki page is missing", async () => {
 		const root = makeTempDir();
 		const content = "页面缺失后应重新摄入的资料";

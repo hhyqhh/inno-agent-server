@@ -8,6 +8,7 @@ import { resolveCurrentTenantConfig } from "../tenants/config.js";
 import { resolveRequestTenantDataRoot } from "../tenants/paths.js";
 import type { SessionSummary } from "../server/session-model.js";
 import { createConfiguredDurableModels } from "./durable-models.js";
+import { buildDurableInstructions } from "./durable-memory.js";
 import { durableEntriesToMessages } from "./durable-projection.js";
 import { DurableSessionRuntime } from "./durable-runtime.js";
 import { INNO_SYSTEM_PROMPT } from "./system-prompt.js";
@@ -235,12 +236,22 @@ export class DurableSessionService {
 					});
 					const workspaceDir = this.options.resolveWorkspaceDir(id, record.workspaceId);
 					if (!workspaceDir) throw new Error(`Durable session workspace not found: ${record.workspaceId}`);
+					const tenantDataRoot = resolveRequestTenantDataRoot(req, this.options.dataDir);
+					const memory = {
+						sessionId: id,
+						learnerDataDir: join(tenantDataRoot, "learner"),
+						l2DataDir: join(tenantDataRoot, "l2"),
+						workspaceDir,
+						l1Enabled: config.memory?.l1Enabled !== false,
+						l2Enabled: config.memory?.l2Enabled !== false,
+					};
 					return this.openRuntime({
 						storagePath: this.storagePath(req, id),
 						...selection,
-						instructions: INNO_SYSTEM_PROMPT,
+						instructions: buildDurableInstructions(INNO_SYSTEM_PROMPT, memory),
 						workspaceDir,
 						readOnlyTools: true,
+						memory,
 					});
 				})();
 				this.openings.set(key, opening);

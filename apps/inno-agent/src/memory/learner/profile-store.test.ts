@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLearningEvidenceEvent } from "./evidence.js";
-import { loadEvents, loadRecentEvents, recordEvent, recordEventAndUpdateProfile } from "./profile-store.js";
+import { loadEvents, loadRecentEvents, recordEvent, recordEventAndApplyProfileOnce, recordEventAndUpdateProfile } from "./profile-store.js";
+import { applyLearningEventToProfile } from "./auto-profile.js";
 import { createLearningEvent, type LearningEvent } from "./types.js";
 
 let dir: string;
@@ -86,5 +87,36 @@ describe("learning evidence ledger", () => {
 		const profile = recordEventAndUpdateProfile(dir, event);
 		expect(profile.knowledge_states[0].mastery).toBe(0.05);
 		expect(profile.knowledge_states[0].stability).toBe(0.1);
+	});
+});
+
+describe("durable learning event recovery", () => {
+	it("resumes the event/profile crash gap without applying the event twice", () => {
+		const event = createLearningEvent(
+			"student",
+			"concept_explained",
+			{ concept_ids: ["physics.force_decomposition"] },
+			{ topic: "力的分解" },
+		);
+		event.dedupe_key = "record_learning_event:durable-session:tool-call";
+		// Simulate a process dying after the JSONL append but before the profile write.
+		recordEvent(dir, event);
+
+		const recovered = recordEventAndApplyProfileOnce(dir, event, (profile, persisted) => {
+			applyLearningEventToProfile(profile, persisted);
+		});
+		const retry = recordEventAndApplyProfileOnce(dir, {
+			...createLearningEvent("student", "concept_explained", {}, {}),
+			dedupe_key: event.dedupe_key,
+		}, (profile, persisted) => {
+			applyLearningEventToProfile(profile, persisted);
+		});
+
+		expect(recovered.duplicate).toBe(false);
+		expect(retry.duplicate).toBe(true);
+		expect(retry.event.event_id).toBe(event.event_id);
+		expect(retry.profile).toEqual(recovered.profile);
+		expect(loadEvents(dir)).toHaveLength(1);
+		expect(recovered.profile.applied_operation_ids).toEqual([event.dedupe_key]);
 	});
 });

@@ -64,7 +64,8 @@ function uniquePaths(paths: string[]): string[] {
  * singleton so callers that don't pass one still get index maintenance.
  * `getActiveWorkspaceDir` resolves relative file paths for the current
  * session; server callers must keep this dynamic because sessions can switch
- * workspaces without recreating the extension.
+ * workspaces without recreating the extension. Durable mode keeps archive
+ * deterministic (no nested model calls) and avoids append-only query logs.
  */
 export function createL2Tools(
 	l2DataDirInput: string | (() => string),
@@ -72,6 +73,7 @@ export function createL2Tools(
 	l2Memory?: L2Memory | ((dataDir: string) => L2Memory),
 	getActiveWorkspaceDir?: () => string,
 	restrictToWorkspace = false,
+	durableMode = false,
 ): ToolDefinition[] {
 	const resolveDataDir = () => typeof l2DataDirInput === "function" ? l2DataDirInput() : l2DataDirInput;
 	const resolveMemory = (dataDir: string) => typeof l2Memory === "function"
@@ -110,6 +112,8 @@ export function createL2Tools(
 			force: Type.Optional(Type.Boolean({ description: "为 true 时跳过重复检查，强制归档" })),
 		}),
 			async execute(_toolCallId, params, signal, onUpdate, ctx) {
+				const model = durableMode ? undefined : ctx.model;
+				const modelRegistry = durableMode ? undefined : ctx.modelRegistry;
 				if (isEnabled && !isEnabled()) return l2DisabledResult();
 				const reportProgress = (text: string, phase: string): void => {
 					try {
@@ -276,11 +280,11 @@ export function createL2Tools(
 					let summaryBody = `## 摘要\n\n${extractedContent}`;
 					let generationSourceContext = extractedContent;
 					const analysisCheckpointPath = join(l2DataDir, "ingest-progress", `${entry.id}-${entry.contentHash}.json`);
-					if (ctx.model) {
+					if (model) {
 						reportProgress("正在生成摘要", "summarizing");
 						const summary = await summarizeContent(
-							ctx.model,
-							ctx.modelRegistry,
+							model,
+							modelRegistry!,
 							params.title,
 							extractedContent,
 							wikiContext,
@@ -300,8 +304,8 @@ export function createL2Tools(
 						generationSourceContext = summary.sourceContext;
 					}
 					wikiPagePath = getSourcePagePath(entry, promptSourceIdentity);
-					if (ctx.model) reportProgress("正在生成 Wiki 页面", "generating");
-					const rich = ctx.model
+					if (model) reportProgress("正在生成 Wiki 页面", "generating");
+					const rich = model
 						? await generateRichWikiPages(
 							l2DataDir,
 							entry,
@@ -314,12 +318,12 @@ export function createL2Tools(
 								overview: maintenanceContext.overview,
 								sourceIdentity: promptSourceIdentity,
 							},
-							ctx.model,
-							ctx.modelRegistry,
+							model,
+							modelRegistry!,
 							signal,
 						)
 						: null;
-					if (ctx.model && !rich) {
+					if (model && !rich) {
 						throw new Error(`Rich wiki generation failed for ${entry.rawPath}`);
 					}
 					if (rich) {
@@ -344,8 +348,8 @@ export function createL2Tools(
 							entry,
 							wikiPagePath,
 							summaryBody,
-							ctx.model,
-							ctx.modelRegistry,
+							model,
+							modelRegistry!,
 						);
 					if (!rich && linkMaintenance.sourcePageBody !== summaryBody) {
 						createSourcePage(l2DataDir, entry, linkMaintenance.sourcePageBody, extractedPath, promptSourceIdentity);
@@ -497,7 +501,7 @@ export function createL2Tools(
 			ensureL2Directories(l2DataDir);
 			const query = params.query ?? "";
 			const result = await queryWikiHybridDetailed(memory, query);
-			appendLog(l2DataDir, "query", query, "- L2 query executed through l2_query.");
+			if (!durableMode) appendLog(l2DataDir, "query", query, "- L2 query executed through l2_query.");
 			return {
 				content: [{ type: "text" as const, text: result.text }],
 				details: { disabled: false, mode: result.mode, hits: result.hits },

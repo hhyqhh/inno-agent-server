@@ -2,7 +2,8 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { loadEvents, loadProfile, saveProfile } from "./profile-store.js";
-import { recordEventAndUpdateProfile } from "./profile-store.js";
+import { recordEventAndApplyProfileOnce, recordEventAndUpdateProfile } from "./profile-store.js";
+import { applyLearningEventToProfile } from "./auto-profile.js";
 import { buildContextPack } from "./context-pack.js";
 import { patchProfile, updateProfile } from "./profile-updater.js";
 import { createLearningEvent } from "./types.js";
@@ -84,7 +85,8 @@ const PreferencesSchema = Type.Object({
  * Create the L1 learner tools.
  * The dataDir and learnerId are captured in closure. When `isEnabled` is
  * provided and returns false, every tool short-circuits to a disabled notice
- * so the profile is neither read nor mutated.
+ * so the profile is neither read nor mutated. Durable callers supply a stable
+ * operation ID to make event/evidence writes safe across crash replay.
  */
 export function createLearnerTools(
 	dataDir: string | (() => string),
@@ -92,6 +94,7 @@ export function createLearnerTools(
 	isEnabled?: () => boolean,
 	l2DataDir?: string | (() => string),
 	isL2Enabled?: () => boolean,
+	getDurableOperationId?: (toolCallId: string) => string,
 ): ToolDefinition[] {
 	const resolveDataDir = () => typeof dataDir === "function" ? dataDir() : dataDir;
 	const resolveL2DataDir = () => typeof l2DataDir === "function" ? l2DataDir() : l2DataDir;
@@ -150,7 +153,7 @@ export function createLearnerTools(
 				}),
 			),
 		}),
-		async execute(_toolCallId, params) {
+		async execute(toolCallId, params) {
 			try {
 				if (isEnabled && !isEnabled()) return disabledResult();
 				const event = createLearningEvent(
@@ -160,6 +163,22 @@ export function createLearnerTools(
 					params.payload as Record<string, unknown>,
 					params.derived_signals,
 				);
+				const durableOperationId = getDurableOperationId?.(toolCallId);
+				if (durableOperationId) {
+					event.dedupe_key = `record_learning_event:${durableOperationId}`;
+					const result = recordEventAndApplyProfileOnce(resolveDataDir(), event, (profile, persisted) => {
+						applyLearningEventToProfile(profile, persisted);
+					});
+					return {
+						content: [{
+							type: "text" as const,
+							text: result.duplicate
+								? `学习事件已恢复，无需重复写入: ${result.event.event_id}；当前画像版本 ${result.profile.version}`
+								: `学习事件已记录并同步画像: ${result.event.event_id} (${result.event.event_type})，当前画像版本 ${result.profile.version}`,
+						}],
+						details: { event_id: result.event.event_id, profile_version: result.profile.version, duplicate: result.duplicate },
+					};
+				}
 				const profile = recordEventAndUpdateProfile(resolveDataDir(), event);
 				return {
 					content: [
@@ -209,10 +228,10 @@ export function createLearnerTools(
 			dedupe_key: Type.Optional(Type.String({ description: "Stable key for retry-safe writes" })),
 			metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 		}),
-		async execute(_toolCallId, params) {
+		async execute(toolCallId, params) {
 			try {
 				if (isEnabled && !isEnabled()) return disabledResult();
-				if (params.dedupe_key) {
+				if (params.dedupe_key && !getDurableOperationId) {
 					const duplicate = loadEvents(resolveDataDir()).find((event) => event.dedupe_key === params.dedupe_key);
 					if (duplicate) {
 						return {
@@ -225,6 +244,34 @@ export function createLearnerTools(
 					...params,
 					hint_level: (params.hint_level ?? 0) as 0 | 1 | 2 | 3,
 				});
+				const durableOperationId = getDurableOperationId?.(toolCallId);
+				if (durableOperationId) {
+					event.dedupe_key = `record_learning_evidence:${durableOperationId}`;
+					const result = recordEventAndApplyProfileOnce(resolveDataDir(), event, (profile, persisted) => {
+						applyLearningEventToProfile(profile, persisted);
+						if (persisted.evidence) applyEvidenceToLinkedMisconception(profile, persisted.evidence);
+						const state = projectLearnerKnowledge(profile, loadEvents(resolveDataDir()))
+							.find((item) => item.concept_id === params.concept_id);
+						if (state) applyDerivedKnowledgeState(profile, state);
+						return state;
+					});
+					const state = result.value ?? projectLearnerKnowledge(result.profile, loadEvents(resolveDataDir()))
+						.find((item) => item.concept_id === params.concept_id);
+					return {
+						content: [{
+							type: "text" as const,
+							text: result.duplicate
+								? `学习证据已恢复，无需重复写入: ${result.event.evidence?.evidence_id}；当前状态 ${state?.state_label ?? "unknown"}。`
+								: `学习证据已记录: ${result.event.evidence?.evidence_id}；当前状态 ${state?.state_label ?? "unknown"}。`,
+						}],
+						details: {
+							event_id: result.event.event_id,
+							evidence_id: result.event.evidence?.evidence_id,
+							state,
+							duplicate: result.duplicate,
+						},
+					};
+				}
 				const profile = recordEventAndUpdateProfile(resolveDataDir(), event);
 				let profileChanged = event.evidence
 					? applyEvidenceToLinkedMisconception(profile, event.evidence)

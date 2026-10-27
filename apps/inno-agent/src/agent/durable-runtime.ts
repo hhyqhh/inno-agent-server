@@ -22,8 +22,10 @@ import {
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createReadTool } from "@earendil-works/pi-durable/tools";
 import { WorkspaceReadOnlyEnv } from "./durable-env.js";
+import { createDurableMemoryRegistrations, type DurableMemoryToolOptions } from "./durable-memory.js";
 
 const READ_ONLY_EXTENSION_NAME = "inno.read-only";
+const MEMORY_EXTENSION_NAME = "inno.memory";
 
 /** Durable SQLite is single-owner. This guard covers accidental double-open in
  * one process; deployment routing must still prevent cross-process owners. */
@@ -44,6 +46,8 @@ export interface DurableSessionRuntimeOptions {
 	workspaceDir?: string;
 	/** The only optional built-in tool in this slice. No shell or mutations. */
 	readOnlyTools?: boolean;
+	/** Tenant-local, replay-safe L1/L2 tools. Workspace writes remain disabled. */
+	memory?: DurableMemoryToolOptions;
 	registry?: Registry;
 }
 
@@ -71,12 +75,18 @@ function textFromAssistant(message: AssistantMessage): string {
 		.trim();
 }
 
-function createSessionRegistry(readOnlyTools: boolean): Registry {
+function createSessionRegistry(readOnlyTools: boolean, memory?: DurableMemoryToolOptions): Registry {
 	const registry = createRegistry();
 	if (readOnlyTools) {
 		registry.install(defineExtension({
 			name: READ_ONLY_EXTENSION_NAME,
 			tools: [createReadTool()],
+		}));
+	}
+	if (memory) {
+		registry.install(defineExtension({
+			name: MEMORY_EXTENSION_NAME,
+			tools: createDurableMemoryRegistrations(memory),
 		}));
 	}
 	return registry;
@@ -103,7 +113,8 @@ export class DurableSessionRuntime {
 		openStoragePaths.add(storagePath);
 		try {
 			const readOnlyTools = options.readOnlyTools === true;
-			const registry = options.registry ?? createSessionRegistry(readOnlyTools);
+			const registry = options.registry ?? createSessionRegistry(readOnlyTools, options.memory);
+			const memoryTools = options.memory ? createDurableMemoryRegistrations(options.memory) : [];
 			const harness = await Harness.open(
 				await openNodeSqliteStorage(storagePath),
 				{
@@ -121,7 +132,7 @@ export class DurableSessionRuntime {
 						model: options.model,
 						instructions: options.instructions,
 						cwd: options.workspaceDir,
-						...(readOnlyTools ? { tools: [createReadTool()] } : { tools: [] }),
+						...(readOnlyTools ? { tools: [createReadTool(), ...memoryTools] } : { tools: memoryTools }),
 					},
 				});
 				harness.resume();

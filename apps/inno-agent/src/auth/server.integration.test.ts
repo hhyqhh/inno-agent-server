@@ -104,6 +104,51 @@ beforeAll(async () => {
 			if (body.includes("durable-reconnect")) {
 				await new Promise((resolveDelay) => setTimeout(resolveDelay, 400));
 			}
+			const memoryPrompt = /durable-memory-(a|b)/.exec(body);
+			if (memoryPrompt) {
+				const request = JSON.parse(body) as { messages?: Array<{ role?: string }> };
+				const toolResults = request.messages?.filter((message) => message.role === "tool").length ?? 0;
+				if (toolResults < 2) {
+					const tenant = memoryPrompt[1];
+					const toolCall = toolResults === 0 ? {
+						id: `durable-memory-event-${tenant}`,
+						name: "record_learning_event",
+						arguments: {
+							event_type: "concept_explained",
+							context: { concept_ids: [`durable-concept-${tenant}`] },
+							payload: { topic: `durable-topic-${tenant}` },
+						},
+					} : {
+						id: `durable-memory-archive-${tenant}`,
+						name: "l2_archive",
+						arguments: {
+							title: `durable-archive-${tenant}`,
+							content: `durable-content-${tenant}`,
+							sourceType: "markdown",
+						},
+					};
+					res.writeHead(200, { "Content-Type": "text/event-stream" });
+					res.end([
+						`data: ${JSON.stringify({
+							id: "tenant-stub", object: "chat.completion.chunk", created: 0, model: "tenant-model",
+							choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{
+								index: 0, id: toolCall.id, type: "function",
+								function: { name: toolCall.name, arguments: JSON.stringify(toolCall.arguments) },
+							}] }, finish_reason: null }],
+						})}`,
+						"",
+						`data: ${JSON.stringify({
+							id: "tenant-stub", object: "chat.completion.chunk", created: 0, model: "tenant-model",
+							choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+						})}`,
+						"",
+						"data: [DONE]",
+						"",
+						"",
+					].join("\n"));
+					return;
+				}
+			}
 			res.writeHead(200, { "Content-Type": "text/event-stream" });
 			res.end([
 				`data: ${JSON.stringify({
@@ -1063,5 +1108,79 @@ describe("durable session HTTP boundary", () => {
 		};
 		expect(recovered.messages.some((message) => message.role === "user" && message.content === "durable-reconnect")).toBe(true);
 		expect(recovered.messages.some((message) => message.role === "assistant" && message.content === "tenant stub response")).toBe(true);
+	}, 60_000);
+
+	it("writes durable L1/L2 memory only to the authenticated tenant roots", async () => {
+		const [cookieA, cookieB] = await Promise.all([
+			registerUser("durable-memory-a@example.com"),
+			registerUser("durable-memory-b@example.com"),
+		]);
+		const configure = async (cookie: string) => {
+			const response = await api(cookie, "/api/settings/providers", {
+				method: "PUT",
+				body: JSON.stringify({
+					providerId: "shared",
+					baseUrl: providerOrigin,
+					apiKey: "durable-memory-secret",
+					api: "openai-completions",
+					models: [{ id: "tenant-model", name: "Tenant model", contextWindow: 32_000, maxTokens: 2_000 }],
+				}),
+			});
+			expect(response.status).toBe(200);
+		};
+		await Promise.all([configure(cookieA), configure(cookieB)]);
+		const runMemoryTurn = async (cookie: string, prompt: string) => {
+			const created = await api(cookie, "/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ runtime: "durable" }),
+			});
+			expect(created.status).toBe(201);
+			const session = await created.json() as { id: string };
+			const response = await api(cookie, "/api/chat/stream", {
+				method: "POST",
+				body: JSON.stringify({ sessionId: session.id, prompt, clientRequestId: `${prompt}-request` }),
+			});
+			expect(response.status).toBe(200);
+			const text = await response.text();
+			expect(text).toContain('"type":"done"');
+			expect(text).toContain('"persisted":true');
+		};
+		await Promise.all([
+			runMemoryTurn(cookieA, "durable-memory-a"),
+			runMemoryTurn(cookieB, "durable-memory-b"),
+		]);
+
+		const pool = new Pool({ connectionString: postgres.databaseUrl });
+		let tenantA: string;
+		let tenantB: string;
+		try {
+			const result = await pool.query<{ id: string; email: string }>(
+				`SELECT tenant.id, account.email FROM tenants tenant JOIN "user" account ON account.id = tenant.owner_user_id
+				 WHERE account.email = ANY($1)`, [["durable-memory-a@example.com", "durable-memory-b@example.com"]],
+			);
+			tenantA = result.rows.find((row) => row.email === "durable-memory-a@example.com")!.id;
+			tenantB = result.rows.find((row) => row.email === "durable-memory-b@example.com")!.id;
+		} finally {
+			await pool.end();
+		}
+		const rootA = join(home, "data", "tenants", tenantA);
+		const rootB = join(home, "data", "tenants", tenantB);
+		const [eventsA, eventsB, manifestA, manifestB, profileA] = await Promise.all([
+			readFile(join(rootA, "learner", "events.jsonl"), "utf-8"),
+			readFile(join(rootB, "learner", "events.jsonl"), "utf-8"),
+			readFile(join(rootA, "l2", "manifest.jsonl"), "utf-8"),
+			readFile(join(rootB, "l2", "manifest.jsonl"), "utf-8"),
+			readFile(join(rootA, "learner", "profile.json"), "utf-8"),
+		]);
+		expect(eventsA).toContain("durable-concept-a");
+		expect(eventsA).not.toContain("durable-concept-b");
+		expect(eventsB).toContain("durable-concept-b");
+		expect(eventsB).not.toContain("durable-concept-a");
+		expect(manifestA).toContain("durable-archive-a");
+		expect(manifestA).not.toContain("durable-archive-b");
+		expect(manifestB).toContain("durable-archive-b");
+		expect(manifestB).not.toContain("durable-archive-a");
+		expect(profileA).toContain("record_learning_event:");
+		expect(existsSync(join(home, "data", "learner", "events.jsonl"))).toBe(false);
 	}, 60_000);
 });
