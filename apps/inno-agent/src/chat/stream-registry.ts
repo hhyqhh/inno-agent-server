@@ -106,6 +106,13 @@ export interface CreateTurnInput {
 	baselineSessionRevision: string;
 }
 
+export type StreamStateSnapshot = Omit<SessionStreamState, "history" | "subscribers">;
+
+export function snapshotStreamState(state: SessionStreamState): StreamStateSnapshot {
+	const { history: _history, subscribers: _subscribers, ...snapshot } = state;
+	return snapshot;
+}
+
 const TERMINAL_TYPES = new Set(["done", "error", "aborted"]);
 const ACTIVE_STATUSES = new Set<StreamStatus>(["queued", "running"]);
 const MAX_TEXT = 256_000;
@@ -171,12 +178,12 @@ function notifySubscriber(
 	}
 }
 
-function reduceStreamState(state: SessionStreamState, event: ChatStreamEvent): void {
+function reduceStreamState(state: SessionStreamState, event: ChatStreamEvent, occurredAt = new Date().toISOString()): void {
 	if (event.type === "stream_state") {
 		const status = event.status;
 		if (status === "running" && state.status === "queued") {
 			state.status = "running";
-			state.startedAt = new Date().toISOString();
+			state.startedAt = occurredAt;
 		}
 		return;
 	}
@@ -187,7 +194,7 @@ function reduceStreamState(state: SessionStreamState, event: ChatStreamEvent): v
 			toolCallId,
 			toolName: typeof event.toolName === "string" ? event.toolName : "tool",
 			args: event.args,
-			startedAt: new Date().toISOString(),
+			startedAt: occurredAt,
 		};
 		state.activeTools = [...state.activeTools.filter((item) => item.toolCallId !== toolCallId), tool];
 		return;
@@ -212,7 +219,7 @@ function reduceStreamState(state: SessionStreamState, event: ChatStreamEvent): v
 				toolName: typeof event.toolName === "string" && event.toolName ? event.toolName : "tool",
 				...(event.args !== undefined ? { args: event.args } : {}),
 				...(event.partialResult !== undefined ? { partialResult: event.partialResult } : {}),
-				startedAt: new Date().toISOString(),
+				startedAt: occurredAt,
 			}];
 		}
 		return;
@@ -226,11 +233,11 @@ function reduceStreamState(state: SessionStreamState, event: ChatStreamEvent): v
 			...(active ?? {
 				toolCallId,
 				toolName: typeof event.toolName === "string" ? event.toolName : "tool",
-				startedAt: new Date().toISOString(),
+				startedAt: occurredAt,
 			}),
 			result: event.result,
 			isError: event.isError === true,
-			finishedAt: new Date().toISOString(),
+			finishedAt: occurredAt,
 		};
 		state.completedTools = [...state.completedTools.filter((item) => item.toolCallId !== toolCallId), completed];
 		return;
@@ -240,7 +247,7 @@ function reduceStreamState(state: SessionStreamState, event: ChatStreamEvent): v
 			state.pendingQuestion = {
 				questionId: event.questionId,
 				params: event.params,
-				createdAt: new Date().toISOString(),
+				createdAt: occurredAt,
 			};
 		}
 		return;
@@ -278,6 +285,72 @@ export class StreamRegistry {
 	}
 
 	getByTurn(turnId: string): SessionStreamState | undefined { return this.streamsByTurn.get(turnId); }
+
+	discardTurn(state: SessionStreamState): void {
+		if (state.history.length > 0 || state.subscribers.size > 0 || state.status !== "queued") {
+			throw new Error("Only an unpublished queued turn can be discarded");
+		}
+		this.streamsByTurn.delete(state.turnId);
+		if (this.latestTurnBySession.get(state.sessionId) === state.turnId) {
+			this.latestTurnBySession.delete(state.sessionId);
+		}
+	}
+
+	/** Rehydrate an application-journaled durable turn without changing its
+	 * identity or event IDs. A live in-memory turn always wins over disk. */
+	restoreTurn(
+		snapshot: StreamStateSnapshot,
+		history: StreamEventEnvelope[],
+		cancelRequested = false,
+	): SessionStreamState {
+		const existing = this.getByTurn(snapshot.turnId);
+		if (existing) return existing;
+		const state: SessionStreamState = {
+			...snapshot,
+			status: "queued",
+			startedAt: undefined,
+			finishedAt: undefined,
+			activeTools: [],
+			completedTools: [],
+			pendingQuestion: undefined,
+			lastEventId: 0,
+			history: [],
+			subscribers: new Set(),
+			cancelRequested,
+			terminalEventPublished: false,
+			terminalReason: undefined,
+			persisted: false,
+			finalMessageCount: undefined,
+			finalSessionRevision: undefined,
+		};
+		for (const envelope of history) {
+			if (envelope.turnId !== state.turnId || envelope.sessionId !== state.sessionId
+				|| envelope.eventId !== state.lastEventId + 1) {
+				throw new Error("Invalid durable stream journal event sequence");
+			}
+			state.history.push(envelope);
+			state.lastEventId = envelope.eventId;
+			if (TERMINAL_TYPES.has(envelope.event.type)) {
+				state.status = envelope.event.type === "done" ? "completed" : envelope.event.type as "error" | "aborted";
+				state.finishedAt = envelope.occurredAt;
+				state.terminalReason = typeof envelope.event.message === "string" ? envelope.event.message : undefined;
+				state.persisted = envelope.event.persisted === true;
+				state.finalMessageCount = typeof envelope.event.finalMessageCount === "number" ? envelope.event.finalMessageCount : undefined;
+				state.finalSessionRevision = typeof envelope.event.finalSessionRevision === "string" ? envelope.event.finalSessionRevision : undefined;
+				state.pendingQuestion = undefined;
+				state.terminalEventPublished = true;
+			} else {
+				if (state.terminalEventPublished) throw new Error("Durable stream journal contains events after its terminal event");
+				reduceStreamState(state, envelope.event, envelope.occurredAt);
+			}
+		}
+		this.streamsByTurn.set(state.turnId, state);
+		const latest = this.getLatest(state.sessionId);
+		if (!latest || Date.parse(latest.createdAt) <= Date.parse(state.createdAt)) {
+			this.latestTurnBySession.set(state.sessionId, state.turnId);
+		}
+		return state;
+	}
 
 	getLatest(sessionId: string): SessionStreamState | undefined {
 		const turnId = this.latestTurnBySession.get(sessionId);

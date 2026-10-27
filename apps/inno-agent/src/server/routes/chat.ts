@@ -42,7 +42,12 @@ import {
 	recordWorkspaceFileAccess,
 } from "../workspace-activity-store.js";
 import { WORKSPACE_IGNORES } from "../file-helpers.js";
-import { handleDurableChatRoutes, type DurableHttpContext } from "../durable-routes.js";
+import {
+	ensureDurableStreamProjection,
+	handleDurableChatRoutes,
+	restoreDurableStream,
+	type DurableHttpContext,
+} from "../durable-routes.js";
 import { parseInlineImages, persistInlineImages, prependImagePathsHint } from "../inline-images.js";
 import { json, matchRoute, readBody } from "../http-helpers.js";
 import type {
@@ -602,7 +607,10 @@ export async function handleChatRoutes(
 	const chatAbortMatch = matchRoute("POST", method, url, "/api/chat/:sessionId/:turnId/abort");
 	if (chatAbortMatch) {
 		if (!await ownsSession(chatAbortMatch.sessionId)) return denySession();
-		const state = streamRegistry.getByTurn(chatAbortMatch.turnId);
+		const restoredDurable = durableContext?.service.get(req, chatAbortMatch.sessionId)
+			? restoreDurableStream(req, durableContext.service, chatAbortMatch.sessionId, chatAbortMatch.turnId)
+			: undefined;
+		const state = restoredDurable?.state ?? streamRegistry.getByTurn(chatAbortMatch.turnId);
 		if (!state || state.sessionId !== chatAbortMatch.sessionId) {
 			json(res, 404, { error: "Chat turn not found" });
 			return true;
@@ -614,7 +622,9 @@ export async function handleChatRoutes(
 		if (durableContext?.service.get(req, state.sessionId)) {
 			streamRegistry.requestCancel(state);
 			try {
+				restoredDurable?.store.markCancelled(state.sessionId, state.turnId);
 				await durableContext.service.abort(req, state.sessionId, state.turnId);
+				if (restoredDurable) void ensureDurableStreamProjection(req, durableContext.service, restoredDurable);
 			} catch (error) {
 				logger.error({ err: error, sessionId: state.sessionId, turnId: state.turnId }, "durable chat abort failed");
 				json(res, 500, { error: error instanceof Error ? error.message : String(error) });
@@ -640,6 +650,9 @@ export async function handleChatRoutes(
 	const chatStatusMatch = matchRoute("GET", method, url, "/api/chat/status/:sessionId");
 	if (chatStatusMatch) {
 		streamRegistry.cleanupExpiredTurns();
+		if (durableContext?.service.get(req, chatStatusMatch.sessionId)) {
+			restoreDurableStream(req, durableContext.service, chatStatusMatch.sessionId);
+		}
 		const state = streamRegistry.getLatest(chatStatusMatch.sessionId);
 		json(res, 200, state
 			? { found: true, stream: streamRegistry.toPublicSnapshot(state) }
@@ -657,7 +670,10 @@ export async function handleChatRoutes(
 			json(res, 400, { error: "turnId and a non-negative after value are required" });
 			return true;
 		}
-		const state = streamRegistry.getByTurn(turnId);
+		const restoredDurable = durableContext?.service.get(req, sessionId)
+			? restoreDurableStream(req, durableContext.service, sessionId, turnId)
+			: undefined;
+		const state = restoredDurable?.state ?? streamRegistry.getByTurn(turnId);
 		if (!state || state.sessionId !== sessionId) {
 			json(res, 404, { error: "Chat turn not found" });
 			return true;
@@ -691,6 +707,9 @@ export async function handleChatRoutes(
 			res.write(`data: ${JSON.stringify(envelope)}\n\n`);
 			if (["done", "error", "aborted"].includes(envelope.event.type)) finishResponse();
 		});
+		if (restoredDurable && !state.terminalEventPublished) {
+			void ensureDurableStreamProjection(req, durableContext!.service, restoredDurable);
+		}
 		if (state.terminalEventPublished && !ended) finishResponse();
 		res.on("close", () => { clearInterval(eventsHeartbeat); unsub(); });
 		return true;

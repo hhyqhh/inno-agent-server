@@ -3,8 +3,15 @@ import { unavailableContextUsage } from "../agent/context-usage.js";
 import type { UserInput } from "@earendil-works/pi-durable";
 import { DurableRuntimeDisabledError, DurableSessionBusyError, type DurableSessionService, type PreparedDurableAttachments, type PreparedDurableImages } from "../agent/durable-session-service.js";
 import { DurableSseProjector } from "../agent/durable-projection.js";
+import type { DurableStreamStore } from "../agent/durable-stream-store.js";
 import type { QuestionBridgeResult } from "../agent/question-bridge.js";
-import { hasCompleteTurnAfterBaseline, streamRegistry, type SessionStreamState } from "../chat/stream-registry.js";
+import {
+	hasCompleteTurnAfterBaseline,
+	streamRegistry,
+	type ChatStreamEvent,
+	type SessionStreamState,
+	type StreamEventEnvelope,
+} from "../chat/stream-registry.js";
 import { logger } from "../logger.js";
 import { releaseRequestResource } from "../tenants/http.js";
 import type { TenantStore } from "../tenants/store.js";
@@ -19,6 +26,66 @@ export interface DurableHttpContext {
 
 function errorStatus(error: unknown): number {
 	return error instanceof DurableRuntimeDisabledError ? 503 : 500;
+}
+
+interface DurableStreamContext {
+	state: SessionStreamState;
+	store: DurableStreamStore;
+}
+
+const durableProjections = new Map<string, Promise<void>>();
+
+function publishDurableEvent(context: DurableStreamContext, event: ChatStreamEvent): StreamEventEnvelope {
+	const envelope = streamRegistry.publishStreamEvent(context.state, event);
+	context.store.append(envelope);
+	return envelope;
+}
+
+function finishDurableTurn(
+	context: DurableStreamContext,
+	status: "completed" | "error" | "aborted",
+	event: ChatStreamEvent,
+	persistence: { persisted: boolean; finalMessageCount?: number; finalSessionRevision?: string },
+): StreamEventEnvelope | undefined {
+	const envelope = streamRegistry.finishTurn(context.state, status, event, persistence);
+	if (envelope) context.store.append(envelope);
+	return envelope;
+}
+
+/** Restore before any registry lookup that follows a process restart. */
+export function restoreDurableStream(
+	req: HttpReq,
+	service: DurableSessionService,
+	sessionId: string,
+	turnId?: string,
+): DurableStreamContext | undefined {
+	const store = service.streamStore(req);
+	const restored = turnId ? store.load(sessionId, turnId) : store.latest(sessionId);
+	if (!restored) return undefined;
+	try {
+		const state = streamRegistry.restoreTurn(restored.snapshot, restored.history, restored.cancelRequested);
+		return { state, store };
+	} catch (error) {
+		logger.error({ err: error, sessionId, turnId: restored.snapshot.turnId }, "failed to restore durable SSE journal");
+		return undefined;
+	}
+}
+
+/** The original HTTP turn and every reconnect share one projection. Recovery
+ * reacquires the committed submission; it never submits a synthetic user turn. */
+export function ensureDurableStreamProjection(
+	req: HttpReq,
+	service: DurableSessionService,
+	context: DurableStreamContext,
+): Promise<void> {
+	if (context.state.terminalEventPublished) return Promise.resolve();
+	const existing = durableProjections.get(context.state.turnId);
+	if (existing) return existing;
+	const operation = streamDurableTurn(req, context, service).finally(() => {
+		durableProjections.delete(context.state.turnId);
+	});
+	durableProjections.set(context.state.turnId, operation);
+	return operation;
 }
 
 /** Handle only subresources whose semantics have a durable implementation.
@@ -72,6 +139,7 @@ export async function handleDurableSessionResourceRoutes(
 		return true;
 	}
 	if (matchRoute("DELETE", method, url, "/api/sessions/:id")) {
+		restoreDurableStream(req, ctx.service, id);
 		if (streamRegistry.getActiveForSession(id)) {
 			json(res, 409, { error: "Cannot delete a session with an active chat turn" });
 			return true;
@@ -128,21 +196,20 @@ function durableUserInput(
 
 async function streamDurableTurn(
 	req: HttpReq,
-	state: SessionStreamState,
-	prompt: string,
+	context: DurableStreamContext,
 	service: DurableSessionService,
-	attachments: PreparedDurableAttachments | null,
-	images: PreparedDurableImages | null,
-	recallContext: string,
 ): Promise<void> {
+	const { state, store } = context;
 	const projector = new DurableSseProjector();
 	let lease: Awaited<ReturnType<DurableSessionService["lease"]>> | undefined;
 	let stream: { stop(): Promise<unknown> } | undefined;
 	try {
+		const journal = store.load(state.sessionId, state.turnId);
+		if (!journal) throw new Error("Durable stream journal not found");
 		lease = await service.lease(req, state.sessionId);
 		lease.runtime.bindQuestionTurn({
 			turnId: state.turnId,
-			emit: (event) => streamRegistry.publishStreamEvent(state, event),
+			emit: (event) => publishDurableEvent(context, event),
 		});
 		const activeStream = await lease.runtime.watch(async (events) => {
 			if (state.terminalEventPublished) return;
@@ -151,25 +218,30 @@ async function streamDurableTurn(
 					// A watch snapshot is useful to native durable consumers but is not
 					// an Inno historical replay event. Canonical history is reloaded on done.
 					if (projected.type === "durable_snapshot") continue;
-					if (!state.terminalEventPublished) streamRegistry.publishStreamEvent(state, projected);
+					if (!state.terminalEventPublished) publishDurableEvent(context, projected);
 				}
 			}
 		});
 		stream = activeStream;
-		streamRegistry.publishStreamEvent(state, { type: "stream_state", status: "running" });
+		if (state.status === "queued") publishDurableEvent(context, { type: "stream_state", status: "running" });
 		if (state.cancelRequested) {
 			await lease.runtime.abort();
-			streamRegistry.finishTurn(state, "aborted", {
+			finishDurableTurn(context, "aborted", {
 				type: "aborted", message: "Stopped",
 			}, { persisted: false });
 			return;
 		}
-		const submission = await lease.runtime.submit(durableUserInput(prompt, attachments, images, recallContext), state.clientRequestId);
-		service.noteSubmission(req, state.sessionId, prompt);
+		let submissionId = journal.submissionId;
+		if (submissionId === undefined) {
+			const submission = await lease.runtime.submit(journal.input, state.clientRequestId);
+			submissionId = submission.id;
+			store.markAdmitted(state.sessionId, state.turnId, submissionId);
+		}
+		service.noteSubmission(req, state.sessionId, state.inputSnapshot.prompt);
 		// Cancellation can race durable admission. Re-apply the abort after the
 		// submission commits so an admitted queued input cannot escape it.
 		if (state.cancelRequested) await lease.runtime.abort();
-		const result = await lease.runtime.waitForSubmission(submission.id);
+		const result = await lease.runtime.waitForSubmission(submissionId);
 		await activeStream.stop();
 		stream = undefined;
 		await lease.release();
@@ -192,19 +264,19 @@ async function streamDurableTurn(
 		};
 		if (result.status === "done" && persisted && !state.cancelRequested) {
 			void service.maybeAutoGenerateTopic(req, state.sessionId);
-			streamRegistry.finishTurn(state, "completed", { type: "done", fullText: result.text }, persistence);
+			finishDurableTurn(context, "completed", { type: "done", fullText: result.text }, persistence);
 		} else if (state.cancelRequested) {
-			streamRegistry.finishTurn(state, "aborted", {
+			finishDurableTurn(context, "aborted", {
 				type: "aborted", message: "Stopped",
 			}, persistence);
 		} else if (result.status === "unanswered") {
-			streamRegistry.finishTurn(state, "error", {
+			finishDurableTurn(context, "error", {
 				type: "error",
 				message: `Durable submission was unanswered: ${result.reason}`,
 				code: "durable_unanswered",
 			}, persistence);
 		} else {
-			streamRegistry.finishTurn(state, "error", {
+			finishDurableTurn(context, "error", {
 				type: "error",
 				message: "Final durable history could not be confirmed.",
 				code: "persistence_confirmation_failed",
@@ -215,16 +287,16 @@ async function streamDurableTurn(
 		if (!state.terminalEventPublished) {
 			const persistence = { persisted: false };
 			if (state.cancelRequested) {
-				streamRegistry.finishTurn(state, "aborted", {
+				finishDurableTurn(context, "aborted", {
 					type: "aborted", message: "Stopped",
 				}, persistence);
 			} else if (state.status === "queued") {
-				streamRegistry.finishTurn(state, "aborted", {
+				finishDurableTurn(context, "aborted", {
 					type: "aborted",
 					message: error instanceof Error ? error.message : String(error),
 				}, persistence);
 			} else {
-				streamRegistry.finishTurn(state, "error", {
+				finishDurableTurn(context, "error", {
 					type: "error",
 					message: error instanceof Error ? error.message : String(error),
 				}, persistence);
@@ -263,9 +335,12 @@ export async function handleDurableChatRoutes(
 		const status = ctx.service.respondQuestion(req, sessionId, { turnId, questionId, result });
 		let resumed = false;
 		if (status === "accepted") {
-			const live = streamRegistry.getByTurn(turnId);
+			const restored = restoreDurableStream(req, ctx.service, sessionId, turnId);
+			const live = restored?.state ?? streamRegistry.getByTurn(turnId);
 			if (live?.sessionId === sessionId && (live.status === "queued" || live.status === "running")) {
-				// The existing SSE holds the runtime lease until the final response.
+				// The original or recovered projection holds the runtime lease until
+				// the final response. Restart it if its previous owner disappeared.
+				if (restored) void ensureDurableStreamProjection(req, ctx.service, restored);
 				resumed = true;
 			} else {
 				try {
@@ -290,6 +365,7 @@ export async function handleDurableChatRoutes(
 		const prompt = typeof body.prompt === "string" ? body.prompt : "";
 		const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
 		if (!prompt || !sessionId) { json(res, 400, { error: "Missing prompt or sessionId" }); return true; }
+		restoreDurableStream(req, ctx.service, sessionId);
 		if (streamRegistry.getActiveForSession(sessionId)) {
 			json(res, 409, { error: "Session already has an active chat turn" });
 			return true;
@@ -334,6 +410,7 @@ export async function handleDurableChatRoutes(
 		json(res, 400, { error: "Missing prompt, sessionId or clientRequestId" });
 		return true;
 	}
+	restoreDurableStream(req, ctx.service, sessionId);
 	if (streamRegistry.getActiveForSession(sessionId)) {
 		json(res, 409, { error: "Session already has an active chat turn" });
 		return true;
@@ -351,6 +428,7 @@ export async function handleDurableChatRoutes(
 		return true;
 	}
 	const recallContext = await ctx.service.prepareRecallContext(req, sessionId, prompt);
+	const input = durableUserInput(prompt, attachments, images, recallContext);
 	let state: SessionStreamState;
 	try {
 		state = streamRegistry.createTurn({
@@ -366,8 +444,19 @@ export async function handleDurableChatRoutes(
 		json(res, 409, { error: "Session already has an active chat turn" });
 		return true;
 	}
+	const store = ctx.service.streamStore(req);
+	const streamContext: DurableStreamContext = { state, store };
+	try {
+		// Persist the exact model input before admission. If the process dies
+		// before the submission ID append, the same requestId reacquires it.
+		store.create(state, input);
+	} catch (error) {
+		streamRegistry.discardTurn(state);
+		json(res, 500, { error: error instanceof Error ? error.message : String(error) });
+		return true;
+	}
 	ctx.service.recordTurnMetadata(req, sessionId, attachments, images, prompt, clientRequestId);
-	streamRegistry.publishStreamEvent(state, { type: "stream_state", status: "queued" });
+	publishDurableEvent(streamContext, { type: "stream_state", status: "queued" });
 	startSse(res);
 	let ended = false;
 	const heartbeat = setInterval(() => { if (!ended) res.write(": heartbeat\n\n"); }, 15_000);
@@ -388,7 +477,7 @@ export async function handleDurableChatRoutes(
 		clearInterval(heartbeat);
 		unsubscribe();
 	});
-	await streamDurableTurn(req, state, prompt, ctx.service, attachments, images, recallContext);
+	await ensureDurableStreamProjection(req, ctx.service, streamContext);
 	finish();
 	streamRegistry.cleanupExpiredTurns();
 	return true;

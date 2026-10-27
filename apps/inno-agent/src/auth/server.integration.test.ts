@@ -73,6 +73,42 @@ async function waitFor(condition: () => boolean | Promise<boolean>, description:
 	}
 }
 
+async function startServer(): Promise<void> {
+	output = "";
+	const port = new URL(origin).port;
+	child = spawn(process.execPath, ["--import", "tsx", resolve(root, "apps/inno-agent/src/server.ts")], {
+		cwd: root,
+		env: {
+			...process.env,
+			INNO_HOME: home,
+			INNO_CONFIG_DIR: join(home, "config"),
+			INNO_DATA_DIR: join(home, "data"),
+			INNO_SKILLS_DIR: join(home, "skills"),
+			INNO_WORKSPACE_DIR: join(home, "workspace"),
+			INNO_PORT: port,
+			INNO_HOST: "127.0.0.1",
+			INNO_AUTH_MODE: "better-auth",
+			INNO_MULTI_USER_ENABLED: "true",
+			INNO_DURABLE_ENABLED: "true",
+			DATABASE_URL: postgres.databaseUrl,
+			BETTER_AUTH_SECRET: SECRET,
+			BETTER_AUTH_URL: origin,
+		},
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	child.stdout?.on("data", (chunk) => { output += chunk; });
+	child.stderr?.on("data", (chunk) => { output += chunk; });
+	const deadline = Date.now() + 20_000;
+	while (true) {
+		if (child.exitCode !== null) throw new Error(`Server exited during startup: ${output}`);
+		try {
+			if ((await fetch(`${origin}/health`)).ok) break;
+		} catch {}
+		if (Date.now() > deadline) throw new Error(`Server startup timed out: ${output}`);
+		await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+	}
+}
+
 async function startSidecar(sidecar: string): Promise<string> {
 	const server = createHttpServer((req, res) => {
 		let body = "";
@@ -133,6 +169,9 @@ beforeAll(async () => {
 			}
 			if (body.includes("durable-reconnect")) {
 				await new Promise((resolveDelay) => setTimeout(resolveDelay, 400));
+			}
+			if (body.includes("durable-restart-prompt")) {
+				await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
 			}
 			const questionPrompt = body.includes("durable-question");
 			if (questionPrompt) {
@@ -329,37 +368,7 @@ beforeAll(async () => {
 		BETTER_AUTH_SECRET: SECRET,
 		BETTER_AUTH_URL: origin,
 	}));
-	child = spawn(process.execPath, ["--import", "tsx", resolve(root, "apps/inno-agent/src/server.ts")], {
-		cwd: root,
-		env: {
-			...process.env,
-			INNO_HOME: home,
-			INNO_CONFIG_DIR: join(home, "config"),
-			INNO_DATA_DIR: join(home, "data"),
-			INNO_SKILLS_DIR: join(home, "skills"),
-			INNO_WORKSPACE_DIR: join(home, "workspace"),
-			INNO_PORT: String(port),
-			INNO_HOST: "127.0.0.1",
-			INNO_AUTH_MODE: "better-auth",
-			INNO_MULTI_USER_ENABLED: "true",
-			INNO_DURABLE_ENABLED: "true",
-			DATABASE_URL: postgres.databaseUrl,
-			BETTER_AUTH_SECRET: SECRET,
-			BETTER_AUTH_URL: origin,
-		},
-		stdio: ["ignore", "pipe", "pipe"],
-	});
-	child.stdout?.on("data", (chunk) => { output += chunk; });
-	child.stderr?.on("data", (chunk) => { output += chunk; });
-	const deadline = Date.now() + 20_000;
-	while (true) {
-		if (child.exitCode !== null) throw new Error(`Server exited during startup: ${output}`);
-		try {
-			if ((await fetch(`${origin}/health`)).ok) break;
-		} catch {}
-		if (Date.now() > deadline) throw new Error(`Server startup timed out: ${output}`);
-		await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-	}
+	await startServer();
 });
 
 afterAll(async () => {
@@ -1888,5 +1897,64 @@ describe("durable session HTTP boundary", () => {
 		expect(ocrRequests.find((request) => request.body.includes("durable-ocr-b"))?.authorization).toBe("bearer durable-ocr-secret-b");
 		expect(existsSync(join(home, "data", "learner", "events.jsonl"))).toBe(false);
 		expect(existsSync(join(home, "data", "ocr"))).toBe(false);
+	}, 60_000);
+
+	it("replays and completes an admitted durable SSE turn after SIGKILL and restart", async () => {
+		const cookie = await registerUser("durable-restart@example.com");
+		expect((await api(cookie, "/api/settings/providers", {
+			method: "PUT",
+			body: JSON.stringify({
+				providerId: "shared",
+				baseUrl: providerOrigin,
+				apiKey: "durable-restart-secret",
+				api: "openai-completions",
+				models: [{ id: "tenant-model", name: "Tenant model", contextWindow: 32_000, maxTokens: 2_000 }],
+			}),
+		})).status).toBe(200);
+		const session = await (await api(cookie, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ runtime: "durable" }),
+		})).json() as { id: string };
+		const stream = await api(cookie, "/api/chat/stream", {
+			method: "POST",
+			body: JSON.stringify({ sessionId: session.id, prompt: "durable-restart-prompt", clientRequestId: "durable-restart-request" }),
+		});
+		expect(stream.status).toBe(200);
+		const reader = stream.body!.getReader();
+		const decoder = new TextDecoder();
+		let initial = "";
+		while (!initial.includes('"status":"running"')) {
+			const chunk = await reader.read();
+			if (chunk.done) break;
+			initial += decoder.decode(chunk.value, { stream: true });
+		}
+		const turnId = /"turnId":"([^"]+)"/.exec(initial)?.[1];
+		expect(turnId).toBeTruthy();
+		await waitFor(() => providerRequests.some((request) => request.body.includes("durable-restart-prompt")), "durable restart provider admission");
+		await reader.cancel().catch(() => undefined);
+		child.kill("SIGKILL");
+		await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
+		await startServer();
+
+		const status = await (await api(cookie, `/api/chat/status/${session.id}`)).json() as {
+			found: boolean;
+			stream: { turnId: string; status: string };
+		};
+		expect(status).toMatchObject({ found: true, stream: { turnId, status: "running" } });
+		const replay = await api(cookie, `/api/chat/events/${session.id}?turnId=${turnId}&after=1`);
+		expect(replay.status).toBe(200);
+		const replayText = await replay.text();
+		const envelopes = replayText.split("\n")
+			.filter((line) => line.startsWith("data: {"))
+			.map((line) => JSON.parse(line.slice(6)) as { eventId: number; event: { type: string; persisted?: boolean } });
+		expect(envelopes.length).toBeGreaterThanOrEqual(2);
+		expect(envelopes[0]?.eventId).toBe(2);
+		expect(envelopes.map((envelope) => envelope.eventId)).toEqual(envelopes.map((_, index) => index + 2));
+		expect(envelopes.at(-1)?.event).toMatchObject({ type: "done", persisted: true });
+		const detail = await (await api(cookie, `/api/sessions/${session.id}`)).json() as {
+			messages: Array<{ role: string; content: string }>;
+		};
+		expect(detail.messages.filter((message) => message.role === "user" && message.content === "durable-restart-prompt")).toHaveLength(1);
+		expect(detail.messages.some((message) => message.role === "assistant" && message.content === "tenant stub response")).toBe(true);
+		expect(providerRequests.filter((request) => request.body.includes("durable-restart-prompt"))).toHaveLength(2);
 	}, 60_000);
 });

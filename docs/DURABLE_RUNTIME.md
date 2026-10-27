@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: durable scheduler execution (3R)
+## Current stage: cross-restart SSE recovery (3S)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -57,6 +57,8 @@ The current durable slice supports:
 - durable admission, submission reacquisition, and `resume()` on reopen;
 - concurrent independent sessions without the legacy global prompt queue;
 - committed snapshots and existing Inno history/SSE event shapes;
+- tenant-local application SSE journals with exact numeric event replay and
+  original-submission recovery after a process restart;
 - the workspace-read-only `read` tool, including canonical symlink containment;
 - replay-safe, tenant-local L1 context/event/evidence tools, direct profile
   patch/update mutations, and L2 archive, query, and lint tools;
@@ -287,10 +289,29 @@ Durable `message_update` events contain `changes`, not legacy PI's
 `assistantMessageEvent`. `durable-projection.ts` handles those deltas, tool
 updates, committed history, and retry events separately from the legacy event
 adapter. The existing `StreamRegistry` supplies numeric event IDs and exact
-`after=<eventId>` replay **within the current process**. Disconnecting the HTTP
-response does not cancel admitted durable work. Application replay state is
-still lost on process restart; committed conversation history remains readable,
-but cross-restart SSE replay is not claimed yet.
+`after=<eventId>` replay. Disconnecting the HTTP response does not cancel
+admitted durable work.
+
+`agent/durable-stream-store.ts` adds a tenant-local JSONL journal per streaming
+turn under `durable/streams/<sessionId>/`. The initial mode-`0600` record stores
+the turn snapshot and exact `UserInput` before admission. Later records append
+compacted Inno envelopes, the durable submission ID, and cancellation. A crash
+between SQLite admission and the ID append is recovered by submitting the same
+stored input and `requestId`, which reacquires rather than duplicates the original
+submission. No synthetic user message is created.
+
+Status, event replay, question response, abort, and new-chat conflict checks
+restore the journal before consulting the process-local registry. Event replay
+also restarts one per-turn projection that reopens the runtime, rebinds question
+cards, watches new events, waits for the original submission, and writes the
+terminal persistence result. A completed journal is retained for five minutes,
+matching the existing in-memory reconnect window; active journals are not
+age-pruned, and session deletion removes the session's journals. Legacy JSONL
+chat remains process-local and does not use this journal. Journal appends and
+SQLite commits are not a distributed transaction, and host/power loss can lose
+recent appends just as it can lose recent WAL commits; the recovery guarantee is
+for process crash/restart with an intact journal within the single-owner
+deployment boundary.
 
 ## Verification
 
@@ -312,7 +333,8 @@ OCR completion caching and job-ID resume, channel payload/completion caching,
 verified tenant channel rebinding, proven-idle 30-day outbox/question retention
 with live-recovery preservation and session-delete outbox cleanup, legacy/durable
 scheduler routing with fail-closed unwired execution, local legacy cron
-compatibility, durable headless `no_ui` and streaming projection, and recovery after real child processes are
+compatibility, durable headless `no_ui` and streaming projection, exact SSE journal
+restore with submission intent and truncated-final-append handling, and recovery after real child processes are
 killed with `SIGKILL` during a delayed model response, during an interrupted
 memory tool, while a submitted OCR job is still running, after a channel send
 but before its outbox completion commit, and after a question answer is
@@ -325,7 +347,9 @@ external channel is used.
 The real-PostgreSQL integration suite additionally covers explicit HTTP
 creation, concurrent authenticated durable sessions, per-tenant provider and
 OCR Authorization headers, cross-tenant 404s, completed request-ID retries,
-lack of legacy JSONL creation, SSE disconnect/reconnect replay, tenant-local
+lack of legacy JSONL creation, SSE disconnect/reconnect replay, HTTP SIGKILL/restart
+recovery of an admitted SSE turn with contiguous event IDs and no duplicate user
+history, tenant-local
 L1/L2/OCR writes, replay-safe direct profile patch/update, and tenant-scoped L3
 recall through the authenticated HTTP boundary, tenant-isolated explicit and
 automatic recall of previously committed durable sessions without exposing
@@ -343,5 +367,4 @@ runtime validation, scheduler-origin history, tenant channel delivery, and mixed
 durable/legacy deferred execution with per-tenant credentials, owned workspaces,
 run ledgers, and claim cleanup.
 
-Still pending: application-persisted SSE replay after restart, durable
-permissions, and sharded single-owner deployment.
+Still pending: durable permissions and sharded single-owner deployment.

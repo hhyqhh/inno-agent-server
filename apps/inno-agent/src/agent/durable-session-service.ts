@@ -31,6 +31,7 @@ import { completeConfiguredDurablePrompt, createConfiguredDurableModels } from "
 import { buildDurableInstructions } from "./durable-memory.js";
 import { durableEntriesToMessages } from "./durable-projection.js";
 import { DurableQuestionStore } from "./durable-questions.js";
+import { DurableStreamStore } from "./durable-stream-store.js";
 import { DurableSessionRuntime } from "./durable-runtime.js";
 import type { PersistedQuestion, QuestionBridgeResult, QuestionResponseStatus } from "./question-bridge.js";
 import { INNO_SYSTEM_PROMPT } from "./system-prompt.js";
@@ -208,6 +209,10 @@ export class DurableSessionService {
 			this.questionStores.set(key, store);
 		}
 		return store;
+	}
+
+	streamStore(req: IncomingMessage): DurableStreamStore {
+		return new DurableStreamStore(join(this.root(req), "streams"));
 	}
 
 	pendingQuestion(req: IncomingMessage, id: string): PersistedQuestion | undefined {
@@ -671,6 +676,7 @@ export class DurableSessionService {
 		clearWorkspaceActivity(dataRoot, id);
 		await rm(join(this.root(req), "storage", id), { recursive: true, force: true });
 		await rm(this.questionDir(req, id), { recursive: true, force: true });
+		this.streamStore(req).deleteSession(id);
 		deleteChannelOutboxForSession(join(dataRoot, "channels", "outbox"), id);
 	}
 
