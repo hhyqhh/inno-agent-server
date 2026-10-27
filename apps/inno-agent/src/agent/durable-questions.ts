@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
@@ -185,6 +185,20 @@ export class DurableQuestionStore {
 			params: record.params,
 			createdAt: record.createdAt,
 		};
+	}
+
+	/** Delete completed answers only after the durable runtime proves this session
+	 * has no live work that could replay the original ask_user_question call. */
+	pruneCompletedForIdleSession(completedBefore: number): number {
+		let removed = 0;
+		for (const record of this.records()) {
+			if (!record.result) continue;
+			const path = this.path(record.operationId);
+			if (statSync(path).mtimeMs > completedBefore) continue;
+			rmSync(path, { force: true });
+			removed += 1;
+		}
+		return removed;
 	}
 
 	/** Cancellation is an explicit terminal answer, not an abandoned wait: a

@@ -1,9 +1,18 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { WorkspaceRegistry } from "../workspace/workspace-registry.js";
 import { ChannelRegistry } from "./channel.js";
+import {
+	channelOutboxPayloadPath,
+	completeChannelOutbox,
+	deleteChannelOutboxForSession,
+	loadChannelOutbox,
+	prepareChannelOutbox,
+	pruneCompletedChannelOutboxForIdleSession,
+	type ChannelOutboxRecord,
+} from "./channel-outbox.js";
 import { createChannelTools } from "./channel-tools.js";
 import type { PushTarget } from "./types.js";
 
@@ -105,5 +114,36 @@ describe("tenant-safe channel file tools", () => {
 
 		expect(retry).toEqual(first);
 		expect(sends).toHaveLength(1);
+	});
+
+	it("prunes expired completions only for an idle session and deletes its outbox on removal", () => {
+		const workspace = tempDir();
+		const source = join(workspace, "report.txt");
+		const outboxDir = join(workspace, "outbox");
+		writeFileSync(source, "snapshot");
+		const completed: ChannelOutboxRecord = {
+			operationId: "send_file_to_channel:durable-a:completed",
+			channel: "feishu", chatId: "chat", filePath: "report.txt",
+		};
+		const pending: ChannelOutboxRecord = { ...completed, operationId: "send_file_to_channel:durable-a:pending" };
+		const other: ChannelOutboxRecord = { ...completed, operationId: "send_file_to_channel:durable-b:completed" };
+		for (const record of [completed, pending, other]) prepareChannelOutbox(outboxDir, record, source);
+		completeChannelOutbox(outboxDir, completed, { text: "sent", details: {} });
+		completeChannelOutbox(outboxDir, other, { text: "sent", details: {} });
+		const staleTmp = join(outboxDir, "orphan.tmp");
+		writeFileSync(staleTmp, "stale");
+		const old = new Date(Date.now() - 60_000);
+		for (const file of readdirSync(outboxDir)) utimesSync(join(outboxDir, file), old, old);
+
+		expect(pruneCompletedChannelOutboxForIdleSession(outboxDir, "durable-a", Date.now())).toBe(1);
+		expect(loadChannelOutbox(outboxDir, completed.operationId)).toBeUndefined();
+		expect(existsSync(channelOutboxPayloadPath(outboxDir, completed.operationId))).toBe(false);
+		expect(loadChannelOutbox(outboxDir, pending.operationId)).toBeDefined();
+		expect(loadChannelOutbox(outboxDir, other.operationId)).toBeDefined();
+		expect(existsSync(staleTmp)).toBe(false);
+
+		expect(deleteChannelOutboxForSession(outboxDir, "durable-a")).toBe(1);
+		expect(loadChannelOutbox(outboxDir, pending.operationId)).toBeUndefined();
+		expect(loadChannelOutbox(outboxDir, other.operationId)).toBeDefined();
 	});
 });

@@ -173,6 +173,9 @@ describe("DurableSessionService", () => {
 		expect(channelSends).toHaveLength(2);
 		expect(readdirSync(join(base, "tenants", "tenant-a", "channels", "outbox"))).toHaveLength(2);
 		expect(readdirSync(join(base, "tenants", "tenant-b", "channels", "outbox"))).toHaveLength(2);
+		await inTenant(a, () => service.delete(boundA.req, boundA.summary.id));
+		expect(readdirSync(join(base, "tenants", "tenant-a", "channels", "outbox"))).toHaveLength(0);
+		expect(readdirSync(join(base, "tenants", "tenant-b", "channels", "outbox"))).toHaveLength(2);
 	});
 
 	it("keeps request deduplication across idle runtime close/reopen", async () => {

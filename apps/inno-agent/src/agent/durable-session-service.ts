@@ -4,6 +4,7 @@ import type { IncomingMessage } from "node:http";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { join } from "node:path";
 import type { InnoConfig } from "../config.js";
+import { deleteChannelOutboxForSession } from "../channels/channel-outbox.js";
 import type { ChannelRegistry } from "../channels/channel.js";
 import { readJson, writeJson } from "../storage/file-store.js";
 import { resolveCurrentTenantConfig } from "../tenants/config.js";
@@ -659,6 +660,7 @@ export class DurableSessionService {
 		clearWorkspaceActivity(dataRoot, id);
 		await rm(join(this.root(req), "storage", id), { recursive: true, force: true });
 		await rm(this.questionDir(req, id), { recursive: true, force: true });
+		deleteChannelOutboxForSession(join(dataRoot, "channels", "outbox"), id);
 	}
 
 	async close(): Promise<void> {

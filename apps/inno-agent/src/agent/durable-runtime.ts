@@ -22,6 +22,8 @@ import {
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createReadTool } from "@earendil-works/pi-durable/tools";
+import { pruneCompletedChannelOutboxForIdleSession } from "../channels/channel-outbox.js";
+import { logger } from "../logger.js";
 import { WorkspaceReadOnlyEnv } from "./durable-env.js";
 import { withNativeImageFallback } from "./native-image-fallback.js";
 import { createDurableChannelRegistrations, type DurableChannelToolOptions } from "./durable-channels.js";
@@ -39,6 +41,7 @@ const MEMORY_EXTENSION_NAME = "inno.memory";
 const OCR_EXTENSION_NAME = "inno.ocr";
 const CHANNEL_EXTENSION_NAME = "inno.channels";
 const QUESTION_EXTENSION_NAME = "inno.questions";
+export const DURABLE_RECOVERY_RECORD_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** Durable SQLite is single-owner. This guard covers accidental double-open in
  * one process; deployment routing must still prevent cross-process owners. */
@@ -67,6 +70,8 @@ export interface DurableSessionRuntimeOptions {
 	channels?: DurableChannelToolOptions;
 	/** Restart-safe web questions; accepted answers persist before resumption. */
 	questions?: DurableQuestionToolOptions;
+	/** Completed recovery-record retention; cleanup runs only with no live work. */
+	recoveryRetentionMs?: number;
 	registry?: Registry;
 }
 
@@ -185,6 +190,20 @@ export class DurableSessionRuntime {
 						...(readOnlyTools ? { tools: [createReadTool(), ...tools] } : { tools }),
 					},
 				});
+				const inspection = await harness.inspect(BACKGROUND_CONTEXT);
+				if (inspection.tasks.length === 0 && inspection.submissions.length === 0) {
+					const retentionMs = Math.max(0, options.recoveryRetentionMs ?? DURABLE_RECOVERY_RECORD_RETENTION_MS);
+					const completedBefore = Date.now() - retentionMs;
+					try {
+						if (options.channels) {
+							pruneCompletedChannelOutboxForIdleSession(options.channels.outboxDir, options.channels.sessionId, completedBefore);
+						}
+						options.questions?.store.pruneCompletedForIdleSession(completedBefore);
+					} catch (error) {
+						// Cleanup must never prevent an otherwise recoverable session opening.
+						logger.warn({ err: error, storagePath }, "durable recovery-record retention failed (non-fatal)");
+					}
+				}
 				harness.resume();
 				return new DurableSessionRuntime(storagePath, harness, rootConversation, storagePath, options.questions?.store);
 			} catch (error) {

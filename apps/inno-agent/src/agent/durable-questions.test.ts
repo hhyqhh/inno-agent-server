@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -83,5 +83,35 @@ describe("DurableQuestionStore", () => {
 			error: "no_ui",
 		});
 		expect(store.pendingQuestion()).toBeUndefined();
+	});
+
+	it("prunes only expired completed answers after the session becomes idle", async () => {
+		const directory = questionDir();
+		const store = new DurableQuestionStore("durable-session", directory);
+		store.bindTurn({ turnId: "http-once", noUi: true });
+		await store.ask("expired-call", params, new AbortController().signal);
+		await store.ask("recent-call", params, new AbortController().signal);
+		store.bindTurn({ turnId: "pending-turn", emit: () => undefined });
+		const controller = new AbortController();
+		const waiting = store.ask("pending-call", params, controller.signal);
+		controller.abort();
+		await expect(waiting).rejects.toThrow();
+		const pathFor = (toolCallId: string) => {
+			const file = readdirSync(directory).find((name) => name.endsWith(".json") &&
+				JSON.parse(readFileSync(join(directory, name), "utf-8")).toolCallId === toolCallId);
+			if (!file) throw new Error(`Missing question record: ${toolCallId}`);
+			return join(directory, file);
+		};
+		const expiredPath = pathFor("expired-call");
+		const recentPath = pathFor("recent-call");
+		const pendingPath = pathFor("pending-call");
+		const old = new Date(Date.now() - 60_000);
+		utimesSync(expiredPath, old, old);
+
+		expect(store.pruneCompletedForIdleSession(Date.now() - 30_000)).toBe(1);
+		expect(existsSync(expiredPath)).toBe(false);
+		expect(existsSync(recentPath)).toBe(true);
+		expect(existsSync(pendingPath)).toBe(true);
+		expect(store.pendingQuestion()).toMatchObject({ turnId: "pending-turn" });
 	});
 });

@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: durable provider-rejection image fallback (3P)
+## Current stage: replay-safe durable recovery-record retention (3Q)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -83,7 +83,9 @@ The current durable slice supports:
 - first-message fallback topics, automatic richer upgrades after six messages,
   and explicit `POST /api/sessions/:id/generate-topic`, all using the durable
   session's pinned provider/model and isolated tenant credentials;
-- graceful shutdown of open durable runtimes.
+- graceful shutdown of open durable runtimes;
+- 30-day retention of completed channel/question recovery records, cleaned only
+  after the owning session is proved idle, plus outbox removal on session delete.
 
 Shell, workspace mutations, MCP, subagents, codemode, and computer-use remain
 disabled. Durable permissions, branching/editing, and showcase
@@ -176,8 +178,12 @@ send. Authenticated registry lookups re-enter the verified tenant context when
 durable work resumes outside the original HTTP request's async context. Channel
 APIs have no common idempotency key, so a crash after external delivery but
 before the completion commit can send the file again: delivery is
-**at-least-once**, not exactly-once. Outbox snapshots and completion records are
-currently retained; retention/cleanup policy is still pending.
+**at-least-once**, not exactly-once. Completed outbox records and payload
+snapshots are retained for 30 days by default. Cleanup runs before `resume()`
+only when `Harness.inspect()` reports no live tasks or unsettled submissions,
+and only for the opening session's operation-ID prefix. Pending sends and other
+sessions are never age-pruned; stale temporary/orphan payloads can be removed.
+Deleting a durable session removes all of its outbox records immediately.
 
 Durable structured attachments accept the existing `body.attachments` bindings
 and loose-file shape on both chat endpoints. Every path is resolved against the
@@ -217,8 +223,9 @@ another card; an interrupted wait remains pending and can be rebound to a new
 SSE turn. A restored answer resumes the original durable run, not a synthetic
 user message. Non-streaming `POST /api/chat` has no question UI: it rejects an
 already-pending question with 409 and resolves new asks as `no_ui`. Accepted
-question/answer records are currently retained for crash recovery;
-retention/cleanup policy is still pending.
+question/answer records are retained for 30 days by default and pruned under the
+same proven-idle rule as channel completions. Pending questions are never
+age-pruned, because they may still be needed by the original run.
 
 `POST /api/chat/:sessionId/:turnId/abort` now supports active durable SSE turns
 after the same ownership check as other session operations. It marks the stream
@@ -270,7 +277,8 @@ direct profile patch/update retry dedup,
 durable topic upgrade dedup, pinned-model selection, and manual-rename protection,
 L1 event/profile crash-gap recovery, deterministic L2 archive,
 OCR completion caching and job-ID resume, channel payload/completion caching,
-verified tenant channel rebinding, and recovery after real child processes are
+verified tenant channel rebinding, proven-idle 30-day outbox/question retention
+with live-recovery preservation and session-delete outbox cleanup, and recovery after real child processes are
 killed with `SIGKILL` during a delayed model response, during an interrupted
 memory tool, while a submitted OCR job is still running, after a channel send
 but before its outbox completion commit, and after a question answer is
@@ -299,5 +307,4 @@ and scoped cancellation with cross-tenant abort denial and pending-card
 cleanup.
 
 Still pending: application-persisted SSE replay after restart, durable
-permissions, outbox and question retention/cleanup, scheduler integration, and
-sharded single-owner deployment.
+permissions, scheduler integration, and sharded single-owner deployment.

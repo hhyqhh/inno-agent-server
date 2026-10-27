@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -17,6 +17,12 @@ import { readManifest } from "../memory/l2/manifest-store.js";
 import { ChannelRegistry } from "../channels/channel.js";
 import { DurableQuestionStore } from "./durable-questions.js";
 import { buildImagePathsHint } from "../server/inline-images.js";
+import {
+	channelOutboxPayloadPath,
+	completeChannelOutbox,
+	loadChannelOutbox,
+	prepareChannelOutbox,
+} from "../channels/channel-outbox.js";
 
 interface FauxRuntime {
 	faux: FauxProviderHandle;
@@ -340,6 +346,55 @@ describe("DurableSessionRuntime", () => {
 		expect(messages.filter((message) => message.role === "user")).toHaveLength(1);
 		expect(messages.at(-1)?.content).toBe("recovered after crash");
 		expect(provider.faux.state.callCount).toBe(1);
+	}, 20_000);
+
+	it("retains recovery records across live work and prunes them after the session is idle", async () => {
+		const root = tempRoot();
+		const storagePath = join(root, "retention-crash.sqlite");
+		const fixture = fileURLToPath(new URL("./durable-crash-fixture.ts", import.meta.url));
+		const child = spawn(process.execPath, ["--import", "tsx", fixture, storagePath], {
+			cwd: process.cwd(), env: { ...process.env }, stdio: ["ignore", "pipe", "pipe"],
+		});
+		children.add(child);
+		const output = await waitForOutput(child, "model-started");
+		const submissionId = Number(/submission:(\d+)/.exec(output)?.[1]) as SubmissionId;
+		child.kill("SIGKILL");
+		await once(child, "exit");
+		children.delete(child);
+
+		const sessionId = "durable-retention";
+		const questionDir = join(root, "questions");
+		const questions = new DurableQuestionStore(sessionId, questionDir);
+		questions.bindTurn({ turnId: "old-http", noUi: true });
+		await questions.ask("old-question", { questions: [] }, new AbortController().signal);
+		const questionPath = join(questionDir, readdirSync(questionDir)[0]!);
+		const outboxDir = join(root, "outbox");
+		const source = join(root, "report.txt");
+		writeFileSync(source, "snapshot");
+		const outbox = {
+			operationId: `send_file_to_channel:${sessionId}:old-send`,
+			channel: "feishu" as const, chatId: "chat", filePath: "report.txt",
+		};
+		prepareChannelOutbox(outboxDir, outbox, source);
+		completeChannelOutbox(outboxDir, outbox, { text: "sent", details: {} });
+		const recovery = {
+			recoveryRetentionMs: 0,
+			questions: { store: questions, workspaceDir: root },
+			channels: { sessionId, outboxDir, workspaceDir: root, channelRegistry: new ChannelRegistry() },
+		};
+		const provider = fauxRuntime();
+		provider.faux.setResponses([fauxAssistantMessage("recovered before retention")]);
+		let runtime = await open({ storagePath, ...provider, ...recovery });
+		expect(loadChannelOutbox(outboxDir, outbox.operationId)).toBeDefined();
+		expect(existsSync(questionPath)).toBe(true);
+		expect(await waitForText(runtime, submissionId)).toBe("recovered before retention");
+		await runtime.close();
+		openRuntimes.splice(openRuntimes.indexOf(runtime), 1);
+
+		runtime = await open({ storagePath, ...provider, ...recovery });
+		expect(loadChannelOutbox(outboxDir, outbox.operationId)).toBeUndefined();
+		expect(existsSync(channelOutboxPayloadPath(outboxDir, outbox.operationId))).toBe(false);
+		expect(existsSync(questionPath)).toBe(false);
 	}, 20_000);
 
 	it("replays an interrupted memory tool without duplicating its event or profile signals", async () => {
