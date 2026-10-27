@@ -2,6 +2,7 @@ import type { IncomingMessage as HttpReq, ServerResponse } from "node:http";
 import { unavailableContextUsage } from "../agent/context-usage.js";
 import { DurableRuntimeDisabledError, DurableSessionBusyError, type DurableSessionService } from "../agent/durable-session-service.js";
 import { DurableSseProjector } from "../agent/durable-projection.js";
+import type { QuestionBridgeResult } from "../agent/question-bridge.js";
 import { hasCompleteTurnAfterBaseline, streamRegistry, type SessionStreamState } from "../chat/stream-registry.js";
 import { logger } from "../logger.js";
 import { releaseRequestResource } from "../tenants/http.js";
@@ -42,6 +43,7 @@ export async function handleDurableSessionResourceRoutes(
 				messages: detail.messages,
 				messageCount: detail.messages.length,
 				sessionRevision: detail.revision,
+				...(detail.pendingQuestion ? { pendingQuestion: detail.pendingQuestion } : {}),
 			});
 		} catch (error) {
 			json(res, errorStatus(error), { error: error instanceof Error ? error.message : String(error) });
@@ -111,6 +113,10 @@ async function streamDurableTurn(
 	let stream: { stop(): Promise<unknown> } | undefined;
 	try {
 		lease = await service.lease(req, state.sessionId);
+		lease.runtime.bindQuestionTurn({
+			turnId: state.turnId,
+			emit: (event) => streamRegistry.publishStreamEvent(state, event),
+		});
 		const activeStream = await lease.runtime.watch(async (events) => {
 			if (state.terminalEventPublished) return;
 			for (const event of events) {
@@ -180,7 +186,10 @@ async function streamDurableTurn(
 		}
 	} finally {
 		if (stream) await stream.stop().catch(() => undefined);
-		if (lease) await lease.release().catch(() => undefined);
+		if (lease) {
+			lease.runtime.unbindQuestionTurn(state.turnId);
+			await lease.release().catch(() => undefined);
+		}
 	}
 }
 
@@ -194,6 +203,42 @@ export async function handleDurableChatRoutes(
 	ctx: DurableHttpContext,
 	parsedBody?: Record<string, unknown>,
 ): Promise<boolean> {
+	if (method === "POST" && url === "/api/chat/question-response") {
+		const body = parsedBody ?? await readBody(req) as Record<string, unknown>;
+		const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+		const turnId = typeof body.turnId === "string" ? body.turnId : "";
+		const questionId = typeof body.questionId === "string" ? body.questionId : "";
+		const result = body.result as QuestionBridgeResult | undefined;
+		if (!sessionId || !turnId || !questionId || !result
+			|| !Array.isArray(result.answers) || typeof result.cancelled !== "boolean") {
+			json(res, 400, { error: "Missing or invalid sessionId, turnId, questionId or result" });
+			return true;
+		}
+		const status = ctx.service.respondQuestion(req, sessionId, { turnId, questionId, result });
+		let resumed = false;
+		if (status === "accepted") {
+			const live = streamRegistry.getByTurn(turnId);
+			if (live?.sessionId === sessionId && (live.status === "queued" || live.status === "running")) {
+				// The existing SSE holds the runtime lease until the final response.
+				resumed = true;
+			} else {
+				try {
+					await ctx.service.resumeAfterQuestion(req, sessionId);
+					resumed = true;
+				} catch (error) {
+					// The answer is already durable. A later session open can retry the
+					// recovered run; do not turn an accepted answer into a failed POST.
+					logger.error({ err: error, sessionId, questionId }, "failed to resume durable question");
+				}
+			}
+		}
+		json(res, status === "accepted" ? 200 : status === "scope_mismatch" || status === "already_resolved" ? 409 : 404, {
+			accepted: status === "accepted",
+			...(status === "accepted" ? { resumed, sessionId } : {}),
+		});
+		return true;
+	}
+
 	if (method === "POST" && url === "/api/chat") {
 		const body = parsedBody ?? await readBody(req) as Record<string, unknown>;
 		const prompt = typeof body.prompt === "string" ? body.prompt : "";
@@ -207,12 +252,17 @@ export async function handleDurableChatRoutes(
 			json(res, 409, { error: "Session already has an active chat turn" });
 			return true;
 		}
+		if (ctx.service.pendingQuestion(req, sessionId)) {
+			json(res, 409, { error: "This session has a pending question; answer it through the streaming UI" });
+			return true;
+		}
 		let lease: Awaited<ReturnType<DurableSessionService["lease"]>> | undefined;
 		try {
 			lease = await ctx.service.lease(req, sessionId);
 			const requestId = typeof body.clientRequestId === "string" && body.clientRequestId.trim()
 				? body.clientRequestId
 				: `http-${crypto.randomUUID()}`;
+			lease.runtime.bindQuestionTurn({ turnId: requestId, noUi: true });
 			const submission = await lease.runtime.submit(prompt, requestId);
 			ctx.service.noteSubmission(req, sessionId, prompt);
 			const result = await lease.runtime.waitForSubmission(submission.id);
@@ -222,6 +272,7 @@ export async function handleDurableChatRoutes(
 		} catch (error) {
 			json(res, errorStatus(error), { error: error instanceof Error ? error.message : String(error) });
 		} finally {
+			lease?.runtime.unbindQuestionTurn();
 			await lease?.release().catch(() => undefined);
 		}
 		return true;

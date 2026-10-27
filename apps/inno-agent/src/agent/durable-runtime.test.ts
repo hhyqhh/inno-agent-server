@@ -15,6 +15,7 @@ import { DurableSessionRuntime, DurableStorageOwnerError } from "./durable-runti
 import { loadEvents, loadProfile } from "../memory/learner/profile-store.js";
 import { readManifest } from "../memory/l2/manifest-store.js";
 import { ChannelRegistry } from "../channels/channel.js";
+import { DurableQuestionStore } from "./durable-questions.js";
 
 interface FauxRuntime {
 	faux: FauxProviderHandle;
@@ -445,5 +446,45 @@ describe("DurableSessionRuntime", () => {
 		const messages = durableEntriesToMessages((await runtime.snapshot()).entries);
 		const tool = messages.flatMap((message) => message.tools ?? []).find((call) => call.toolCallId === "crash-channel-call");
 		expect(JSON.stringify(tool?.result)).toContain("已把文件 report.txt");
+	}, 20_000);
+
+	it("resumes a persisted question answer without asking again after SIGKILL", async () => {
+		const root = tempRoot();
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		const storagePath = join(root, "question-crash.sqlite");
+		const questionDir = join(root, "tenant", "durable", "questions", "durable-crash-question");
+		const fixture = fileURLToPath(new URL("./durable-question-crash-fixture.ts", import.meta.url));
+		const child = spawn(process.execPath, ["--import", "tsx", fixture, storagePath, questionDir, workspace], {
+			cwd: process.cwd(),
+			env: { ...process.env },
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		children.add(child);
+		const output = await waitForOutput(child, "question-answer-persisted:accepted");
+		const submissionId = Number(/submission:(\d+)/.exec(output)?.[1]) as SubmissionId;
+		await once(child, "exit");
+		children.delete(child);
+
+		const provider = fauxRuntime();
+		provider.faux.setResponses([fauxAssistantMessage("question answer recovered")]);
+		const store = new DurableQuestionStore("durable-crash-question", questionDir);
+		const events: Array<Record<string, unknown>> = [];
+		store.bindTurn({ turnId: "recovered-turn", emit: (event) => events.push(event) });
+		const runtime = await open({
+			storagePath,
+			workspaceDir: workspace,
+			questions: { store, workspaceDir: workspace },
+			...provider,
+		});
+		const recovered = await runtime.waitForSubmission(submissionId);
+
+		expect(recovered).toMatchObject({ status: "done", text: "question answer recovered" });
+		expect(events).toEqual([]);
+		expect(store.pendingQuestion()).toBeUndefined();
+		const messages = durableEntriesToMessages((await runtime.snapshot()).entries);
+		const tool = messages.flatMap((message) => message.tools ?? []).find((call) => call.toolCallId === "crash-question-call");
+		expect(JSON.stringify(tool?.result)).toContain("继续学习吗？");
+		expect(JSON.stringify(tool?.result)).toContain("继续");
 	}, 20_000);
 });

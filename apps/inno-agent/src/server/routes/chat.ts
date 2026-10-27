@@ -624,6 +624,9 @@ export async function handleChatRoutes(
 			return true;
 		}
 		if (!await ownsSession(sessionId)) return denySession();
+		if (durableContext?.service.get(req, sessionId)) {
+			return handleDurableChatRoutes(req, res, method, url, durableContext, body);
+		}
 		const status = questionBridge.respond({ sessionId, turnId, questionId, result });
 		if (status === "not_found") {
 			// The live turn is gone (process restarted, or the turn ended while

@@ -62,6 +62,8 @@ export interface SubmitChatQuestionResponse {
 	/** The owning turn is gone (server restarted). The persisted card was
 	 *  consumed; the client should resend the answer as a fresh chat turn. */
 	expired?: boolean;
+	/** A durable run resumed from the persisted answer rather than a new user turn. */
+	resumed?: boolean;
 	sessionId?: string;
 }
 

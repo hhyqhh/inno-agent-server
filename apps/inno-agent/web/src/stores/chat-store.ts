@@ -1173,12 +1173,16 @@ export class ChatStoreImpl extends EventEmitter<ChatStoreEvents> {
 		try {
 			const response = await submitChatQuestion(sessionId, turnId, questionId, result);
 			if (response.expired) {
-				// The original turn is gone: consume the card and resubmit the
-				// answer as a normal user prompt so the agent resumes from the
-				// session history.
+				// The original legacy turn is gone: consume the card and resubmit the
+				// answer as a normal user prompt so the agent resumes from history.
 				this.pendingQuestion = null;
 				this.emit("change", undefined);
 				await this.send(formatQuestionnaireAsPrompt(result));
+			} else if (response.resumed && pending.restored && !this.activeOwner) {
+				// A durable run resumed from its persisted answer. No SSE remains
+				// after a process restart, so reload the now-committed history.
+				const { sessionsStore } = await import("./sessions-store.js");
+				await sessionsStore.openSession(sessionId, { historyMode: "none" });
 			}
 		} catch (err) {
 			if (!this.activeOwner || this.owns(this.activeOwner)) {

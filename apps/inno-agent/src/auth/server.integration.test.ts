@@ -107,6 +107,36 @@ beforeAll(async () => {
 			if (body.includes("durable-reconnect")) {
 				await new Promise((resolveDelay) => setTimeout(resolveDelay, 400));
 			}
+			const questionPrompt = body.includes("durable-question");
+			if (questionPrompt) {
+				const request = JSON.parse(body) as { messages?: Array<{ role?: string }> };
+				const toolResults = request.messages?.filter((message) => message.role === "tool").length ?? 0;
+				if (toolResults === 0) {
+					res.writeHead(200, { "Content-Type": "text/event-stream" });
+					res.end([
+						`data: ${JSON.stringify({
+							id: "tenant-stub", object: "chat.completion.chunk", created: 0, model: "tenant-model",
+							choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{
+								index: 0, id: "durable-question-call", type: "function",
+								function: { name: "ask_user_question", arguments: JSON.stringify({ questions: [{
+									question: "选择学习难度？", header: "难度",
+									options: [{ label: "基础", description: "从基础开始" }, { label: "进阶", description: "加快进度" }],
+								}] }) },
+							}] }, finish_reason: null }],
+						})}`,
+						"",
+						`data: ${JSON.stringify({
+							id: "tenant-stub", object: "chat.completion.chunk", created: 0, model: "tenant-model",
+							choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+						})}`,
+						"",
+						"data: [DONE]",
+						"",
+						"",
+					].join("\n"));
+					return;
+				}
+			}
 			const memoryPrompt = /durable-memory-(a|b)/.exec(body);
 			if (memoryPrompt) {
 				const request = JSON.parse(body) as { messages?: Array<{ role?: string }> };
@@ -1154,6 +1184,96 @@ describe("durable session HTTP boundary", () => {
 		};
 		expect(recovered.messages.some((message) => message.role === "user" && message.content === "durable-reconnect")).toBe(true);
 		expect(recovered.messages.some((message) => message.role === "assistant" && message.content === "tenant stub response")).toBe(true);
+	}, 60_000);
+
+	it("resumes the original durable run from an authenticated question answer", async () => {
+		const [cookieA, cookieB] = await Promise.all([
+			registerUser("durable-question-a@example.com"),
+			registerUser("durable-question-b@example.com"),
+		]);
+		const configured = await api(cookieA, "/api/settings/providers", {
+			method: "PUT",
+			body: JSON.stringify({
+				providerId: "shared",
+				baseUrl: providerOrigin,
+				apiKey: "durable-question-secret",
+				api: "openai-completions",
+				models: [{ id: "tenant-model", name: "Tenant model", contextWindow: 32_000, maxTokens: 2_000 }],
+			}),
+		});
+		expect(configured.status).toBe(200);
+		const created = await api(cookieA, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ runtime: "durable" }),
+		});
+		expect(created.status).toBe(201);
+		const session = await created.json() as { id: string };
+		const stream = await api(cookieA, "/api/chat/stream", {
+			method: "POST",
+			body: JSON.stringify({ sessionId: session.id, prompt: "durable-question", clientRequestId: "durable-question-request" }),
+		});
+		expect(stream.status).toBe(200);
+		const reader = stream.body!.getReader();
+		const decoder = new TextDecoder();
+		let events = "";
+		while (!events.includes('"type":"question"')) {
+			const chunk = await reader.read();
+			if (chunk.done) break;
+			events += decoder.decode(chunk.value, { stream: true });
+		}
+		const questionId = /"questionId":"([^"]+)"/.exec(events)?.[1];
+		expect(questionId).toBeTruthy();
+		const status = await (await api(cookieA, `/api/chat/status/${session.id}`)).json() as {
+			stream: { turnId: string };
+		};
+		const answer = {
+			answers: [{ questionIndex: 0, question: "选择学习难度？", kind: "option", answer: "基础" }],
+			cancelled: false,
+		};
+		expect((await api(cookieB, "/api/chat/question-response", {
+			method: "POST",
+			body: JSON.stringify({ sessionId: session.id, turnId: status.stream.turnId, questionId, result: answer }),
+		})).status).toBe(404);
+		expect((await api(cookieA, "/api/chat/question-response", {
+			method: "POST",
+			body: JSON.stringify({ sessionId: session.id, turnId: "wrong-turn", questionId, result: answer }),
+		})).status).toBe(409);
+		const answered = await api(cookieA, "/api/chat/question-response", {
+			method: "POST",
+			body: JSON.stringify({ sessionId: session.id, turnId: status.stream.turnId, questionId, result: answer }),
+		});
+		expect(answered.status).toBe(200);
+		expect(await answered.json()).toMatchObject({ accepted: true, resumed: true, sessionId: session.id });
+		while (!events.includes('"type":"done"')) {
+			const chunk = await reader.read();
+			if (chunk.done) break;
+			events += decoder.decode(chunk.value, { stream: true });
+		}
+		expect(events).toContain('"type":"done"');
+		expect(events).toContain('"persisted":true');
+		const detail = await (await api(cookieA, `/api/sessions/${session.id}`)).json() as {
+			messages: Array<{ role: string; content: string; tools?: unknown[] }>;
+			pendingQuestion?: unknown;
+		};
+		expect(detail.pendingQuestion).toBeUndefined();
+		expect(detail.messages.filter((message) => message.role === "user")).toHaveLength(1);
+		expect(JSON.stringify(detail.messages)).toContain("选择学习难度？");
+		expect(JSON.stringify(detail.messages)).toContain("基础");
+
+		const noUiSession = await (await api(cookieA, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ runtime: "durable" }),
+		})).json() as { id: string };
+		const noUi = await api(cookieA, "/api/chat", {
+			method: "POST",
+			body: JSON.stringify({ sessionId: noUiSession.id, prompt: "durable-question", clientRequestId: "durable-question-no-ui" }),
+		});
+		expect(noUi.status).toBe(200);
+		expect(await noUi.json()).toMatchObject({ response: "tenant stub response" });
+		const noUiDetail = await (await api(cookieA, `/api/sessions/${noUiSession.id}`)).json() as {
+			messages: unknown[];
+			pendingQuestion?: unknown;
+		};
+		expect(noUiDetail.pendingQuestion).toBeUndefined();
+		expect(JSON.stringify(noUiDetail.messages)).toContain("User declined to answer questions");
 	}, 60_000);
 
 	it("writes durable L1/L2/OCR state only to the authenticated tenant roots", async () => {

@@ -17,6 +17,7 @@ import {
 	type SettledSubmissionRecord,
 	type SnapshotEvent,
 	type SubmissionId,
+	type ToolRegistration,
 	type UserInput,
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -25,11 +26,18 @@ import { WorkspaceReadOnlyEnv } from "./durable-env.js";
 import { createDurableChannelRegistrations, type DurableChannelToolOptions } from "./durable-channels.js";
 import { createDurableMemoryRegistrations, type DurableMemoryToolOptions } from "./durable-memory.js";
 import { createDurableOcrRegistrations, type DurableOcrToolOptions } from "./durable-ocr.js";
+import {
+	createDurableQuestionRegistrations,
+	type DurableQuestionBinding,
+	type DurableQuestionStore,
+	type DurableQuestionToolOptions,
+} from "./durable-questions.js";
 
 const READ_ONLY_EXTENSION_NAME = "inno.read-only";
 const MEMORY_EXTENSION_NAME = "inno.memory";
 const OCR_EXTENSION_NAME = "inno.ocr";
 const CHANNEL_EXTENSION_NAME = "inno.channels";
+const QUESTION_EXTENSION_NAME = "inno.questions";
 
 /** Durable SQLite is single-owner. This guard covers accidental double-open in
  * one process; deployment routing must still prevent cross-process owners. */
@@ -56,6 +64,8 @@ export interface DurableSessionRuntimeOptions {
 	ocr?: DurableOcrToolOptions;
 	/** Persistent file-delivery outbox; external sends remain at-least-once. */
 	channels?: DurableChannelToolOptions;
+	/** Restart-safe web questions; accepted answers persist before resumption. */
+	questions?: DurableQuestionToolOptions;
 	registry?: Registry;
 }
 
@@ -88,6 +98,7 @@ function createSessionRegistry(
 	memory?: DurableMemoryToolOptions,
 	ocr?: DurableOcrToolOptions,
 	channels?: DurableChannelToolOptions,
+	questionTools: ToolRegistration[] = [],
 ): Registry {
 	const registry = createRegistry();
 	if (readOnlyTools) {
@@ -114,6 +125,12 @@ function createSessionRegistry(
 			tools: createDurableChannelRegistrations(channels),
 		}));
 	}
+	if (questionTools.length > 0) {
+		registry.install(defineExtension({
+			name: QUESTION_EXTENSION_NAME,
+			tools: questionTools,
+		}));
+	}
 	return registry;
 }
 
@@ -127,6 +144,7 @@ export class DurableSessionRuntime {
 		private readonly harness: Harness,
 		private readonly rootConversation: Conversation,
 		private readonly ownsStoragePath: string,
+		private readonly questions?: DurableQuestionStore,
 	) {}
 
 	static async open(options: DurableSessionRuntimeOptions): Promise<DurableSessionRuntime> {
@@ -138,11 +156,14 @@ export class DurableSessionRuntime {
 		openStoragePaths.add(storagePath);
 		try {
 			const readOnlyTools = options.readOnlyTools === true;
-			const registry = options.registry ?? createSessionRegistry(readOnlyTools, options.memory, options.ocr, options.channels);
+			const questionTools = options.questions
+				? await createDurableQuestionRegistrations(options.questions)
+				: [];
+			const registry = options.registry ?? createSessionRegistry(readOnlyTools, options.memory, options.ocr, options.channels, questionTools);
 			const memoryTools = options.memory ? createDurableMemoryRegistrations(options.memory) : [];
 			const ocrTools = options.ocr ? createDurableOcrRegistrations(options.ocr) : [];
 			const channelTools = options.channels ? createDurableChannelRegistrations(options.channels) : [];
-			const tools = [...memoryTools, ...ocrTools, ...channelTools];
+			const tools = [...memoryTools, ...ocrTools, ...channelTools, ...questionTools];
 			const harness = await Harness.open(
 				await openNodeSqliteStorage(storagePath),
 				{
@@ -164,7 +185,7 @@ export class DurableSessionRuntime {
 					},
 				});
 				harness.resume();
-				return new DurableSessionRuntime(storagePath, harness, rootConversation, storagePath);
+				return new DurableSessionRuntime(storagePath, harness, rootConversation, storagePath, options.questions?.store);
 			} catch (error) {
 				await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
 				throw error;
@@ -211,6 +232,18 @@ export class DurableSessionRuntime {
 		return { id, status: "done", answer, text: textFromAssistant(answer) };
 	}
 
+	bindQuestionTurn(binding: DurableQuestionBinding): void {
+		this.questions?.bindTurn(binding);
+	}
+
+	unbindQuestionTurn(turnId?: string): void {
+		this.questions?.unbindTurn(turnId);
+	}
+
+	async waitForIdle(context: Context = BACKGROUND_CONTEXT): Promise<void> {
+		await this.rootConversation.waitForIdle(context);
+	}
+
 	async snapshot(): Promise<SnapshotEvent> {
 		const stream = await watchEvents(this.harness, this.rootConversation.id, BACKGROUND_CONTEXT);
 		try {
@@ -228,6 +261,7 @@ export class DurableSessionRuntime {
 
 	async close(): Promise<void> {
 		try {
+			this.questions?.unbindTurn();
 			await this.harness.close(BACKGROUND_CONTEXT);
 		} finally {
 			openStoragePaths.delete(this.ownsStoragePath);

@@ -14,7 +14,9 @@ import type { SessionSummary } from "../server/session-model.js";
 import { createConfiguredDurableModels } from "./durable-models.js";
 import { buildDurableInstructions } from "./durable-memory.js";
 import { durableEntriesToMessages } from "./durable-projection.js";
+import { DurableQuestionStore } from "./durable-questions.js";
 import { DurableSessionRuntime } from "./durable-runtime.js";
+import type { PersistedQuestion, QuestionBridgeResult, QuestionResponseStatus } from "./question-bridge.js";
 import { INNO_SYSTEM_PROMPT } from "./system-prompt.js";
 
 const DURABLE_ID_PATTERN = /^durable-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -123,6 +125,7 @@ function toSummary(record: DurableSessionRecord): DurableSessionSummary {
 export class DurableSessionService {
 	private readonly runtimes = new Map<string, RuntimeEntry>();
 	private readonly openings = new Map<string, Promise<DurableSessionRuntime>>();
+	private readonly questionStores = new Map<string, DurableQuestionStore>();
 	private readonly openRuntime: typeof DurableSessionRuntime.open;
 	private closing = false;
 
@@ -146,6 +149,43 @@ export class DurableSessionService {
 
 	private runtimeKey(req: IncomingMessage, id: string): string {
 		return join(this.root(req), "storage", id);
+	}
+
+	private questionDir(req: IncomingMessage, id: string): string {
+		return join(this.root(req), "questions", id);
+	}
+
+	private questionStore(req: IncomingMessage, id: string): DurableQuestionStore {
+		const key = this.runtimeKey(req, id);
+		let store = this.questionStores.get(key);
+		if (!store) {
+			store = new DurableQuestionStore(id, this.questionDir(req, id));
+			this.questionStores.set(key, store);
+		}
+		return store;
+	}
+
+	pendingQuestion(req: IncomingMessage, id: string): PersistedQuestion | undefined {
+		return this.questionStore(req, id).pendingQuestion();
+	}
+
+	respondQuestion(req: IncomingMessage, id: string, input: {
+		turnId: string;
+		questionId: string;
+		result: QuestionBridgeResult;
+	}): QuestionResponseStatus {
+		return this.questionStore(req, id).respond(input);
+	}
+
+	/** Hold an owner until the accepted answer and any following model response
+	 * are committed. Without an active SSE this still resumes in the background. */
+	async resumeAfterQuestion(req: IncomingMessage, id: string): Promise<void> {
+		const lease = await this.lease(req, id);
+		try {
+			await lease.runtime.waitForIdle();
+		} finally {
+			await lease.release();
+		}
 	}
 
 	private catalog(req: IncomingMessage): DurableSessionRecord[] {
@@ -224,7 +264,12 @@ export class DurableSessionService {
 		});
 	}
 
-	async snapshot(req: IncomingMessage, id: string): Promise<{ summary: DurableSessionSummary; messages: ReturnType<typeof durableEntriesToMessages>; revision: string }> {
+	async snapshot(req: IncomingMessage, id: string): Promise<{
+		summary: DurableSessionSummary;
+		messages: ReturnType<typeof durableEntriesToMessages>;
+		revision: string;
+		pendingQuestion?: PersistedQuestion;
+	}> {
 		const lease = await this.lease(req, id);
 		try {
 			const snapshot = await lease.runtime.snapshot();
@@ -237,7 +282,13 @@ export class DurableSessionService {
 				: record.updatedAt;
 			const next = this.update(req, id, { messageCount: messages.length, updatedAt });
 			const lastEntryId = snapshot.entries.at(-1)?.id ?? 0;
-			return { summary: toSummary(next), messages, revision: `durable:${lastEntryId}` };
+			const pendingQuestion = this.pendingQuestion(req, id);
+			return {
+				summary: toSummary(next),
+				messages,
+				revision: `durable:${lastEntryId}`,
+				...(pendingQuestion ? { pendingQuestion } : {}),
+			};
 		} finally {
 			await lease.release();
 		}
@@ -292,6 +343,10 @@ export class DurableSessionService {
 						memory,
 						ocr,
 						channels,
+						questions: {
+							store: this.questionStore(req, id),
+							workspaceDir,
+						},
 					});
 				})();
 				this.openings.set(key, opening);
@@ -333,7 +388,9 @@ export class DurableSessionService {
 			await entry.runtime.close();
 		}
 		this.writeCatalog(req, this.catalog(req).filter((record) => record.id !== id));
+		this.questionStores.delete(key);
 		await rm(join(this.root(req), "storage", id), { recursive: true, force: true });
+		await rm(this.questionDir(req, id), { recursive: true, force: true });
 	}
 
 	async close(): Promise<void> {
@@ -342,6 +399,7 @@ export class DurableSessionService {
 		const entries = [...this.runtimes.values()];
 		this.runtimes.clear();
 		this.openings.clear();
+		this.questionStores.clear();
 		await Promise.all(entries.map((entry) => entry.runtime.close().catch(() => undefined)));
 	}
 }

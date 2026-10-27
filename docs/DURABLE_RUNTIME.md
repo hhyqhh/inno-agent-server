@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: persistent channel outbox (3E)
+## Current stage: recoverable question cards (3F)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -65,15 +65,17 @@ The current durable slice supports:
   persisted job-ID checkpoints, and cached final markdown;
 - `send_file_to_channel` with a tenant-local persistent outbox, payload
   snapshots, original-target recovery, and cached completion results;
+- `ask_user_question` with stable question identity, tenant-local persisted
+  answers, SSE turn rebinding, and original-run recovery after restart;
 - graceful shutdown of open durable runtimes.
 
 Shell, workspace mutations, MCP, subagents, codemode, and computer-use remain
 disabled. Direct `patch_learner_profile` and `update_learner_profile` mutations
-are not exposed on the durable path yet. Attachments, durable
-questions/permissions, branching/editing, showcase export, generated topics,
-and turn cancellation are not implemented on this path yet; unsupported
-operations fail explicitly rather than falling back to legacy execution. The
-workspace `agent.md` and private-skill prompt context are not injected yet.
+are not exposed on the durable path yet. Attachments, durable permissions,
+branching/editing, showcase export, generated topics, and turn cancellation are
+not implemented on this path yet; unsupported operations fail explicitly rather
+than falling back to legacy execution. The workspace `agent.md` and
+private-skill prompt context are not injected yet.
 
 ## Recovery and delivery semantics
 
@@ -125,6 +127,19 @@ before the completion commit can send the file again: delivery is
 **at-least-once**, not exactly-once. Outbox snapshots and completion records are
 currently retained; retention/cleanup policy is still pending.
 
+Durable questions use the stable operation ID
+`ask_user_question:<sessionId>:<toolCallId>`. Records live under the
+tenant-local `durable/questions/<sessionId>/` directory, use mode `0600`, and
+bind the question ID to a hash of that operation ID. An accepted answer is
+persisted before its waiter is released or `question_resolved` is emitted.
+Replay-safe tool re-entry returns a completed answer from disk without showing
+another card; an interrupted wait remains pending and can be rebound to a new
+SSE turn. A restored answer resumes the original durable run, not a synthetic
+user message. Non-streaming `POST /api/chat` has no question UI: it rejects an
+already-pending question with 409 and resolves new asks as `no_ui`. Accepted
+question/answer records are currently retained for crash recovery;
+retention/cleanup policy is still pending.
+
 One durable storage has **one owner at a time**. The in-process guard does not
 replace deployment routing, lease/fencing, or an ordered old-owner shutdown.
 Never mount the same SQLite database into active-active workers or share it
@@ -157,17 +172,21 @@ L1/L2 execution, L1 event/profile crash-gap recovery, deterministic L2 archive,
 OCR completion caching and job-ID resume, channel payload/completion caching,
 verified tenant channel rebinding, and recovery after real child processes are
 killed with `SIGKILL` during a delayed model response, during an interrupted
-memory tool, while a submitted OCR job is still running, and after a channel
-send but before its outbox completion commit. No paid model endpoint or real
-external channel is used.
+memory tool, while a submitted OCR job is still running, after a channel send
+but before its outbox completion commit, and after a question answer is
+persisted but before its tool result commits. Recovered question answers do not
+produce a second question event. No paid model endpoint or real external
+channel is used.
 
 The real-PostgreSQL integration suite additionally covers explicit HTTP
 creation, concurrent authenticated durable sessions, per-tenant provider and
 OCR Authorization headers, cross-tenant 404s, completed request-ID retries,
-lack of legacy JSONL creation, SSE disconnect/reconnect replay, and tenant-local
-L1/L2/OCR writes through the authenticated HTTP boundary.
+lack of legacy JSONL creation, SSE disconnect/reconnect replay, tenant-local
+L1/L2/OCR writes through the authenticated HTTP boundary, original-run question
+answers with cross-tenant 404 and stale-turn 409 responses, and non-streaming
+`no_ui` question resolution.
 
 Still pending: application-persisted SSE replay after restart, durable
-questions/permissions/cancellation, workspace prompt context and attachments,
-direct durable profile patch/update, outbox retention/cleanup, scheduler
+permissions/cancellation, workspace prompt context and attachments, direct
+durable profile patch/update, outbox and question retention/cleanup, scheduler
 integration, and sharded single-owner deployment.

@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
 	getSession: vi.fn(),
 	refresh: vi.fn(),
 	refreshUntilTopic: vi.fn(),
+	openSession: vi.fn(),
 	ensureWindowForPanel: vi.fn(),
 	appStore: {
 		workspaceWidth: 640,
@@ -28,7 +29,14 @@ vi.mock("../api/chat.js", () => ({
 }));
 
 vi.mock("../api/sessions.js", () => ({ getSession: mocks.getSession }));
-vi.mock("./sessions-store.js", () => ({ sessionsStore: { currentSessionId: "session.jsonl", refresh: mocks.refresh, refreshUntilTopic: mocks.refreshUntilTopic } }));
+vi.mock("./sessions-store.js", () => ({
+	sessionsStore: {
+		currentSessionId: "session.jsonl",
+		refresh: mocks.refresh,
+		refreshUntilTopic: mocks.refreshUntilTopic,
+		openSession: mocks.openSession,
+	},
+}));
 vi.mock("./notebook-store.js", () => ({ notebookStore: { loadAll: vi.fn() } }));
 vi.mock("./app-store.js", () => ({
 	appStore: mocks.appStore,
@@ -347,6 +355,39 @@ describe("ChatStore stream ownership", () => {
 
 		releaseTool();
 		await sending;
+	});
+
+	it("reloads committed history after a restored durable question resumes its original run", async () => {
+		const params = {
+			questions: [{
+				question: "Choose one",
+				header: "Choice",
+				options: [{ label: "A", description: "First" }, { label: "B", description: "Second" }],
+			}],
+		};
+		const result: QuestionnaireResult = {
+			answers: [{ questionIndex: 0, question: "Choose one", kind: "option", answer: "B" }],
+			cancelled: false,
+		};
+		mocks.submitChatQuestion.mockResolvedValue({ accepted: true, resumed: true });
+		mocks.openSession.mockResolvedValue(undefined);
+		const store = new ChatStoreImpl();
+		store.restorePendingQuestion({
+			questionId: "durable-question-card",
+			params,
+			sessionId: "durable-session",
+			turnId: "restored-turn",
+			restored: true,
+		});
+
+		await store.submitQuestionResponse("durable-question-card", result);
+
+		expect(mocks.submitChatQuestion).toHaveBeenCalledWith(
+			"durable-session", "restored-turn", "durable-question-card", result,
+		);
+		expect(mocks.openSession).toHaveBeenCalledWith("durable-session", { historyMode: "none" });
+		expect(mocks.streamChat).not.toHaveBeenCalled();
+		expect(store.pendingQuestion).toBeNull();
 	});
 
 	it("restores the pending question when the submit fails before tool_end", async () => {
