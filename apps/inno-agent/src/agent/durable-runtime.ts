@@ -21,10 +21,10 @@ import {
 	type UserInput,
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { createReadTool } from "@earendil-works/pi-durable/tools";
+import { createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
 import { pruneCompletedChannelOutboxForIdleSession } from "../channels/channel-outbox.js";
 import { logger } from "../logger.js";
-import { WorkspaceReadOnlyEnv } from "./durable-env.js";
+import { WorkspaceFileEnv } from "./durable-env.js";
 import { withNativeImageFallback } from "./native-image-fallback.js";
 import { createDurableChannelRegistrations, type DurableChannelToolOptions } from "./durable-channels.js";
 import { createDurableMemoryRegistrations, type DurableMemoryToolOptions } from "./durable-memory.js";
@@ -36,7 +36,8 @@ import {
 	type DurableQuestionToolOptions,
 } from "./durable-questions.js";
 
-const READ_ONLY_EXTENSION_NAME = "inno.read-only";
+// Keep the original extension ID stable for existing durable registries.
+const WORKSPACE_EXTENSION_NAME = "inno.read-only";
 const MEMORY_EXTENSION_NAME = "inno.memory";
 const OCR_EXTENSION_NAME = "inno.ocr";
 const CHANNEL_EXTENSION_NAME = "inno.channels";
@@ -60,9 +61,9 @@ export interface DurableSessionRuntimeOptions {
 	model: ModelRef;
 	instructions?: string;
 	workspaceDir?: string;
-	/** The only optional built-in tool in this slice. No shell or mutations. */
-	readOnlyTools?: boolean;
-	/** Tenant-local, replay-safe L1/L2 tools. Workspace writes remain disabled. */
+	/** Workspace-contained read/write/edit tools. Shell and other mutations stay disabled. */
+	workspaceTools?: boolean;
+	/** Tenant-local, replay-safe L1/L2 tools. */
 	memory?: DurableMemoryToolOptions;
 	/** Remote OCR recovery checkpoints; submission remains at-least-once. */
 	ocr?: DurableOcrToolOptions;
@@ -99,18 +100,22 @@ function textFromAssistant(message: AssistantMessage): string {
 		.trim();
 }
 
+function createWorkspaceFileTools() {
+	return [createReadTool(), createWriteTool(), createEditTool()];
+}
+
 function createSessionRegistry(
-	readOnlyTools: boolean,
+	workspaceTools: boolean,
 	memory?: DurableMemoryToolOptions,
 	ocr?: DurableOcrToolOptions,
 	channels?: DurableChannelToolOptions,
 	questionTools: ToolRegistration[] = [],
 ): Registry {
 	const registry = createRegistry();
-	if (readOnlyTools) {
+	if (workspaceTools) {
 		registry.install(defineExtension({
-			name: READ_ONLY_EXTENSION_NAME,
-			tools: [createReadTool()],
+			name: WORKSPACE_EXTENSION_NAME,
+			tools: createWorkspaceFileTools(),
 		}));
 	}
 	if (memory) {
@@ -161,11 +166,11 @@ export class DurableSessionRuntime {
 		if (openStoragePaths.has(storagePath)) throw new DurableStorageOwnerError(storagePath);
 		openStoragePaths.add(storagePath);
 		try {
-			const readOnlyTools = options.readOnlyTools === true;
+			const workspaceTools = options.workspaceTools === true;
 			const questionTools = options.questions
 				? await createDurableQuestionRegistrations(options.questions)
 				: [];
-			const registry = options.registry ?? createSessionRegistry(readOnlyTools, options.memory, options.ocr, options.channels, questionTools);
+			const registry = options.registry ?? createSessionRegistry(workspaceTools, options.memory, options.ocr, options.channels, questionTools);
 			const memoryTools = options.memory ? createDurableMemoryRegistrations(options.memory) : [];
 			const ocrTools = options.ocr ? createDurableOcrRegistrations(options.ocr) : [];
 			const channelTools = options.channels ? createDurableChannelRegistrations(options.channels) : [];
@@ -176,7 +181,7 @@ export class DurableSessionRuntime {
 					models: withNativeImageFallback(options.models),
 					registry,
 					env: options.workspaceDir
-						? () => new WorkspaceReadOnlyEnv(options.workspaceDir!)
+						? () => new WorkspaceFileEnv(options.workspaceDir!)
 						: undefined,
 				},
 				BACKGROUND_CONTEXT,
@@ -187,7 +192,7 @@ export class DurableSessionRuntime {
 						model: options.model,
 						instructions: options.instructions,
 						cwd: options.workspaceDir,
-						...(readOnlyTools ? { tools: [createReadTool(), ...tools] } : { tools }),
+						...(workspaceTools ? { tools: [...createWorkspaceFileTools(), ...tools] } : { tools }),
 					},
 				});
 				const inspection = await harness.inspect(BACKGROUND_CONTEXT);

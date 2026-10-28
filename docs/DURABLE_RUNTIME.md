@@ -62,7 +62,8 @@ The current durable slice supports:
 - committed snapshots and existing Inno history/SSE event shapes;
 - tenant-local application SSE journals with exact numeric event replay and
   original-submission recovery after a process restart;
-- the workspace-read-only `read` tool, including canonical symlink containment;
+- workspace-contained `read`, `write`, and exact-replacement `edit` tools,
+  including automatic parent creation and canonical symlink containment;
 - replay-safe, tenant-local L1 context/event/evidence tools, direct profile
   patch/update mutations, and L2 archive, query, and lint tools;
 - tenant-local L1 profile/recent-event context in durable instructions;
@@ -95,10 +96,10 @@ The current durable slice supports:
   deferred scheduler paths, with owned scheduler sessions/workspaces and the
   existing occurrence, check-in, run-ledger, and channel behavior.
 
-Shell, workspace mutations, MCP, subagents, codemode, and computer-use remain
-disabled. Durable permissions, branching/editing, and showcase
-export are not implemented on this path yet; unsupported
-operations fail explicitly rather than falling back to legacy execution.
+Shell, append/truncate, delete, rename, and other workspace mutations, MCP,
+subagents, codemode, and computer-use remain disabled. Durable permissions,
+branching/editing, and showcase export are not implemented on this path yet;
+unsupported operations fail explicitly rather than falling back to legacy execution.
 Workspace-private skills are injected as prompt resources; they do not alter the
 process-global PI resource loader or enable otherwise unsupported durable tools.
 
@@ -107,6 +108,12 @@ process-global PI resource loader or enable otherwise unsupported durable tools.
 Durable uses SQLite WAL with `synchronous = NORMAL`. Committed work survives a
 process crash; the newest commits may be lost on host or power failure. This is
 not an exactly-once guarantee for paid model calls or external side effects.
+
+Workspace file writes are also outside the SQLite transaction. A crash after
+the OS write but before the tool-result commit can replay the operation:
+`write` repeats the same content, while an `edit` retry can report that its
+`oldText` no longer matches. The current file tools therefore do not claim
+exactly-once mutation recovery.
 
 A repeated `requestId` returns the original submission in the same conversation.
 After restart, `Harness.open()` followed by `resume()` continues unfinished
@@ -343,7 +350,8 @@ The PostgreSQL-free suite uses only `fauxProvider()` and temporary directories.
 It covers concurrent session/tenant roots, isolated configured model/auth
 runtimes, request deduplication across idle close/reopen, stable committed
 revisions, busy-delete rejection, legacy JSONL non-interference,
-workspace/symlink containment, read-only fail-closed behavior, workspace
+workspace/symlink containment for reads and writes, lexical/canonical workspace
+aliases, disabled shell/delete/rename/append behavior, workspace
 `agent.md`/private-skill injection and reload, attachment-context history
 projection, inline-image retry path stability, provider-rejection OCR fallback
 in the same submission with capability caching and request-ID dedup,

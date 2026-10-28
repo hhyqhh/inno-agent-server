@@ -15,25 +15,33 @@ import {
 	type WatchTarget,
 } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
-import { resolveContainedPath } from "../utils/path-safety.js";
+import { canonicalContainmentRoot, resolveContainedPath } from "../utils/path-safety.js";
 
 /**
- * Host environment for the first durable slice: workspace reads only. Shell and
- * every mutation fail closed even if a future registry accidentally adds a
- * tool that was not intended for this runtime.
+ * Host environment for workspace-contained durable file tools. Read, write and
+ * exact-edit operations stay inside the workspace; shell and all other
+ * mutations fail closed even if a future registry accidentally adds a tool
+ * that was not intended for this runtime.
  */
-export class WorkspaceReadOnlyEnv extends NodeExecutionEnv implements ExecutionEnv {
+export class WorkspaceFileEnv extends NodeExecutionEnv implements ExecutionEnv {
+	private readonly canonicalWorkspaceRoot: string;
+
 	constructor(private readonly workspaceRoot: string) {
 		super({ cwd: workspaceRoot });
+		this.canonicalWorkspaceRoot = canonicalContainmentRoot(workspaceRoot);
 	}
 
 	private contained(path: string): string | FileError {
+		// SDK mutation queuing canonicalizes paths before joining them again. On
+		// macOS (/var → /private/var) that canonical absolute path no longer has
+		// the lexical workspace prefix, so check against both views of the root.
 		return resolveContainedPath(this.workspaceRoot, path)
+			?? resolveContainedPath(this.canonicalWorkspaceRoot, path)
 			?? new FileError("permission_denied", "Path escapes the durable session workspace", path);
 	}
 
 	private deny<T>(path: string): Result<T, FileError> {
-		return { ok: false, error: new FileError("permission_denied", "Durable workspace environment is read-only", path) };
+		return { ok: false, error: new FileError("permission_denied", "Operation is disabled in the durable workspace file environment", path) };
 	}
 
 	override async absolutePath(path: string, context: Context): Promise<Result<string, FileError>> {
@@ -104,8 +112,9 @@ export class WorkspaceReadOnlyEnv extends NodeExecutionEnv implements ExecutionE
 		return Promise.resolve(this.deny("watch"));
 	}
 
-	override writeFile(path: string, _content: string | Uint8Array, _context: Context): Promise<Result<void, FileError>> {
-		return Promise.resolve(this.deny(path));
+	override async writeFile(path: string, content: string | Uint8Array, context: Context): Promise<Result<void, FileError>> {
+		const contained = this.contained(path);
+		return contained instanceof FileError ? { ok: false, error: contained } : super.writeFile(contained, content, context);
 	}
 
 	override appendFile(path: string, _content: string | Uint8Array, _context: Context): Promise<Result<void, FileError>> {
@@ -143,7 +152,7 @@ export class WorkspaceReadOnlyEnv extends NodeExecutionEnv implements ExecutionE
 	override exec(_command: string | readonly string[], _options: ShellExecOptions | undefined, _context: Context): Promise<Result<ShellExecResult, ExecutionError>> {
 		return Promise.resolve({
 			ok: false,
-			error: new ExecutionError("shell_unavailable", "Shell execution is disabled in the durable read-only runtime"),
+			error: new ExecutionError("shell_unavailable", "Shell execution is disabled in the durable workspace file runtime"),
 		});
 	}
 }

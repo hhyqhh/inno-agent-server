@@ -647,7 +647,7 @@ export class DurableSessionService {
 								...buildWorkspaceContextSections(workspaceDir),
 							].join("\n\n"),
 							workspaceDir,
-							readOnlyTools: true,
+							workspaceTools: true,
 							memory,
 							ocr,
 							channels,

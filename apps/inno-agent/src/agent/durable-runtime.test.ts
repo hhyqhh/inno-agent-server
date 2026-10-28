@@ -238,7 +238,7 @@ describe("DurableSessionRuntime", () => {
 		const runtime = await open({
 			storagePath: join(root, "session.sqlite"),
 			workspaceDir: root,
-			readOnlyTools: true,
+			workspaceTools: true,
 			...provider,
 		});
 		const submission = await runtime.submit("read my note", "read-request");
@@ -247,6 +247,34 @@ describe("DurableSessionRuntime", () => {
 		const tool = messages.flatMap((message) => message.tools ?? []).find((call) => call.toolCallId === "read-note");
 		expect(tool).toMatchObject({ toolName: "read", isError: false });
 		expect(JSON.stringify(tool?.result)).toContain("workspace note");
+	});
+
+	it("writes and edits workspace files while rejecting path escapes", async () => {
+		const root = tempRoot();
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const provider = fauxRuntime();
+		provider.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("write", { path: "nested/note.txt", content: "workspace note" }, { id: "write-note" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("edit", { path: "nested/note.txt", edits: [{ oldText: "workspace", newText: "durable" }] }, { id: "edit-note" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("write", { path: "../outside.txt", content: "must not escape" }, { id: "escape-note" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("file operations complete"),
+		]);
+		const runtime = await open({
+			storagePath: join(root, "session.sqlite"),
+			workspaceDir: workspace,
+			workspaceTools: true,
+			...provider,
+		});
+		const submission = await runtime.submit("create and edit my note", "write-request");
+		expect(await waitForText(runtime, submission.id)).toBe("file operations complete");
+		const messages = durableEntriesToMessages((await runtime.snapshot()).entries);
+		const tools = messages.flatMap((message) => message.tools ?? []);
+		expect(tools.find((call) => call.toolCallId === "write-note")).toMatchObject({ toolName: "write", isError: false });
+		expect(readFileSync(join(workspace, "nested", "note.txt"), "utf-8")).toBe("durable note");
+		expect(existsSync(join(root, "outside.txt"))).toBe(false);
+		expect(tools.find((call) => call.toolCallId === "edit-note")).toMatchObject({ toolName: "edit", isError: false });
+		expect(tools.find((call) => call.toolCallId === "escape-note")).toMatchObject({ toolName: "write", isError: true });
 	});
 
 	it("runs replay-safe tenant memory tools without duplicate writes after reopen", async () => {
