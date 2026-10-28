@@ -65,6 +65,16 @@ describe("runDurableJobPrompt", () => {
 		expect(stop).toHaveBeenCalledOnce();
 	});
 
+	it("keeps streaming channel runs no_ui even while projecting events", async () => {
+		const { service, binding, permissionBinding } = fixture();
+		const onEvent = vi.fn();
+		await runDurableJobPrompt(req, service, "durable-session", "channel prompt", {
+			requestId: "channel-request", turnId: "channel-turn", onEvent, noUi: true,
+		});
+		expect(binding).toHaveBeenCalledWith({ turnId: "channel-turn", emit: onEvent, noUi: true });
+		expect(permissionBinding).toHaveBeenCalledWith({ turnId: "channel-turn", emit: onEvent, noUi: true });
+	});
+
 	it("rejects a pending question before opening a headless run", async () => {
 		const { service } = fixture({ pending: true });
 		await expect(runDurableJobPrompt(req, service, "durable-session", "prompt", {

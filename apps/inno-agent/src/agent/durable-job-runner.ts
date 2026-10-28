@@ -7,6 +7,8 @@ export interface DurableJobPromptOptions {
 	requestId: string;
 	turnId: string;
 	onEvent?: (event: any) => void;
+	/** Streaming output does not imply an interactive UI (for example, IM cards). */
+	noUi?: boolean;
 }
 
 /** Execute one scheduler prompt without passing through legacy JSONL or the
@@ -19,10 +21,10 @@ export async function runDurableJobPrompt(
 	prompt: string,
 	options: DurableJobPromptOptions,
 ): Promise<string> {
-	if (!options.onEvent && service.pendingQuestion(req, sessionId)) {
+	if ((options.noUi || !options.onEvent) && service.pendingQuestion(req, sessionId)) {
 		throw new Error("This session has a pending question; answer it through the streaming UI");
 	}
-	if (!options.onEvent && service.pendingPermission(req, sessionId)) {
+	if ((options.noUi || !options.onEvent) && service.pendingPermission(req, sessionId)) {
 		throw new Error("This session has a pending permission request; answer it through the streaming UI");
 	}
 	const recallContext = await service.prepareRecallContext(req, sessionId, prompt);
@@ -30,12 +32,17 @@ export async function runDurableJobPrompt(
 	let stream: { stop(): Promise<unknown> } | undefined;
 	try {
 		lease = await service.lease(req, sessionId);
-		lease.runtime.bindQuestionTurn(options.onEvent
-			? { turnId: options.turnId, emit: options.onEvent }
-			: { turnId: options.turnId, noUi: true });
-		lease.runtime.bindPermissionTurn(options.onEvent
-			? { turnId: options.turnId, emit: options.onEvent }
-			: { turnId: options.turnId, noUi: true });
+		const noUi = options.noUi || !options.onEvent;
+		lease.runtime.bindQuestionTurn({
+			turnId: options.turnId,
+			...(options.onEvent ? { emit: options.onEvent } : {}),
+			...(noUi ? { noUi: true } : {}),
+		});
+		lease.runtime.bindPermissionTurn({
+			turnId: options.turnId,
+			...(options.onEvent ? { emit: options.onEvent } : {}),
+			...(noUi ? { noUi: true } : {}),
+		});
 		if (options.onEvent) {
 			const projector = new DurableSseProjector();
 			stream = await lease.runtime.watch(async (events) => {

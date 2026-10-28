@@ -68,6 +68,8 @@ export interface ChatRouteContext {
 	paths: RuntimePaths;
 	tenantStore?: TenantStore | null;
 	durableSessions?: DurableHttpContext["service"];
+	/** Reject legacy prompt execution while retaining status/history reads. */
+	durableRequired?: boolean;
 	sessionFileFromId: (sessionDir: string, id: string) => string | null;
 	releaseQueueFromQuestionBlockedTurn: (sessionId: string) => void;
 	readSessionQuestionMetadata: () => SessionQuestionMetadata;
@@ -356,6 +358,14 @@ export async function handleChatRoutes(
 	const ownsSession = (sessionId: string) => ownsRequestResource(req, tenantStore, "session", sessionId);
 	const denySession = () => { json(res, 404, { error: "Session not found" }); return true; };
 	const durableContext = durableSessions ? { service: durableSessions, workspaceRegistry, tenantStore } : null;
+	const rejectLegacyExecution = () => {
+		if (!ctx.durableRequired) return false;
+		json(res, 409, {
+			error: "Legacy sessions are read-only in multi-user mode; create a durable session instead",
+			code: "durable_required",
+		});
+		return true;
+	};
 	const pathSessionId = matchRoute("GET", method, url, "/api/chat/status/:sessionId")?.sessionId
 		?? matchRoute("GET", method, url, "/api/chat/events/:id")?.id
 		?? matchRoute("POST", method, url, "/api/chat/:sessionId/:turnId/abort")?.sessionId;
@@ -385,6 +395,7 @@ export async function handleChatRoutes(
 		if (requestedSessionId && durableContext?.service.get(req, requestedSessionId)) {
 			return handleDurableChatRoutes(req, res, method, url, durableContext, body);
 		}
+		if (rejectLegacyExecution()) return true;
 		const imageSessionId = requestedSessionId || getCurrentSessionId();
 		const imageWorkspace = await resolveSessionWorkspace(imageSessionId);
 		if (!imageWorkspace) { json(res, 404, { error: "Session workspace not found" }); return true; }
@@ -463,6 +474,7 @@ export async function handleChatRoutes(
 		if (durableContext?.service.get(req, sessionId)) {
 			return handleDurableChatRoutes(req, res, method, url, durableContext, body);
 		}
+		if (rejectLegacyExecution()) return true;
 		const status = questionBridge.respond({ sessionId, turnId, questionId, result });
 		if (status === "not_found") {
 			// The live turn is gone (process restarted, or the turn ended while
@@ -503,6 +515,7 @@ export async function handleChatRoutes(
 		if (durableContext?.service.get(req, sessionId)) {
 			return handleDurableChatRoutes(req, res, method, url, durableContext, body);
 		}
+		if (rejectLegacyExecution()) return true;
 		const status = permissionBridge.respond({ sessionId, turnId, requestId, decision: validDecision, reason });
 		json(res, status === "accepted" ? 200 : status === "scope_mismatch" || status === "already_resolved" ? 409 : 404, { accepted: status === "accepted" });
 		return true;
@@ -638,6 +651,7 @@ export async function handleChatRoutes(
 		if (durableContext?.service.get(req, requestedSessionId)) {
 			return handleDurableChatRoutes(req, res, method, url, durableContext, body);
 		}
+		if (rejectLegacyExecution()) return true;
 		if (streamRegistry.getActiveForSession(requestedSessionId)) {
 			json(res, 409, { error: "Session already has an active chat turn" });
 			return true;

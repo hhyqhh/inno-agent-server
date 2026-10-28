@@ -55,6 +55,8 @@ export class SessionsStoreImpl extends EventEmitter<SessionsStoreEvents> {
 	isLoading = false;
 	/** Set from the server session probe; new UI sessions opt into durable when available. */
 	durableEnabled = false;
+	/** Multi-user servers never create or execute legacy sessions. */
+	durableRequired = false;
 	openingSessionId: string | null = null;
 	/** Incremented after the backend runtime finishes activating a session so
 	 * context-usage can make one definitive refresh after navigation. */
@@ -386,7 +388,7 @@ export class SessionsStoreImpl extends EventEmitter<SessionsStoreEvents> {
 	 * Create a session bound to a specific workspace (or new workspace), then open it.
 	 */
 	async createSessionWith(input: CreateSessionInput = {}): Promise<void> {
-		const createInput = input.runtime === undefined && this.durableEnabled
+		const createInput = input.runtime === undefined && (this.durableEnabled || this.durableRequired)
 			? { ...input, runtime: "durable" as const }
 			: input;
 		this.isLoading = true;

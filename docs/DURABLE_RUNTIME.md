@@ -7,9 +7,17 @@ packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
 `apps/inno-agent/src/agent/durable-runtime.ts`; the application catalog and
 runtime leases live in `durable-session-service.ts`.
 
-Durable execution is disabled by default. Set `INNO_DURABLE_ENABLED=true` to
-make the Web UI default new sessions to durable. The explicit HTTP
-creation contract is:
+Durable execution is opt-in in local and authenticated compatibility mode. Set
+`INNO_DURABLE_ENABLED=true` to make the Web UI default new sessions to durable.
+With Better Auth plus `INNO_MULTI_USER_ENABLED=true`, Durable is required:
+startup fails unless `INNO_DURABLE_ENABLED=true`, omitted session/job runtimes
+default to Durable, and legacy execution endpoints return 409 with
+`durable_required`. Owned legacy history remains readable and manageable, but
+new chat, question/permission responses, manual job runs, channel inbound work,
+and automatic/deferred scheduler runs never fall back to the shared legacy
+queue. Better Auth without the multi-user flag retains the compatibility path.
+
+The explicit HTTP creation contract is:
 
 ```http
 POST /api/sessions
@@ -21,9 +29,10 @@ Content-Type: application/json
 An owned existing `workspaceId` may be supplied. The authenticated temporary
 workspace fallback and `newWorkspace` (temporary or named) are also supported.
 `presetId` instantiates or reuses the preset's stable tenant-owned workspace.
-Omitting `runtime`, or passing `"legacy"`, keeps the
+Outside multi-user mode, omitting `runtime`, or passing `"legacy"`, keeps the
 existing PI `SessionManager` JSONL behavior. Historical JSONL is never migrated
-or opened as durable storage.
+or opened as durable storage; in multi-user mode it is historical read-only
+compatibility rather than an execution backend.
 
 Durable IDs have the form `durable-<uuid>` and never pass through legacy
 `.jsonl` filename helpers. Each tenant has its own application catalog and
@@ -128,12 +137,17 @@ The current durable slice supports:
   outbox removal on session delete;
 - explicit durable agent-job execution through the existing manual, cron, and
   deferred scheduler paths, with owned scheduler sessions/workspaces and the
-  existing occurrence, check-in, run-ledger, and channel behavior.
+  existing occurrence, check-in, run-ledger, and channel behavior;
+- tenant-owned channel sessions identified by durable catalog IDs, with stale
+  legacy bindings replaced rather than executed; streaming IM cards still bind
+  questions and workspace permissions as `no_ui`;
+- BTW side questions over committed durable history.
 
 Shell, append/truncate, delete, rename, and other workspace mutations, MCP,
 subagents, codemode, and computer-use remain disabled. Branching/editing and
-showcase export are not implemented on this path yet; unsupported operations
-fail explicitly rather than falling back to legacy execution.
+showcase export are not implemented on this path yet. BTW bring-back and channel
+image attachments also fail explicitly; unsupported operations never fall back
+to legacy execution.
 Workspace-private skills are injected as prompt resources; they do not alter the
 process-global PI resource loader or enable otherwise unsupported durable tools.
 
@@ -308,16 +322,19 @@ must retry/recheck rather than assuming both writes completed.
 
 ## Scheduler execution
 
-`POST/PATCH /api/jobs` accepts `runtime: "legacy" | "durable"`; omitted runtime
-keeps legacy behavior. The selector applies to agent tasks. Reminder tasks are
-rejected for durable execution rather than writing an assistant notification
-into legacy JSONL. Manual runs follow the target session's actual runtime, so a
-legacy job can explicitly run in a durable session and vice versa. A local
-non-streaming durable manual run without a session creates its own durable
-scheduler session.
+`POST/PATCH /api/jobs` accepts `runtime: "legacy" | "durable"` in local and
+compatibility mode; omitted runtime keeps legacy behavior there. In multi-user
+mode agent jobs default to Durable, explicit legacy creation/update is rejected,
+and manual runs targeting a legacy session are rejected. The selector applies
+to agent tasks. Reminder tasks are rejected for durable execution rather than
+writing an assistant notification into legacy JSONL. In compatibility mode,
+manual runs follow the target session's actual runtime, so a legacy job can
+explicitly run in a durable session and vice versa. A non-streaming durable
+manual run without a session creates its own durable scheduler session.
 
-Automatic and deferred runs use the job's runtime when creating their owned
-scheduler session/workspace. Durable sessions record `origin: "scheduler"`;
+Automatic and deferred runs use the job's runtime in compatibility mode and
+always create Durable sessions in multi-user mode, including for pre-existing
+legacy job metadata. Durable sessions record `origin: "scheduler"`;
 manual runs apply the same badge to an existing durable target. Background
 service scopes derive tenant identity only from the scheduler's verified ALS,
 never from job payloads or tenant headers. Headless runs bind durable questions
@@ -455,10 +472,13 @@ attachments with raw-text history and out-of-workspace path rejection, native
 vision and text-only inline-image requests with workspace previews and retry
 dedup, provider-rejection native-image fallback without duplicate user history,
 and scoped cancellation with cross-tenant abort denial and pending-card
-cleanup. Scheduler coverage includes manual durable streaming/non-streaming runs,
-runtime validation, scheduler-origin history, tenant channel delivery, and mixed
-durable/legacy deferred execution with per-tenant credentials, owned workspaces,
-run ledgers, and claim cleanup.
+cleanup. Multi-user boundary coverage verifies omitted-runtime Durable creation,
+legacy history reads alongside 409 `durable_required` execution responses,
+Durable channel session IDs, and forced Durable scheduler sessions. Scheduler
+coverage also includes manual durable streaming/non-streaming runs, runtime
+validation, scheduler-origin history, tenant channel delivery, local
+legacy/durable deferred compatibility with per-tenant credentials, owned
+workspaces, run ledgers, and claim cleanup.
 
 Still pending: per-shard RWO deployment manifests and ordered/fenced failure
 takeover. Static tenant-owner routing, including public bridge ingress, is

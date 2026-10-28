@@ -65,6 +65,18 @@ async function api(cookie: string, path: string, init: RequestInit = {}): Promis
 	});
 }
 
+async function configureTestProvider(cookie: string, apiKey = "integration-test-secret"): Promise<void> {
+	const response = await api(cookie, "/api/settings/providers", {
+		method: "PUT",
+		body: JSON.stringify({
+			providerId: "shared", baseUrl: providerOrigin, apiKey,
+			api: "openai-completions", makeDefault: true,
+			models: [{ id: "tenant-model", name: "Tenant model", contextWindow: 32_000, maxTokens: 2_000 }],
+		}),
+	});
+	expect(response.status).toBe(200);
+}
+
 async function readDurableStream(
 	response: Response,
 	onPermission?: (input: { sessionId: string; turnId: string; requestId: string }) => Promise<void>,
@@ -464,8 +476,9 @@ afterAll(async () => {
 describe("server authentication boundary", () => {
 	it("protects HTTP and terminal WebSocket without blocking health or bridge auth", async () => {
 		expect((await fetch(`${origin}/health`)).status).toBe(200);
-		const sessionProbe = await (await fetch(`${origin}/api/session`)).json() as { durableEnabled?: boolean };
+		const sessionProbe = await (await fetch(`${origin}/api/session`)).json() as { durableEnabled?: boolean; durableRequired?: boolean };
 		expect(sessionProbe.durableEnabled).toBe(true);
+		expect(sessionProbe.durableRequired).toBe(true);
 		expect((await fetch(`${origin}/api/sessions`)).status).toBe(401);
 
 		const registered = await fetch(`${origin}/api/auth/sign-up/email`, {
@@ -477,6 +490,7 @@ describe("server authentication boundary", () => {
 		const cookie = registered.headers.get("set-cookie")?.split(";", 1)[0]!;
 		expect(cookie).toContain("session_token");
 		expect((await fetch(`${origin}/api/sessions`, { headers: { Cookie: cookie } })).status).toBe(200);
+		await configureTestProvider(cookie, "server-boundary-secret");
 		// Bridge has its own bearer-token/tenant-ownership check; it must not
 		// become a cookie-auth route or fall back to the legacy global channel.
 		expect((await fetch(`${origin}/api/bridge/messages`, { method: "POST" })).status).toBe(401);
@@ -523,20 +537,74 @@ describe("server authentication boundary", () => {
 	});
 });
 
+describe("multi-user durable execution boundary", () => {
+	it("defaults new work to durable and keeps owned legacy history read-only", async () => {
+		const cookie = await registerUser("durable-required@example.com");
+		expect((await api(cookie, "/api/sessions")).status).toBe(200);
+		await configureTestProvider(cookie, "durable-required-secret");
+		const created = await api(cookie, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ newWorkspace: { isTemp: true } }),
+		});
+		expect(created.status, await created.clone().text()).toBe(201);
+		expect(await created.json()).toMatchObject({ runtime: "durable" });
+		expect((await api(cookie, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ runtime: "legacy" }),
+		})).status).toBe(409);
+
+		const jobResponse = await api(cookie, "/api/jobs", {
+			method: "POST",
+			body: JSON.stringify({ name: "default durable", cron: "0 9 * * *", taskType: "custom_prompt", prompt: "test" }),
+		});
+		expect(jobResponse.status).toBe(201);
+		const job = await jobResponse.json() as { id: string; runtime: string };
+		expect(job.runtime).toBe("durable");
+		expect((await api(cookie, "/api/jobs", {
+			method: "POST",
+			body: JSON.stringify({ name: "legacy job", cron: "0 9 * * *", taskType: "custom_prompt", prompt: "test", runtime: "legacy" }),
+		})).status).toBe(409);
+
+		const pool = new Pool({ connectionString: postgres.databaseUrl });
+		try {
+			const tenant = await pool.query<{ id: string }>(
+				'SELECT tenant.id FROM tenants tenant JOIN "user" account ON account.id = tenant.owner_user_id WHERE account.email = $1',
+				["durable-required@example.com"],
+			);
+			await pool.query(
+				"INSERT INTO resource_ownership (tenant_id, resource_type, resource_id) VALUES ($1, 'session', 'legacy-read-only.jsonl')",
+				[tenant.rows[0].id],
+			);
+		} finally {
+			await pool.end();
+		}
+		await writeFile(join(home, "data", "sessions", "legacy-read-only.jsonl"), `${JSON.stringify({
+			type: "session", version: 3, id: "legacy-read-only", timestamp: "2026-10-27T00:00:00.000Z", cwd: home,
+		})}\n`);
+		expect((await api(cookie, "/api/sessions/legacy-read-only.jsonl")).status).toBe(200);
+		for (const [path, body] of [
+			["/api/chat", { sessionId: "legacy-read-only.jsonl", prompt: "must not run" }],
+			["/api/chat/stream", { sessionId: "legacy-read-only.jsonl", prompt: "must not run", clientRequestId: "legacy-read-only" }],
+			["/api/btw/bring-back", { sessionId: "legacy-read-only.jsonl", question: "q", answer: "a" }],
+			[`/api/jobs/${job.id}/run`, { sessionId: "legacy-read-only.jsonl" }],
+			[`/api/jobs/${job.id}/run/stream`, { sessionId: "legacy-read-only.jsonl" }],
+		] as const) {
+			const response = await api(cookie, path, { method: "POST", body: JSON.stringify(body) });
+			expect(response.status, path).toBe(409);
+			expect(await response.json()).toMatchObject({ code: "durable_required" });
+		}
+		expect((await api(cookie, "/api/sessions/legacy-read-only.jsonl/activate", { method: "POST" })).status).toBe(409);
+	}, 30_000);
+});
+
 describe("session sidecar and showcase tenant isolation", () => {
 	it("scopes expired questions, BTW geometry and showcase exports without legacy profile leakage", async () => {
 		const [cookieA, cookieB] = await Promise.all([
 			registerUser("sidecars-a@example.com"),
 			registerUser("sidecars-b@example.com"),
 		]);
-		const createSession = async (cookie: string) => {
-			const response = await api(cookie, "/api/sessions", {
-				method: "POST", body: JSON.stringify({ newWorkspace: { isTemp: true } }),
-			});
-			expect(response.status).toBe(201);
-			return (await response.json() as { id: string }).id;
-		};
-		const [sessionA, sessionB] = await Promise.all([createSession(cookieA), createSession(cookieB)]);
+		const sessionA = "legacy-sidecar-a.jsonl";
+		const sessionB = "legacy-sidecar-b.jsonl";
+		expect((await api(cookieA, "/api/sessions")).status).toBe(200);
+		expect((await api(cookieB, "/api/sessions")).status).toBe(200);
 		const pool = new Pool({ connectionString: postgres.databaseUrl });
 		let tenantA: string;
 		let tenantB: string;
@@ -547,6 +615,16 @@ describe("session sidecar and showcase tenant isolation", () => {
 			);
 			tenantA = tenantRows.rows.find((row) => row.email === "sidecars-a@example.com")!.id;
 			tenantB = tenantRows.rows.find((row) => row.email === "sidecars-b@example.com")!.id;
+			const timestamp = "2026-10-27T00:00:00.000Z";
+			for (const [sessionId, tenantId] of [[sessionA, tenantA], [sessionB, tenantB]] as const) {
+				await writeFile(join(home, "data", "sessions", sessionId), `${JSON.stringify({
+					type: "session", version: 3, id: sessionId, timestamp, cwd: home,
+				})}\n`);
+				await pool.query(
+					"INSERT INTO resource_ownership (tenant_id, resource_type, resource_id) VALUES ($1, 'session', $2)",
+					[tenantId, sessionId],
+				);
+			}
 		} finally {
 			await pool.end();
 		}
@@ -581,13 +659,13 @@ describe("session sidecar and showcase tenant isolation", () => {
 			method: "POST",
 			body: JSON.stringify({ sessionId, turnId, questionId, result: { answers: [], cancelled: true } }),
 		});
-		expect((await expiredResponse(sessionB, "victim-turn", "victim-question")).status).toBe(404);
+		expect((await expiredResponse(sessionB, "victim-turn", "victim-question")).status).toBe(409);
 		expect(JSON.parse(await readFile(questionsPath, "utf-8"))).toEqual(questionFixture);
 		expect((await api(cookieA, "/api/chat/question-response", {
 			method: "POST",
 			body: JSON.stringify({ sessionId: sessionA, turnId: "victim-turn", questionId: "victim-question", result: { answers: [], cancelled: true } }),
-		})).status).toBe(200);
-		expect(JSON.parse(await readFile(questionsPath, "utf-8"))).toEqual({ [sessionB]: questionFixture[sessionB] });
+		})).status).toBe(409);
+		expect(JSON.parse(await readFile(questionsPath, "utf-8"))).toEqual(questionFixture);
 
 		const probePath = join(home, "data", "sessions", "gate-probe.json");
 		await writeFile(probePath, "do-not-overwrite");
@@ -638,6 +716,10 @@ describe("session and workspace tenant isolation", () => {
 		const [cookieA, cookieB] = await Promise.all([
 			registerUser("tenant-a@example.com"),
 			registerUser("tenant-b@example.com"),
+		]);
+		await Promise.all([
+			configureTestProvider(cookieA, "tenant-a-secret"),
+			configureTestProvider(cookieB, "tenant-b-secret"),
 		]);
 		const workspaceResponse = await api(cookieA, "/api/workspaces", {
 			method: "POST", body: JSON.stringify({ name: "Tenant A private" }),
@@ -749,6 +831,7 @@ describe("job and check-in tenant isolation", () => {
 			registerUser("jobs-a@example.com"),
 			registerUser("jobs-b@example.com"),
 		]);
+		await configureTestProvider(cookieB, "jobs-b-secret");
 		await mkdir(join(home, "data", "jobs"), { recursive: true });
 		await writeFile(join(home, "data", "jobs", "jobs.json"), JSON.stringify([{
 			id: "job_legacy", name: "legacy global", cron: "0 9 * * *", timezone: "UTC", enabled: true,
@@ -916,10 +999,9 @@ describe("settings and model credential isolation", () => {
 		};
 		const [sessionA, sessionB] = await Promise.all([createSession(cookieA), createSession(cookieB)]);
 		const unconfiguredCookie = await registerUser("settings-unconfigured@example.com");
-		const unconfiguredSession = await createSession(unconfiguredCookie);
 		const requestsBeforeUnconfigured = providerRequests.length;
-		expect((await api(unconfiguredCookie, "/api/chat", {
-			method: "POST", body: JSON.stringify({ sessionId: unconfiguredSession, prompt: "must not inherit the global key" }),
+		expect((await api(unconfiguredCookie, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ newWorkspace: { isTemp: true } }),
 		})).status).toBe(500);
 		expect(providerRequests).toHaveLength(requestsBeforeUnconfigured);
 
@@ -1092,6 +1174,12 @@ describe("channel runtime isolation", () => {
 		expect(chatMapA).not.toContain("chat-b");
 		expect(chatMapB).toContain("qq:chat-b");
 		expect(chatMapB).not.toContain("chat-a");
+		const channelSessionA = JSON.parse(chatMapA)["qq:chat-a"] as string;
+		const channelSessionB = JSON.parse(chatMapB)["qq:chat-b"] as string;
+		expect(channelSessionA).toMatch(/^durable-/);
+		expect(channelSessionB).toMatch(/^durable-/);
+		expect(await (await api(cookieA, `/api/sessions/${channelSessionA}`)).json()).toMatchObject({ runtime: "durable" });
+		expect(await (await api(cookieB, `/api/sessions/${channelSessionB}`)).json()).toMatchObject({ runtime: "durable" });
 		expect(existsSync(join(home, "data", "channels", "chat-sessions.json"))).toBe(false);
 		const workspacesA = await (await api(cookieA, "/api/workspaces")).json() as Array<{ id: string }>;
 		const workspacesB = await (await api(cookieB, "/api/workspaces")).json() as Array<{ id: string }>;
@@ -1176,7 +1264,7 @@ describe("tenant background execution", () => {
 		};
 		const [jobA, jobB] = await Promise.all([
 			createJob(cookieA, "background A", "background-a-prompt", "durable"),
-			createJob(cookieB, "background B", "background-b-prompt", "legacy"),
+			createJob(cookieB, "background B", "background-b-prompt"),
 		]);
 		await waitFor(() => ["background-a-prompt", "background-b-prompt"].every((prompt) =>
 			providerRequests.some((request) => request.body.includes(prompt)),
@@ -1210,8 +1298,8 @@ describe("tenant background execution", () => {
 		expect(sessionsB).toHaveLength(1);
 		expect(sessionsA[0]).toMatchObject({ runtime: "durable", origin: "scheduler" });
 		expect(sessionsA[0].id).toMatch(/^durable-/);
-		expect(sessionsB[0].origin).toBe("scheduler");
-		expect(sessionsB[0].id).not.toMatch(/^durable-/);
+		expect(sessionsB[0]).toMatchObject({ runtime: "durable", origin: "scheduler" });
+		expect(sessionsB[0].id).toMatch(/^durable-/);
 		expect(sessionsA[0].id).not.toBe(sessionsB[0].id);
 		expect((await api(cookieB, `/api/sessions/${sessionsA[0].id}`)).status).toBe(404);
 

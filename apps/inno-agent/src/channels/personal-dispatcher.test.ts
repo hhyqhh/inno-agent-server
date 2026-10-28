@@ -182,6 +182,28 @@ describe("PersonalChannelDispatcher routing", () => {
 		expect(probe.inSession[1].sessionPath).toBe(join(sessionDir, "sess_1.jsonl"));
 	});
 
+	it("uses durable catalog IDs without requiring legacy JSONL files", async () => {
+		const probe = makeOpts();
+		const durableIds = new Set<string>();
+		probe.opts.createNewSession = async () => {
+			const id = `durable-${++probe.nextSessionId.current}`;
+			durableIds.add(id);
+			probe.createdSessions.push(id);
+			return id;
+		};
+		probe.opts.resolveSessionTarget = async (sessionId) => durableIds.has(sessionId) ? sessionId : null;
+		writeFileSync(join(channelsDataDir, "chat-sessions.json"), JSON.stringify({ "feishu:chat_1": "old-legacy.jsonl" }));
+		const dispatcher = new PersonalChannelDispatcher(probe.opts);
+		const { channel } = fakeChannel();
+
+		await dispatcher.handle(channel, msg({ text: "first" }));
+		await dispatcher.handle(channel, msg({ text: "second" }));
+
+		expect(probe.createdSessions).toEqual(["durable-1"]);
+		expect(probe.inSession.map((run) => run.sessionPath)).toEqual(["durable-1", "durable-1"]);
+		expect(probe.inSession[0].sessionPath.endsWith(".jsonl")).toBe(false);
+	});
+
 	it("attributes the run to the executed session instead of the mutable global session", async () => {
 		const probe = makeOpts();
 		const dispatcher = new PersonalChannelDispatcher(probe.opts);

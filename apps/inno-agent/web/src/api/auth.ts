@@ -8,6 +8,7 @@ export interface AuthSessionResponse {
 	mode: "local" | "better-auth";
 	allowSignUp: boolean;
 	durableEnabled: boolean;
+	durableRequired: boolean;
 	user: AuthUser | null;
 }
 

@@ -15,6 +15,7 @@ function sessionResponse(body: unknown): Response {
 afterEach(() => {
 	cleanup();
 	sessionsStore.durableEnabled = false;
+	sessionsStore.durableRequired = false;
 	vi.unstubAllGlobals();
 });
 

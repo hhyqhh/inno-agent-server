@@ -34,7 +34,8 @@ import type { ScheduledJob } from "./scheduler/types.js";
 import { ChannelRegistry } from "./channels/channel.js";
 import type { ChannelStreamEvent } from "./channels/channel.js";
 import { FeishuChannel } from "./channels/feishu/feishu-channel.js";
-import { PersonalChannelDispatcher, type PersonalChannelDispatcherOptions } from "./channels/personal-dispatcher.js";
+import { PersonalChannelDispatcher, type PersonalChannelDispatcherOptions, type StreamEventCallback } from "./channels/personal-dispatcher.js";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import { bridgeChannelResourceId, TenantChannelManager } from "./channels/tenant-channel-manager.js";
 import { bridgeBearerToken, handleBridgeMessage } from "./channels/bridge/bridge-server.js";
 import { BridgeChannel } from "./channels/bridge/bridge-channel.js";
@@ -297,7 +298,7 @@ async function ensureBootstrapped(): Promise<void> {
 					if (channelEvent) onEvent(channelEvent);
 				}, images);
 			},
-			createNewSession,
+			createNewSession: () => createNewSession(),
 			getCurrentSessionId,
 			recordSessionChannel: (ch, sid?) => recordCurrentSessionChannel(ch as SessionChannel, sid, { setOriginIfEmpty: true }),
 			maybeAutoGenerateTopic,
@@ -320,6 +321,41 @@ async function ensureBootstrapped(): Promise<void> {
 			},
 			sessionDir: join(dataDir, "sessions"),
 		};
+
+		const runDurableChannelPrompt = (
+			sessionId: string,
+			prompt: string,
+			onEvent?: StreamEventCallback,
+			images?: ImageContent[],
+		) => {
+			if (images?.length) throw new Error("Durable channel image attachments are not supported yet");
+			const turnId = `channel-${randomUUID()}`;
+			return runDurableJobPrompt(backgroundTenantRequest(), durableSessions, sessionId, prompt, {
+				requestId: `channel-request-${randomUUID()}`,
+				turnId,
+				onEvent,
+				noUi: true,
+			});
+		};
+		const tenantDispatcherOptions: typeof sharedDispatcherOptions = authConfig.multiUserEnabled ? {
+			...sharedDispatcherOptions,
+			runPrompt: async () => { throw new Error("Multi-user channel prompts require an owned durable session"); },
+			runPromptInSession: (sessionId, prompt, images) => runDurableChannelPrompt(sessionId, prompt, undefined, images),
+			runPromptStreamingInSession: (sessionId, prompt, onEvent, images) => runDurableChannelPrompt(sessionId, prompt, onEvent, images),
+			createNewSession: async (channel = "web") => {
+				const tenant = getCurrentTenant();
+				const store = getCurrentTenantStore();
+				if (!tenant || !store) throw new Error("Durable channel session creation requires a verified tenant");
+				const req = backgroundTenantRequest();
+				const workspace = workspaceRegistry.ensureChannelWorkspace(channel, tenant.tenantId);
+				await store.claimResource(tenant, "workspace", workspace.id);
+				const summary = durableSessions.create(req, { workspaceId: workspace.id });
+				if (!workspaceRegistry.bindSession(summary.id, workspace.id)) throw new Error("Channel workspace not found");
+				return summary.id;
+			},
+			resolveSessionTarget: async (sessionId) => durableSessions.get(backgroundTenantRequest(), sessionId) ? sessionId : null,
+			maybeAutoGenerateTopic: undefined,
+		} : sharedDispatcherOptions;
 
 		if (auth.mode === "local") {
 			if (config.feishu?.appId && config.channels?.feishu?.enabled) {
@@ -350,7 +386,7 @@ async function ensureBootstrapped(): Promise<void> {
 			tenantChannelManager = new TenantChannelManager({
 				dataDir,
 				tenantStore: auth.tenantStore!,
-				dispatcher: sharedDispatcherOptions,
+				dispatcher: tenantDispatcherOptions,
 				createChannels: ({ config: tenantConfig, channelsDataDir: tenantChannelsDir, registry, dispatch }) => {
 					const tenantDataDir = dirname(tenantChannelsDir);
 					let tenantFeishu: FeishuChannel | null = null;
@@ -440,7 +476,7 @@ async function ensureBootstrapped(): Promise<void> {
 
 		async function createScheduledSession(job: ScheduledJob, request?: HttpReq): Promise<CreatedJobSession | null> {
 			try {
-				if (job.runtime === "durable") {
+				if (authConfig.multiUserEnabled || job.runtime === "durable") {
 					const req = request ?? backgroundTenantRequest();
 					const tenant = getCurrentTenant();
 					const store = getCurrentTenantStore();
@@ -1517,6 +1553,7 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 		},
 		createSession: async (request, job) => scheduledSessionFactory?.(job, request) ?? null,
 		durableExecutor: executeDurableJob,
+		durableRequired: authConfig.multiUserEnabled,
 		disconnectJobRun: (sessionId, turnId) => {
 			if (activeDurableJobTurns.get(sessionId) === turnId) {
 				durableSessions.cancelPermissionTurn(req, sessionId, turnId);
@@ -1594,6 +1631,7 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 	// --- Sessions API (extracted to server/routes/sessions.ts) ---
 	sessions: (req, res, method, url) => handleSessionsRoutes(req, res, method, url, {
 		workspaceRegistry, dataDir, paths, getContentSource, tenantStore: auth.tenantStore, durableSessions,
+		durableRequired: authConfig.multiUserEnabled,
 		getCachedPresetAvailability: (presetId) => contentHubCatalog.getCachedPresetAvailability(presetId),
 		parseSessionFile, sessionRevision,
 		readSessionChannelMetadata, sessionChannelMetadataPath,
@@ -1645,11 +1683,14 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 	// --- Btw side-question API (extracted to server/routes/btw.ts) ---
 	btw: (req, res, method, url) => handleBtwRoutes(req, res, method, url, {
 		dataDir, sessionFileFromId, parseSessionFile, tenantStore: auth.tenantStore,
+		durableSessions,
+		durableRequired: authConfig.multiUserEnabled,
 	}),
 
 	// --- Chat API (extracted to server/routes/chat.ts) ---
 	chat: (req, res, method, url) => handleChatRoutes(req, res, method, url, {
 		workspaceRegistry, dataDir, paths, tenantStore: auth.tenantStore, durableSessions,
+		durableRequired: authConfig.multiUserEnabled,
 		sessionFileFromId, releaseQueueFromQuestionBlockedTurn,
 		readSessionQuestionMetadata, writeSessionQuestionMetadata,
 		recordCurrentSessionChannel, maybeAutoGenerateTopic,
@@ -1707,6 +1748,7 @@ const server = createServer(async (req, response) => {
 				mode: auth.mode,
 				allowSignUp: auth.allowSignUp,
 				durableEnabled: durableSessions.enabled,
+				durableRequired: authConfig.multiUserEnabled,
 				user: session?.principal ?? null,
 			});
 			return;

@@ -50,6 +50,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
 	if (session.mode === "local" || session.user) {
 		terminalStore.setHostTerminalDisabled(session.mode === "better-auth");
 		sessionsStore.durableEnabled = session.durableEnabled === true;
+		sessionsStore.durableRequired = session.durableRequired === true;
 		return children;
 	}
 

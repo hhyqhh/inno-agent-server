@@ -28,7 +28,10 @@ export interface PersonalChannelDispatcherOptions {
 		onEvent: StreamEventCallback,
 		images?: ImageContent[],
 	) => Promise<string>;
-	createNewSession: () => Promise<string>;
+	createNewSession: (channel?: string) => Promise<string>;
+	/** Resolve an owned session to the executor's target. Legacy uses a JSONL
+	 * path; durable uses its catalog ID without requiring a session file. */
+	resolveSessionTarget?: (sessionId: string) => Promise<string | null>;
 	getCurrentSessionId: () => string;
 	recordSessionChannel: (channel: string, explicitSessionId?: string) => void;
 	/** Fire-and-forget: auto-generate a topic for a session if it lacks one. */
@@ -84,7 +87,7 @@ export class PersonalChannelDispatcher {
 
 		if (NEW_SESSION_COMMANDS.has(rawText)) {
 			try {
-				const newSessionId = await this.opts.createNewSession();
+				const newSessionId = await this.opts.createNewSession(msg.channel);
 				await this.opts.onSessionCreated?.(newSessionId, msg.channel);
 				this.opts.recordSessionChannel(msg.channel, newSessionId);
 				// Bind this chatId to the new session
@@ -135,14 +138,17 @@ export class PersonalChannelDispatcher {
 		// so channel messages never piggy-back on the current web/global session.
 		if (!targetSessionPath && chatKey) {
 			try {
-				const newSessionId = await this.opts.createNewSession();
+				const newSessionId = await this.opts.createNewSession(msg.channel);
 				await this.opts.onSessionCreated?.(newSessionId, msg.channel);
 				this.chatSessionMap[chatKey] = newSessionId;
 				this.saveChatSessionMap();
 				this.opts.recordSessionChannel(msg.channel, newSessionId);
-				// Build path directly — don't use resolveSessionPath which checks
-				// existsSync (PI SDK creates session files lazily).
-				targetSessionPath = resolve(join(this.opts.sessionDir, newSessionId));
+				// Durable targets are catalog IDs; legacy targets are lazily-created
+				// JSONL paths. Never infer durability from a filename extension.
+				targetSessionPath = this.opts.resolveSessionTarget
+					? await this.opts.resolveSessionTarget(newSessionId)
+					: resolve(join(this.opts.sessionDir, newSessionId));
+				if (!targetSessionPath) throw new Error("Created channel session is not executable");
 				logger.info({ chatKey, newSessionId }, "dispatcher auto-created session");
 			} catch (err) {
 				logger.error({ err }, "dispatcher failed to auto-create session");
@@ -244,6 +250,13 @@ export class PersonalChannelDispatcher {
 		if (basename(targetSessionId) !== targetSessionId
 			|| (this.opts.authorizeSession && !(await this.opts.authorizeSession(targetSessionId)))) {
 			logger.warn({ chatKey, targetSessionId }, "dispatcher discarded an unauthorized session binding");
+			delete this.chatSessionMap[chatKey];
+			this.saveChatSessionMap();
+			return null;
+		}
+		if (this.opts.resolveSessionTarget) {
+			const target = await this.opts.resolveSessionTarget(targetSessionId);
+			if (target) return target;
 			delete this.chatSessionMap[chatKey];
 			this.saveChatSessionMap();
 			return null;

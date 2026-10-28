@@ -7,6 +7,7 @@ import { logger } from "../../logger.js";
 import type { SessionMessageSummary } from "../session-model.js";
 import type { TenantStore } from "../../tenants/store.js";
 import { ownsRequestResource } from "../../tenants/http.js";
+import type { DurableHttpContext } from "../durable-routes.js";
 import { resolveRequestTenantDataRoot } from "../../tenants/paths.js";
 import {
 	readBtwState,
@@ -30,6 +31,9 @@ import {
 export interface BtwRouteContext {
 	dataDir: string;
 	tenantStore?: TenantStore | null;
+	durableSessions?: DurableHttpContext["service"];
+	/** Legacy bring-back appends are disabled in multi-user mode. */
+	durableRequired?: boolean;
 	sessionFileFromId: (sessionDir: string, id: string) => string | null;
 	parseSessionFile: (filePath: string) => { messages: SessionMessageSummary[] } | null;
 }
@@ -199,7 +203,7 @@ export async function handleBtwRoutes(
 	if (stateMatch) {
 		const sessionId = stateMatch.sessionId;
 		if (!await ownsSession(sessionId)) { json(res, 404, { error: "Session not found" }); return true; }
-		if (!sessionPathFor(ctx, sessionId)) {
+		if (!ctx.durableSessions?.get(req, sessionId) && !sessionPathFor(ctx, sessionId)) {
 			json(res, 404, { error: "Session not found" });
 			return true;
 		}
@@ -232,13 +236,19 @@ export async function handleBtwRoutes(
 			json(res, 400, { error: `question too long (max ${MAX_QUESTION_LEN} chars)` });
 			return true;
 		}
-		const sessionPath = sessionPathFor(ctx, sessionId);
-		if (!sessionPath) {
-			json(res, 404, { error: "Session not found" });
-			return true;
+		let digest = "";
+		if (ctx.durableSessions?.get(req, sessionId)) {
+			const snapshot = await ctx.durableSessions.snapshot(req, sessionId);
+			digest = buildBtwContextDigest(snapshot.messages);
+		} else {
+			const sessionPath = sessionPathFor(ctx, sessionId);
+			if (!sessionPath) {
+				json(res, 404, { error: "Session not found" });
+				return true;
+			}
+			const parsed = ctx.parseSessionFile(sessionPath);
+			digest = parsed ? buildBtwContextDigest(parsed.messages) : "";
 		}
-		const parsed = ctx.parseSessionFile(sessionPath);
-		const digest = parsed ? buildBtwContextDigest(parsed.messages) : "";
 		const requestAbort = attachAbortSignal(req, res);
 		try {
 			const answer = await completeSideQuestion({ contextDigest: digest, thread, question, signal: requestAbort.signal });
@@ -264,9 +274,20 @@ export async function handleBtwRoutes(
 			json(res, 400, { error: "Missing sessionId, question or answer" });
 			return true;
 		}
+		if (ctx.durableSessions?.get(req, sessionId)) {
+			json(res, 409, { error: "Bring-back is not yet supported for durable sessions", code: "durable_bring_back_unavailable" });
+			return true;
+		}
 		const sessionPath = sessionPathFor(ctx, sessionId);
 		if (!sessionPath) {
 			json(res, 404, { error: "Session not found" });
+			return true;
+		}
+		if (ctx.durableRequired) {
+			json(res, 409, {
+				error: "Legacy sessions are read-only in multi-user mode; create a durable session instead",
+				code: "durable_required",
+			});
 			return true;
 		}
 		try {

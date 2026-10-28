@@ -70,6 +70,8 @@ export interface SessionsRouteContext {
 	paths: RuntimePaths;
 	tenantStore?: TenantStore | null;
 	durableSessions?: DurableHttpContext["service"];
+	/** Multi-user mode creates durable sessions and keeps legacy JSONL read-only. */
+	durableRequired?: boolean;
 	getContentSource: () => RemoteContentSource;
 	getCachedPresetAvailability?: (presetId: string) => boolean | null;
 	parseSessionFile: (filePath: string) => { summary: SessionSummary; messages: SessionMessageSummary[] } | null;
@@ -291,7 +293,17 @@ export async function handleSessionsRoutes(
 		runQueueOpWithTimeout,
 		tenantStore,
 		durableSessions,
+		durableRequired = false,
 	} = ctx;
+
+	const rejectLegacyExecution = () => {
+		if (!durableRequired) return false;
+		json(res, 409, {
+			error: "Legacy sessions are read-only in multi-user mode; create a durable session instead",
+			code: "durable_required",
+		});
+		return true;
+	};
 
 	// Every session subresource is protected before any file or metadata access.
 	const sessionResourceMatch = /^\/api\/sessions\/([^/]+)(?:\/|$)/.exec(url.split("?", 1)[0]);
@@ -515,6 +527,7 @@ export async function handleSessionsRoutes(
 
 	const branchBeforeMessageMatch = matchRoute("POST", method, url, "/api/sessions/:id/branch-before-message");
 	if (branchBeforeMessageMatch) {
+		if (rejectLegacyExecution()) return true;
 		const sessionPath = sessionFileFromId(join(dataDir, "sessions"), decodeURIComponent(branchBeforeMessageMatch.id));
 		if (!sessionPath || !existsSync(sessionPath)) {
 			json(res, 404, { error: "Session not found" });
@@ -592,6 +605,7 @@ export async function handleSessionsRoutes(
 
 	const activateSessionMatch = matchRoute("POST", method, url, "/api/sessions/:id/activate");
 	if (activateSessionMatch) {
+		if (rejectLegacyExecution()) return true;
 		const sessionPath = sessionFileFromId(join(dataDir, "sessions"), decodeURIComponent(activateSessionMatch.id));
 		if (!sessionPath || !existsSync(sessionPath)) {
 			json(res, 404, { error: "Session not found" });
@@ -637,6 +651,7 @@ export async function handleSessionsRoutes(
 			json(res, 400, { error: "runtime must be legacy or durable" });
 			return true;
 		}
+		if (durableRequired && body.runtime === "legacy") return rejectLegacyExecution();
 		// Validate stale preset cards before creating either runtime. A preset that
 		// has already been loaded keeps working through its stable workspace even
 		// if the remote catalog later removes it.
@@ -668,7 +683,7 @@ export async function handleSessionsRoutes(
 			}
 		}
 
-		if (body.runtime === "durable") {
+		if (durableRequired || body.runtime === "durable") {
 			if (!durableSessions) { json(res, 503, { error: "Durable session service is unavailable" }); return true; }
 			const workspace = presetId
 				? existingPresetWorkspace ?? instantiatePreset(paths, workspaceRegistry, presetId, tenant?.tenantId)

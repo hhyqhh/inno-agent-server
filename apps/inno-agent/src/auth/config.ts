@@ -43,6 +43,9 @@ export function readAuthRuntimeConfig(env: NodeJS.ProcessEnv): AuthRuntimeConfig
 	if (multiUserEnabled && rawMode !== "better-auth") {
 		throw new Error("INNO_MULTI_USER_ENABLED requires INNO_AUTH_MODE=better-auth");
 	}
+	if (multiUserEnabled && env.INNO_DURABLE_ENABLED !== "true") {
+		throw new Error("INNO_MULTI_USER_ENABLED=true requires INNO_DURABLE_ENABLED=true; legacy execution is not available in multi-user mode");
+	}
 	if (rawMode === "local") {
 		return {
 			mode: rawMode,

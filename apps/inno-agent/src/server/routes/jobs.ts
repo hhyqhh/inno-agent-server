@@ -182,6 +182,8 @@ export interface JobsRouteContext {
 	abortJobRun?: (sessionId: string) => Promise<boolean>;
 	/** Release a durable question waiter when its only live view disconnects. */
 	disconnectJobRun?: (sessionId: string, turnId: string) => void;
+	/** Agent jobs always execute in durable sessions in multi-user mode. */
+	durableRequired?: boolean;
 	tenantStore: TenantStore | null;
 }
 
@@ -200,6 +202,14 @@ export async function handleJobsRoutes(
 ): Promise<boolean> {
 	const { jobStore, channelRegistry, tenantStore } = ctx;
 	let occurrenceClaim: JobRunClaim | undefined;
+	const rejectLegacyExecution = () => {
+		if (!ctx.durableRequired) return false;
+		json(res, 409, {
+			error: "Legacy sessions are read-only in multi-user mode; select a durable session instead",
+			code: "durable_required",
+		});
+		return true;
+	};
 	const requireSessionOwnership = async (sessionId: string): Promise<boolean> => {
 		if (await ownsRequestResource(req, tenantStore, "session", sessionId)) return true;
 		json(res, 404, { error: "Session not found" });
@@ -249,7 +259,10 @@ export async function handleJobsRoutes(
 			json(res, 400, { error: "runtime must be legacy or durable" });
 			return true;
 		}
-		if (body.runtime === "durable" && (body.taskType === "push_reminder" || body.taskType === "check_in_reminder")) {
+		if (ctx.durableRequired && body.runtime === "legacy") return rejectLegacyExecution();
+		const isReminder = body.taskType === "push_reminder" || body.taskType === "check_in_reminder";
+		if (ctx.durableRequired && body.runtime === undefined && !isReminder) body.runtime = "durable";
+		if (body.runtime === "durable" && isReminder) {
 			json(res, 400, { error: "Durable jobs support agent tasks, not reminder tasks" });
 			return true;
 		}
@@ -313,6 +326,7 @@ export async function handleJobsRoutes(
 			json(res, 404, { error: "Session not found" });
 			return true;
 		}
+		if (session.runtime === "legacy" && rejectLegacyExecution()) return true;
 		const sessionPath = session.path;
 		if (occurrenceId) {
 			// A manual run takes over a fired-but-waiting slot: cancel its
@@ -464,7 +478,8 @@ export async function handleJobsRoutes(
 			json(res, 404, { error: "Session not found" });
 			return true;
 		}
-		if (!session && job.runtime === "durable") {
+		if (session?.runtime === "legacy" && rejectLegacyExecution()) return true;
+		if (!session && (job.runtime === "durable" || ctx.durableRequired)) {
 			if (!ctx.createSession) {
 				json(res, 503, { error: "Durable job session creation is unavailable" });
 				return true;
@@ -540,8 +555,12 @@ export async function handleJobsRoutes(
 			json(res, 400, { error: "runtime must be legacy or durable" });
 			return true;
 		}
+		if (ctx.durableRequired && body.runtime === "legacy") return rejectLegacyExecution();
 		const current = jobStore.get(patchMatch.id);
 		const effectiveTaskType = body.taskType ?? current?.taskType;
+		if (ctx.durableRequired && body.runtime === undefined && effectiveTaskType !== "push_reminder" && effectiveTaskType !== "check_in_reminder") {
+			body.runtime = "durable";
+		}
 		if (body.runtime === "durable" && (effectiveTaskType === "push_reminder" || effectiveTaskType === "check_in_reminder")) {
 			json(res, 400, { error: "Durable jobs support agent tasks, not reminder tasks" });
 			return true;
