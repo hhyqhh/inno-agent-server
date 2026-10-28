@@ -92,7 +92,8 @@ The current durable slice supports:
 - workspace-contained `read`, `write`, and exact-replacement `edit` tools,
   including automatic parent creation and canonical symlink containment;
   streaming turns emit `workspace_change` events and persist tenant-local file
-  activity so the existing workspace UI refreshes written files;
+  activity so the existing workspace UI refreshes written files. Writes and
+  edits require a replay-safe approval through the existing permission card;
 - replay-safe, tenant-local L1 context/event/evidence tools, direct profile
   patch/update mutations, and L2 archive, query, and lint tools;
 - tenant-local L1 profile/recent-event context in durable instructions;
@@ -108,7 +109,7 @@ The current durable slice supports:
 - `ask_user_question` with stable question identity, tenant-local persisted
   answers, SSE turn rebinding, and original-run recovery after restart;
 - scoped active-turn cancellation through the existing chat abort endpoint,
-  including pending-question cleanup and persisted pi-durable abort marks;
+  including pending-question/permission cleanup and persisted pi-durable abort marks;
 - structured workspace attachments on streaming and non-streaming chat, with
   canonical path validation and request-ID-deduplicated UI sidecar metadata;
 - inline images persisted under `.chat-images/`, native image blocks for
@@ -119,16 +120,17 @@ The current durable slice supports:
   and explicit `POST /api/sessions/:id/generate-topic`, all using the durable
   session's pinned provider/model and isolated tenant credentials;
 - graceful shutdown of open durable runtimes;
-- 30-day retention of completed channel/question recovery records, cleaned only
-  after the owning session is proved idle, plus outbox removal on session delete;
+- 30-day retention of completed channel/question/permission recovery records,
+  cleaned only after the owning session is proved idle, plus recovery-record and
+  outbox removal on session delete;
 - explicit durable agent-job execution through the existing manual, cron, and
   deferred scheduler paths, with owned scheduler sessions/workspaces and the
   existing occurrence, check-in, run-ledger, and channel behavior.
 
 Shell, append/truncate, delete, rename, and other workspace mutations, MCP,
-subagents, codemode, and computer-use remain disabled. Durable permissions,
-branching/editing, and showcase export are not implemented on this path yet;
-unsupported operations fail explicitly rather than falling back to legacy execution.
+subagents, codemode, and computer-use remain disabled. Branching/editing and
+showcase export are not implemented on this path yet; unsupported operations
+fail explicitly rather than falling back to legacy execution.
 Workspace-private skills are injected as prompt resources; they do not alter the
 process-global PI resource loader or enable otherwise unsupported durable tools.
 
@@ -271,15 +273,33 @@ question/answer records are retained for 30 days by default and pruned under the
 same proven-idle rule as channel completions. Pending questions are never
 age-pruned, because they may still be needed by the original run.
 
+Durable workspace permissions use the stable operation ID
+`workspace_permission:<sessionId>:<toolCallId>`. Records live under the
+tenant-local `durable/permissions/<sessionId>/` directory with mode `0600`.
+Only `write` and `edit` are gated; reads remain silent and unsupported mutations
+do not become available through an approval. A decision is persisted before its
+waiter is released or `permission_resolved` is emitted. Replay-safe tool re-entry
+returns the original allow/deny decision without another card, including after
+SIGKILL, and resumes the original run rather than creating a synthetic user turn.
+An interrupted pending ask can be rebound to a new SSE turn; stale turns return
+409 and cross-tenant responses return 404. Non-streaming and headless runs reject
+an existing pending request with 409 and persist new requests as denied `no_ui`
+results instead of parking indefinitely. `allow_session` caches later approvals
+for the same tool/path only in the current owner process; the original call's
+decision remains durable across restart. Completed permission records use the
+same proven-idle 30-day retention and session-delete cleanup as questions. The
+legacy pi-permission-system `default`/`auto`/`yolo` policy switch does not disable
+this durable workspace approval boundary.
+
 `POST /api/chat/:sessionId/:turnId/abort` now supports active durable SSE turns
 after the same ownership check as other session operations. It marks the stream
-cancellation, persists any current question as cancelled, and calls
-`Conversation.abort()`, which commits abort marks and waits for the ordinary
+cancellation, persists any current question and permission request as cancelled,
+and calls `Conversation.abort()`, which commits abort marks and waits for the ordinary
 run/tool scope to become idle. The SSE terminal event is `aborted`, not a
 `durable_unanswered` error. Cancellation is rechecked after durable submission
 admission to close the queued-input race. Once the abort has completed, reopen
 does not resume that submission and a later turn can use the session normally.
-Question records and pi-durable SQLite are separate commits, not a distributed
+Question/permission records and pi-durable SQLite are separate commits, not a distributed
 transaction; if the process dies before an abort is acknowledged, the caller
 must retry/recheck rather than assuming both writes completed.
 
@@ -298,7 +318,8 @@ scheduler session/workspace. Durable sessions record `origin: "scheduler"`;
 manual runs apply the same badge to an existing durable target. Background
 service scopes derive tenant identity only from the scheduler's verified ALS,
 never from job payloads or tenant headers. Headless runs bind durable questions
-as `no_ui`; manual streaming reuses the persisted question bridge and cancels an
+and workspace permissions as `no_ui`; manual streaming reuses both persisted
+bridges and cancels an
 unanswered card if its only live view disconnects. The existing job-stop route
 can abort the active durable job turn.
 
@@ -352,10 +373,10 @@ between SQLite admission and the ID append is recovered by submitting the same
 stored input and `requestId`, which reacquires rather than duplicates the original
 submission. No synthetic user message is created.
 
-Status, event replay, question response, abort, and new-chat conflict checks
+Status, event replay, question/permission response, abort, and new-chat conflict checks
 restore the journal before consulting the process-local registry. Event replay
 also restarts one per-turn projection that reopens the runtime, rebinds question
-cards, watches new events, waits for the original submission, and writes the
+and permission cards, watches new events, waits for the original submission, and writes the
 terminal persistence result. A completed journal is retained for five minutes,
 matching the existing in-memory reconnect window; active journals are not
 age-pruned, and session deletion removes the session's journals. Legacy JSONL
@@ -391,26 +412,28 @@ direct profile patch/update retry dedup,
 durable topic upgrade dedup, pinned-model selection, and manual-rename protection,
 L1 event/profile crash-gap recovery, deterministic L2 archive,
 OCR completion caching and job-ID resume, channel payload/completion caching,
-verified tenant channel rebinding, proven-idle 30-day outbox/question retention
-with live-recovery preservation and session-delete outbox cleanup, legacy/durable
+verified tenant channel rebinding, proven-idle 30-day outbox/question/permission retention
+with live-recovery preservation and session-delete cleanup, legacy/durable
 scheduler routing with fail-closed unwired execution, local legacy cron
 compatibility, durable headless `no_ui` and streaming projection, exact SSE journal
 restore with submission intent and truncated-final-append handling, and recovery after real child processes are
 killed with `SIGKILL` during a delayed model response, during an interrupted
 memory tool, while a submitted OCR job is still running, after a channel send
-but before its outbox completion commit, and after a question answer is
-persisted but before its tool result commits. Recovered question answers do not
-produce a second question event. Cancellation tests verify persisted abort
+but before its outbox completion commit, after a question answer is persisted,
+and after a workspace permission is approved but before its tool result commits.
+Recovered answers and approvals do not produce a second card. Cancellation tests
+verify persisted abort
 marks across close/reopen, no duplicate model call, a usable following turn,
-and cancelled questions that stay resolved. No paid model endpoint or real
+and cancelled questions/permissions that stay resolved. No paid model endpoint or real
 external channel is used.
 
 The real-PostgreSQL integration suite additionally covers explicit HTTP
 creation, a two-worker static-routing topology where a non-owner forwards the
 verified tenant's configuration, session creation, and SSE chat while durable
 SQLite storage appears only on the selected owner, concurrent authenticated durable sessions, tenant-owned durable preset
-instantiation and stable workspace reuse, durable workspace writes with
-SSE `workspace_change` events and tenant-local file activity, PostgreSQL advisory-lock
+instantiation and stable workspace reuse, durable workspace writes with approval
+cards, stale-turn 409 and cross-tenant 404 responses, non-streaming `no_ui`
+write denial, SSE `workspace_change` events and tenant-local file activity, PostgreSQL advisory-lock
 contention/release and runtime invalidation on lock loss, per-tenant provider and
 OCR Authorization headers, cross-tenant 404s, completed request-ID retries,
 lack of legacy JSONL creation, SSE disconnect/reconnect replay, HTTP SIGKILL/restart
@@ -433,6 +456,6 @@ runtime validation, scheduler-origin history, tenant channel delivery, and mixed
 durable/legacy deferred execution with per-tenant credentials, owned workspaces,
 run ledgers, and claim cleanup.
 
-Still pending: durable permissions, sharded public bridge ingress, per-shard RWO
-deployment manifests, and ordered/fenced failure takeover. Static tenant-owner
+Still pending: sharded public bridge ingress, per-shard RWO deployment manifests,
+and ordered/fenced failure takeover. Static tenant-owner
 routing is implemented and covered by a real two-worker integration test.

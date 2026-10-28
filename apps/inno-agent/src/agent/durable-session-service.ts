@@ -30,10 +30,12 @@ import { fallbackTopicFromMessages, generateSessionTopicWithCompletion } from ".
 import { completeConfiguredDurablePrompt, createConfiguredDurableModels } from "./durable-models.js";
 import { buildDurableInstructions } from "./durable-memory.js";
 import { durableEntriesToMessages } from "./durable-projection.js";
+import { DurablePermissionStore, type PendingDurablePermission } from "./durable-permissions.js";
 import { DurableQuestionStore } from "./durable-questions.js";
 import { DurableStreamStore } from "./durable-stream-store.js";
 import { DurableSessionRuntime } from "./durable-runtime.js";
 import type { PersistedQuestion, QuestionBridgeResult, QuestionResponseStatus } from "./question-bridge.js";
+import type { PermissionDecision, PermissionResponseStatus } from "./permission-bridge.js";
 import { INNO_SYSTEM_PROMPT } from "./system-prompt.js";
 import { buildWorkspaceContextSections } from "./workspace-context.js";
 import { formatRecallForPrompt, ScopedL3Memory } from "../memory/l3/l3-tools.js";
@@ -178,6 +180,7 @@ export class DurableSessionService {
 	private readonly runtimes = new Map<string, RuntimeEntry>();
 	private readonly openings = new Map<string, Promise<OpenedRuntime>>();
 	private readonly questionStores = new Map<string, DurableQuestionStore>();
+	private readonly permissionStores = new Map<string, DurablePermissionStore>();
 	private readonly topicGenerations = new Map<string, Promise<DurableSessionSummary>>();
 	private readonly openRuntime: typeof DurableSessionRuntime.open;
 	private closing = false;
@@ -208,6 +211,20 @@ export class DurableSessionService {
 		return join(this.root(req), "questions", id);
 	}
 
+	private permissionDir(req: IncomingMessage, id: string): string {
+		return join(this.root(req), "permissions", id);
+	}
+
+	private permissionStore(req: IncomingMessage, id: string): DurablePermissionStore {
+		const key = this.runtimeKey(req, id);
+		let store = this.permissionStores.get(key);
+		if (!store) {
+			store = new DurablePermissionStore(id, this.permissionDir(req, id));
+			this.permissionStores.set(key, store);
+		}
+		return store;
+	}
+
 	private questionStore(req: IncomingMessage, id: string): DurableQuestionStore {
 		const key = this.runtimeKey(req, id);
 		let store = this.questionStores.get(key);
@@ -226,6 +243,23 @@ export class DurableSessionService {
 		return this.questionStore(req, id).pendingQuestion();
 	}
 
+	pendingPermission(req: IncomingMessage, id: string): PendingDurablePermission | undefined {
+		return this.permissionStore(req, id).pendingPermission();
+	}
+
+	respondPermission(req: IncomingMessage, id: string, input: {
+		turnId: string;
+		requestId: string;
+		decision: PermissionDecision;
+		reason?: string;
+	}): PermissionResponseStatus {
+		return this.permissionStore(req, id).respond(input);
+	}
+
+	cancelPermissionTurn(req: IncomingMessage, id: string, turnId: string): number {
+		return this.permissionStore(req, id).cancelTurn(turnId);
+	}
+
 	respondQuestion(req: IncomingMessage, id: string, input: {
 		turnId: string;
 		questionId: string;
@@ -238,9 +272,9 @@ export class DurableSessionService {
 		return this.questionStore(req, id).cancelTurn(turnId);
 	}
 
-	/** Hold an owner until the accepted answer and any following model response
+	/** Hold an owner until the accepted decision and any following model response
 	 * are committed. Without an active SSE this still resumes in the background. */
-	async resumeAfterQuestion(req: IncomingMessage, id: string): Promise<void> {
+	async resumeAfterInteraction(req: IncomingMessage, id: string): Promise<void> {
 		const lease = await this.lease(req, id);
 		try {
 			await lease.runtime.waitForIdle();
@@ -249,11 +283,20 @@ export class DurableSessionService {
 		}
 	}
 
+	async resumeAfterQuestion(req: IncomingMessage, id: string): Promise<void> {
+		return this.resumeAfterInteraction(req, id);
+	}
+
+	async resumeAfterPermission(req: IncomingMessage, id: string): Promise<void> {
+		return this.resumeAfterInteraction(req, id);
+	}
+
 	async abort(req: IncomingMessage, id: string, turnId: string): Promise<void> {
 		const lease = await this.lease(req, id);
 		try {
 			// Resolve the application-owned card while this turn still owns the
 			// runtime, then persist pi-durable's abort marks before releasing it.
+			this.permissionStore(req, id).cancelTurn(turnId);
 			this.questionStore(req, id).cancelTurn(turnId);
 			await lease.runtime.abort();
 		} finally {
@@ -557,6 +600,7 @@ export class DurableSessionService {
 		messages: ReturnType<typeof durableEntriesToMessages>;
 		revision: string;
 		pendingQuestion?: PersistedQuestion;
+		pendingPermission?: PendingDurablePermission;
 	}> {
 		const lease = await this.lease(req, id);
 		try {
@@ -576,11 +620,13 @@ export class DurableSessionService {
 			const lastEntryId = snapshot.entries.at(-1)?.id ?? 0;
 			await this.indexL3Snapshot(req, id, messages, lastEntryId);
 			const pendingQuestion = this.pendingQuestion(req, id);
+			const pendingPermission = this.pendingPermission(req, id);
 			return {
 				summary: toSummary(next),
 				messages,
 				revision: `durable:${lastEntryId}`,
 				...(pendingQuestion ? { pendingQuestion } : {}),
+				...(pendingPermission ? { pendingPermission } : {}),
 			};
 		} finally {
 			await lease.release();
@@ -668,6 +714,7 @@ export class DurableSessionService {
 							].join("\n\n"),
 							workspaceDir,
 							workspaceTools: true,
+							permissions: this.permissionStore(req, id),
 							memory,
 							ocr,
 							channels,
@@ -748,11 +795,13 @@ export class DurableSessionService {
 		}
 		this.writeCatalog(req, this.catalog(req).filter((record) => record.id !== id));
 		this.questionStores.delete(key);
+		this.permissionStores.delete(key);
 		const dataRoot = resolveRequestTenantDataRoot(req, this.options.dataDir);
 		clearSessionAttachments(dataRoot, id);
 		clearWorkspaceActivity(dataRoot, id);
 		await rm(join(this.root(req), "storage", id), { recursive: true, force: true });
 		await rm(this.questionDir(req, id), { recursive: true, force: true });
+		await rm(this.permissionDir(req, id), { recursive: true, force: true });
 		this.streamStore(req).deleteSession(id);
 		deleteChannelOutboxForSession(join(dataRoot, "channels", "outbox"), id);
 	}
@@ -765,6 +814,7 @@ export class DurableSessionService {
 		this.runtimes.clear();
 		this.openings.clear();
 		this.questionStores.clear();
+		this.permissionStores.clear();
 		this.topicGenerations.clear();
 		await Promise.all(entries.map((entry) => this.closeRuntimeEntry(entry).catch(() => undefined)));
 	}

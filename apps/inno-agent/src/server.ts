@@ -1519,6 +1519,7 @@ const { dispatch: dispatchRoutes } = createRouteDispatcher({
 		durableExecutor: executeDurableJob,
 		disconnectJobRun: (sessionId, turnId) => {
 			if (activeDurableJobTurns.get(sessionId) === turnId) {
+				durableSessions.cancelPermissionTurn(req, sessionId, turnId);
 				durableSessions.cancelQuestionTurn(req, sessionId, turnId);
 			}
 		},

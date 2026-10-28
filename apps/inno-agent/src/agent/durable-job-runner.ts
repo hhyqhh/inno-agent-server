@@ -22,12 +22,18 @@ export async function runDurableJobPrompt(
 	if (!options.onEvent && service.pendingQuestion(req, sessionId)) {
 		throw new Error("This session has a pending question; answer it through the streaming UI");
 	}
+	if (!options.onEvent && service.pendingPermission(req, sessionId)) {
+		throw new Error("This session has a pending permission request; answer it through the streaming UI");
+	}
 	const recallContext = await service.prepareRecallContext(req, sessionId, prompt);
 	let lease: Awaited<ReturnType<DurableSessionService["lease"]>> | undefined;
 	let stream: { stop(): Promise<unknown> } | undefined;
 	try {
 		lease = await service.lease(req, sessionId);
 		lease.runtime.bindQuestionTurn(options.onEvent
+			? { turnId: options.turnId, emit: options.onEvent }
+			: { turnId: options.turnId, noUi: true });
+		lease.runtime.bindPermissionTurn(options.onEvent
 			? { turnId: options.turnId, emit: options.onEvent }
 			: { turnId: options.turnId, noUi: true });
 		if (options.onEvent) {
@@ -57,6 +63,7 @@ export async function runDurableJobPrompt(
 	} finally {
 		if (stream) await stream.stop().catch(() => undefined);
 		if (lease) {
+			lease.runtime.unbindPermissionTurn(options.turnId);
 			lease.runtime.unbindQuestionTurn(options.turnId);
 			await lease.release();
 		}

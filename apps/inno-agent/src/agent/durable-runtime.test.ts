@@ -16,6 +16,7 @@ import { loadEvents, loadProfile } from "../memory/learner/profile-store.js";
 import { readManifest } from "../memory/l2/manifest-store.js";
 import { ChannelRegistry } from "../channels/channel.js";
 import { DurableQuestionStore } from "./durable-questions.js";
+import { DurablePermissionStore } from "./durable-permissions.js";
 import { buildImagePathsHint } from "../server/inline-images.js";
 import {
 	channelOutboxPayloadPath,
@@ -610,6 +611,49 @@ describe("DurableSessionRuntime", () => {
 		const messages = durableEntriesToMessages((await runtime.snapshot()).entries);
 		const tool = messages.flatMap((message) => message.tools ?? []).find((call) => call.toolCallId === "crash-channel-call");
 		expect(JSON.stringify(tool?.result)).toContain("已把文件 report.txt");
+	}, 20_000);
+
+	it("resumes a persisted workspace approval without another card after SIGKILL", async () => {
+		const root = tempRoot();
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		const storagePath = join(root, "permission-crash.sqlite");
+		const permissionDir = join(root, "tenant", "durable", "permissions", "durable-crash-permission");
+		const fixture = fileURLToPath(new URL("./durable-permission-crash-fixture.ts", import.meta.url));
+		const child = spawn(process.execPath, ["--import", "tsx", fixture, storagePath, permissionDir, workspace], {
+			cwd: process.cwd(),
+			env: { ...process.env },
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		children.add(child);
+		const output = await waitForOutput(child, "permission-decision-persisted:accepted");
+		const submissionId = Number(/submission:(\d+)/.exec(output)?.[1]) as SubmissionId;
+		await once(child, "exit");
+		children.delete(child);
+		expect(existsSync(join(workspace, "recovered.txt"))).toBe(false);
+
+		const provider = fauxRuntime();
+		provider.faux.setResponses([fauxAssistantMessage("permission approval recovered")]);
+		const store = new DurablePermissionStore("durable-crash-permission", permissionDir);
+		const events: Array<Record<string, unknown>> = [];
+		store.bindTurn({ turnId: "recovered-turn", emit: (event) => events.push(event) });
+		const runtime = await open({
+			storagePath,
+			workspaceDir: workspace,
+			workspaceTools: true,
+			permissions: store,
+			...provider,
+		});
+		const recovered = await runtime.waitForSubmission(submissionId);
+
+		expect(recovered).toMatchObject({ status: "done", text: "permission approval recovered" });
+		expect(events).toEqual([]);
+		expect(store.pendingPermission()).toBeUndefined();
+		expect(readFileSync(join(workspace, "recovered.txt"), "utf-8")).toBe("written after recovered approval");
+		const messages = durableEntriesToMessages((await runtime.snapshot()).entries);
+		expect(messages.filter((message) => message.role === "user")).toHaveLength(1);
+		const tool = messages.flatMap((message) => message.tools ?? []).find((call) => call.toolCallId === "crash-permission-call");
+		expect(tool).toMatchObject({ toolName: "write", isError: false });
 	}, 20_000);
 
 	it("resumes a persisted question answer without asking again after SIGKILL", async () => {

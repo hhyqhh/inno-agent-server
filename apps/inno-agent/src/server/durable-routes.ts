@@ -5,6 +5,7 @@ import { DurableRuntimeDisabledError, DurableSessionBusyError, type DurableSessi
 import { DurableSseProjector } from "../agent/durable-projection.js";
 import type { DurableStreamStore } from "../agent/durable-stream-store.js";
 import type { QuestionBridgeResult } from "../agent/question-bridge.js";
+import type { PermissionDecision } from "../agent/permission-bridge.js";
 import {
 	hasCompleteTurnAfterBaseline,
 	streamRegistry,
@@ -115,6 +116,7 @@ export async function handleDurableSessionResourceRoutes(
 				messageCount: detail.messages.length,
 				sessionRevision: detail.revision,
 				...(detail.pendingQuestion ? { pendingQuestion: detail.pendingQuestion } : {}),
+				...(detail.pendingPermission ? { pendingPermission: detail.pendingPermission } : {}),
 			});
 		} catch (error) {
 			json(res, errorStatus(error), { error: error instanceof Error ? error.message : String(error) });
@@ -216,6 +218,10 @@ async function streamDurableTurn(
 		if (!journal) throw new Error("Durable stream journal not found");
 		lease = await service.lease(req, state.sessionId);
 		lease.runtime.bindQuestionTurn({
+			turnId: state.turnId,
+			emit: (event) => publishDurableEvent(context, event),
+		});
+		lease.runtime.bindPermissionTurn({
 			turnId: state.turnId,
 			emit: (event) => publishDurableEvent(context, event),
 		});
@@ -346,6 +352,7 @@ async function streamDurableTurn(
 		closeWorkspaceMonitor();
 		if (stream) await stream.stop().catch(() => undefined);
 		if (lease) {
+			lease.runtime.unbindPermissionTurn(state.turnId);
 			lease.runtime.unbindQuestionTurn(state.turnId);
 			await lease.release().catch(() => undefined);
 		}
@@ -401,6 +408,47 @@ export async function handleDurableChatRoutes(
 		return true;
 	}
 
+	if (method === "POST" && url === "/api/chat/permission-response") {
+		const body = parsedBody ?? await readBody(req) as Record<string, unknown>;
+		const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+		const turnId = typeof body.turnId === "string" ? body.turnId : "";
+		const requestId = typeof body.requestId === "string" ? body.requestId : "";
+		const decision = body.decision;
+		const reason = typeof body.reason === "string" ? body.reason : undefined;
+		const validDecision: PermissionDecision | null =
+			decision === "allow_once" || decision === "allow_session" || decision === "deny" ? decision : null;
+		if (!sessionId || !turnId || !requestId || !validDecision) {
+			json(res, 400, { error: "Missing sessionId, turnId, requestId or a valid decision" });
+			return true;
+		}
+		const status = ctx.service.respondPermission(req, sessionId, {
+			turnId, requestId, decision: validDecision, ...(reason ? { reason } : {}),
+		});
+		let resumed = false;
+		if (status === "accepted") {
+			const restored = restoreDurableStream(req, ctx.service, sessionId, turnId);
+			const live = restored?.state ?? streamRegistry.getByTurn(turnId);
+			if (live?.sessionId === sessionId && (live.status === "queued" || live.status === "running")) {
+				if (restored) void ensureDurableStreamProjection(req, ctx.service, restored);
+				resumed = true;
+			} else {
+				try {
+					await ctx.service.resumeAfterPermission(req, sessionId);
+					resumed = true;
+				} catch (error) {
+					// The decision is already durable. A later session open can retry
+					// the original tool call without another approval card.
+					logger.error({ err: error, sessionId, requestId }, "failed to resume durable permission");
+				}
+			}
+		}
+		json(res, status === "accepted" ? 200 : status === "scope_mismatch" || status === "already_resolved" ? 409 : 404, {
+			accepted: status === "accepted",
+			...(status === "accepted" ? { resumed, sessionId } : {}),
+		});
+		return true;
+	}
+
 	if (method === "POST" && url === "/api/chat") {
 		const body = parsedBody ?? await readBody(req) as Record<string, unknown>;
 		const prompt = typeof body.prompt === "string" ? body.prompt : "";
@@ -415,6 +463,10 @@ export async function handleDurableChatRoutes(
 			json(res, 409, { error: "This session has a pending question; answer it through the streaming UI" });
 			return true;
 		}
+		if (ctx.service.pendingPermission(req, sessionId)) {
+			json(res, 409, { error: "This session has a pending permission request; answer it through the streaming UI" });
+			return true;
+		}
 		const requestId = typeof body.clientRequestId === "string" && body.clientRequestId.trim()
 			? body.clientRequestId
 			: `http-${crypto.randomUUID()}`;
@@ -425,6 +477,7 @@ export async function handleDurableChatRoutes(
 		try {
 			lease = await ctx.service.lease(req, sessionId);
 			lease.runtime.bindQuestionTurn({ turnId: requestId, noUi: true });
+			lease.runtime.bindPermissionTurn({ turnId: requestId, noUi: true });
 			ctx.service.recordTurnMetadata(req, sessionId, attachments, images, prompt, requestId);
 			const submission = await lease.runtime.submit(durableUserInput(prompt, attachments, images, recallContext), requestId);
 			ctx.service.noteSubmission(req, sessionId, prompt);
@@ -436,6 +489,7 @@ export async function handleDurableChatRoutes(
 		} catch (error) {
 			json(res, errorStatus(error), { error: error instanceof Error ? error.message : String(error) });
 		} finally {
+			lease?.runtime.unbindPermissionTurn();
 			lease?.runtime.unbindQuestionTurn();
 			await lease?.release().catch(() => undefined);
 		}

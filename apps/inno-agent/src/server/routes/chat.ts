@@ -500,6 +500,9 @@ export async function handleChatRoutes(
 			return true;
 		}
 		if (!await ownsSession(sessionId)) return denySession();
+		if (durableContext?.service.get(req, sessionId)) {
+			return handleDurableChatRoutes(req, res, method, url, durableContext, body);
+		}
 		const status = permissionBridge.respond({ sessionId, turnId, requestId, decision: validDecision, reason });
 		json(res, status === "accepted" ? 200 : status === "scope_mismatch" || status === "already_resolved" ? 409 : 404, { accepted: status === "accepted" });
 		return true;

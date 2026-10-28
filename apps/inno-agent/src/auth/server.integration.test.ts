@@ -65,6 +65,43 @@ async function api(cookie: string, path: string, init: RequestInit = {}): Promis
 	});
 }
 
+async function readDurableStream(
+	response: Response,
+	onPermission?: (input: { sessionId: string; turnId: string; requestId: string }) => Promise<void>,
+): Promise<string> {
+	if (!response.body) throw new Error("Durable SSE response has no body");
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let streamed = "";
+	let pending = "";
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		const chunk = decoder.decode(value, { stream: true });
+		streamed += chunk;
+		pending += chunk;
+		const blocks = pending.split("\n\n");
+		pending = blocks.pop() ?? "";
+		for (const block of blocks) {
+			const line = block.split("\n").find((item) => item.startsWith("data: "));
+			if (!line || line === "data: [DONE]") continue;
+			const envelope = JSON.parse(line.slice(6)) as {
+				sessionId: string;
+				turnId: string;
+				event: { type: string; requestId?: string };
+			};
+			if (envelope.event.type === "permission_request" && envelope.event.requestId && onPermission) {
+				await onPermission({
+					sessionId: envelope.sessionId,
+					turnId: envelope.turnId,
+					requestId: envelope.event.requestId,
+				});
+			}
+		}
+	}
+	return streamed;
+}
+
 async function waitFor(condition: () => boolean | Promise<boolean>, description: string, timeoutMs = 10_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (!(await condition())) {
@@ -1317,7 +1354,10 @@ describe("durable session HTTP boundary", () => {
 	}, 60_000);
 
 	it("emits workspace changes and records file activity for durable writes", async () => {
-		const cookie = await registerUser("durable-workspace-write@example.com");
+		const [cookie, cookieB] = await Promise.all([
+			registerUser("durable-workspace-write@example.com"),
+			registerUser("durable-workspace-write-other@example.com"),
+		]);
 		expect((await api(cookie, "/api/settings/providers", {
 			method: "PUT",
 			body: JSON.stringify({
@@ -1340,7 +1380,26 @@ describe("durable session HTTP boundary", () => {
 			}),
 		});
 		expect(response.status).toBe(200);
-		const streamed = await response.text();
+		let permissionRequestId = "";
+		const streamed = await readDurableStream(response, async (permission) => {
+			permissionRequestId = permission.requestId;
+			expect((await api(cookie, "/api/chat/permission-response", {
+				method: "POST",
+				body: JSON.stringify({ ...permission, turnId: "stale-turn", decision: "allow_once" }),
+			})).status).toBe(409);
+			expect((await api(cookieB, "/api/chat/permission-response", {
+				method: "POST",
+				body: JSON.stringify({ ...permission, decision: "allow_once" }),
+			})).status).toBe(404);
+			const approved = await api(cookie, "/api/chat/permission-response", {
+				method: "POST",
+				body: JSON.stringify({ ...permission, decision: "allow_once" }),
+			});
+			expect(approved.status).toBe(200);
+			expect(await approved.json()).toMatchObject({ accepted: true, resumed: true });
+		});
+		expect(permissionRequestId).toMatch(/^durable-permission-/);
+		expect(streamed).toContain('"type":"permission_resolved"');
 		expect(streamed).toContain('"type":"workspace_change"');
 		expect(streamed).toContain('"toolName":"write"');
 		expect(streamed).toContain('"path":"nested/durable-preview.txt"');
@@ -1360,6 +1419,33 @@ describe("durable session HTTP boundary", () => {
 		}));
 		const activity = activityFiles.find((content) => content.includes(session.id)) ?? "";
 		expect(activity).toContain("nested/durable-preview.txt");
+
+		const noUiCreated = await api(cookie, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ runtime: "durable", newWorkspace: { isTemp: false, name: "Durable no UI" } }),
+		});
+		const noUiSession = await noUiCreated.json() as { id: string; workspaceId: string };
+		expect(noUiCreated.status).toBe(201);
+		expect(noUiSession.workspaceId).not.toBe(session.workspaceId);
+		const noUi = await api(cookie, "/api/chat", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId: noUiSession.id,
+				prompt: "durable-workspace-write",
+				clientRequestId: "durable-workspace-no-ui-request",
+			}),
+		});
+		expect(noUi.status).toBe(200);
+		const noUiDetail = await (await api(cookie, `/api/sessions/${noUiSession.id}`)).json() as {
+			pendingPermission?: unknown;
+			messages: Array<{ tools?: Array<{ toolName: string; isError: boolean; result: unknown }> }>;
+		};
+		expect(noUiDetail.pendingPermission).toBeUndefined();
+		const deniedWrite = noUiDetail.messages.flatMap((message) => message.tools ?? [])
+			.find((tool) => tool.toolName === "write");
+		expect(deniedWrite).toMatchObject({ isError: true });
+		expect(JSON.stringify(deniedWrite?.result)).toContain("no streaming web UI");
+		const noUiFile = await api(cookie, `/api/workspace/file?path=${encodeURIComponent("nested/durable-preview.txt")}&workspaceId=${encodeURIComponent(noUiSession.workspaceId)}`);
+		expect(noUiFile.status, await noUiFile.text()).toBe(404);
 	}, 60_000);
 
 	it("instantiates preset workspaces for durable sessions with tenant ownership", async () => {

@@ -30,6 +30,11 @@ import { createDurableChannelRegistrations, type DurableChannelToolOptions } fro
 import { createDurableMemoryRegistrations, type DurableMemoryToolOptions } from "./durable-memory.js";
 import { createDurableOcrRegistrations, type DurableOcrToolOptions } from "./durable-ocr.js";
 import {
+	withDurableWorkspacePermission,
+	type DurablePermissionBinding,
+	type DurablePermissionStore,
+} from "./durable-permissions.js";
+import {
 	createDurableQuestionRegistrations,
 	type DurableQuestionBinding,
 	type DurableQuestionStore,
@@ -69,6 +74,8 @@ export interface DurableSessionRuntimeOptions {
 	ocr?: DurableOcrToolOptions;
 	/** Persistent file-delivery outbox; external sends remain at-least-once. */
 	channels?: DurableChannelToolOptions;
+	/** Restart-safe workspace write/edit approvals. */
+	permissions?: DurablePermissionStore;
 	/** Restart-safe web questions; accepted answers persist before resumption. */
 	questions?: DurableQuestionToolOptions;
 	/** Completed recovery-record retention; cleanup runs only with no live work. */
@@ -100,8 +107,14 @@ function textFromAssistant(message: AssistantMessage): string {
 		.trim();
 }
 
-function createWorkspaceFileTools() {
-	return [createReadTool(), createWriteTool(), createEditTool()];
+function createWorkspaceFileTools(permissions?: DurablePermissionStore) {
+	const write = createWriteTool();
+	const edit = createEditTool();
+	return [
+		createReadTool(),
+		permissions ? withDurableWorkspacePermission(write, permissions) : write,
+		permissions ? withDurableWorkspacePermission(edit, permissions) : edit,
+	];
 }
 
 function createSessionRegistry(
@@ -110,12 +123,13 @@ function createSessionRegistry(
 	ocr?: DurableOcrToolOptions,
 	channels?: DurableChannelToolOptions,
 	questionTools: ToolRegistration[] = [],
+	permissions?: DurablePermissionStore,
 ): Registry {
 	const registry = createRegistry();
 	if (workspaceTools) {
 		registry.install(defineExtension({
 			name: WORKSPACE_EXTENSION_NAME,
-			tools: createWorkspaceFileTools(),
+			tools: createWorkspaceFileTools(permissions),
 		}));
 	}
 	if (memory) {
@@ -155,6 +169,7 @@ export class DurableSessionRuntime {
 		private readonly harness: Harness,
 		private readonly rootConversation: Conversation,
 		private readonly ownsStoragePath: string,
+		private readonly permissions?: DurablePermissionStore,
 		private readonly questions?: DurableQuestionStore,
 	) {}
 
@@ -170,7 +185,7 @@ export class DurableSessionRuntime {
 			const questionTools = options.questions
 				? await createDurableQuestionRegistrations(options.questions)
 				: [];
-			const registry = options.registry ?? createSessionRegistry(workspaceTools, options.memory, options.ocr, options.channels, questionTools);
+			const registry = options.registry ?? createSessionRegistry(workspaceTools, options.memory, options.ocr, options.channels, questionTools, options.permissions);
 			const memoryTools = options.memory ? createDurableMemoryRegistrations(options.memory) : [];
 			const ocrTools = options.ocr ? createDurableOcrRegistrations(options.ocr) : [];
 			const channelTools = options.channels ? createDurableChannelRegistrations(options.channels) : [];
@@ -192,7 +207,7 @@ export class DurableSessionRuntime {
 						model: options.model,
 						instructions: options.instructions,
 						cwd: options.workspaceDir,
-						...(workspaceTools ? { tools: [...createWorkspaceFileTools(), ...tools] } : { tools }),
+						...(workspaceTools ? { tools: [...createWorkspaceFileTools(options.permissions), ...tools] } : { tools }),
 					},
 				});
 				const inspection = await harness.inspect(BACKGROUND_CONTEXT);
@@ -203,6 +218,7 @@ export class DurableSessionRuntime {
 						if (options.channels) {
 							pruneCompletedChannelOutboxForIdleSession(options.channels.outboxDir, options.channels.sessionId, completedBefore);
 						}
+						options.permissions?.pruneCompletedForIdleSession(completedBefore);
 						options.questions?.store.pruneCompletedForIdleSession(completedBefore);
 					} catch (error) {
 						// Cleanup must never prevent an otherwise recoverable session opening.
@@ -210,7 +226,7 @@ export class DurableSessionRuntime {
 					}
 				}
 				harness.resume();
-				return new DurableSessionRuntime(storagePath, harness, rootConversation, storagePath, options.questions?.store);
+				return new DurableSessionRuntime(storagePath, harness, rootConversation, storagePath, options.permissions, options.questions?.store);
 			} catch (error) {
 				await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
 				throw error;
@@ -257,6 +273,14 @@ export class DurableSessionRuntime {
 		return { id, status: "done", answer, text: textFromAssistant(answer) };
 	}
 
+	bindPermissionTurn(binding: DurablePermissionBinding): void {
+		this.permissions?.bindTurn(binding);
+	}
+
+	unbindPermissionTurn(turnId?: string): void {
+		this.permissions?.unbindTurn(turnId);
+	}
+
 	bindQuestionTurn(binding: DurableQuestionBinding): void {
 		this.questions?.bindTurn(binding);
 	}
@@ -292,6 +316,7 @@ export class DurableSessionRuntime {
 
 	async close(): Promise<void> {
 		try {
+			this.permissions?.unbindTurn();
 			this.questions?.unbindTurn();
 			await this.harness.close(BACKGROUND_CONTEXT);
 		} finally {
