@@ -100,6 +100,7 @@ import { readAuthRuntimeConfig, readListenConfig } from "./auth/config.js";
 import { assertSignUpAllowed, isPublicApiRequest, isTrustedOrigin, requireSession } from "./auth/http.js";
 import { createAuthRuntime } from "./auth/runtime.js";
 import { createBackgroundRequest, ownsRequestResource, setRequestTenant } from "./tenants/http.js";
+import { forwardDurableTenantRequest, readDurableShardConfig } from "./tenants/durable-tenant-router.js";
 import { resolveCurrentTenantDataDir, resolveCurrentTenantDataRoot } from "./tenants/paths.js";
 import { getCurrentTenant, getCurrentTenantStore, runWithoutTenantContext } from "./tenants/current.js";
 
@@ -121,6 +122,7 @@ const paths = resolveRuntimePaths(parsed.options);
 applyRuntimeEnvironment(paths);
 
 const authConfig = readAuthRuntimeConfig(process.env);
+const durableShardConfig = readDurableShardConfig(process.env);
 const listenConfig = readListenConfig(process.env, authConfig.mode);
 const auth = createAuthRuntime(authConfig);
 await auth.checkConnection();
@@ -1718,6 +1720,7 @@ const server = createServer(async (req, response) => {
 			if (session && auth.tenantStore) {
 				const tenant = await auth.tenantStore.ensurePersonalTenant(session.principal.userId);
 				setRequestTenant(req, tenant, auth.tenantStore);
+				if (durableShardConfig && forwardDurableTenantRequest(req, res, tenant, durableShardConfig)) return;
 			}
 		}
 

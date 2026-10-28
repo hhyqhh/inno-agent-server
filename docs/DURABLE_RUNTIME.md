@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: cross-process storage ownership (3T)
+## Current stage: static tenant-owner routing (3U)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -8,7 +8,7 @@ packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
 runtime leases live in `durable-session-service.ts`.
 
 Durable execution is disabled by default. Set `INNO_DURABLE_ENABLED=true` to
-make the Web UI default new non-preset sessions to durable. The explicit HTTP
+make the Web UI default new sessions to durable. The explicit HTTP
 creation contract is:
 
 ```http
@@ -20,8 +20,8 @@ Content-Type: application/json
 
 An owned existing `workspaceId` may be supplied. The authenticated temporary
 workspace fallback and `newWorkspace` (temporary or named) are also supported.
-`presetId` is not yet supported on this creation path, so preset cards continue
-to create legacy sessions. Omitting `runtime`, or passing `"legacy"`, keeps the
+`presetId` instantiates or reuses the preset's stable tenant-owned workspace.
+Omitting `runtime`, or passing `"legacy"`, keeps the
 existing PI `SessionManager` JSONL behavior. Historical JSONL is never migrated
 or opened as durable storage.
 
@@ -31,6 +31,31 @@ SQLite root:
 
 - local: `<dataDir>/durable/`
 - authenticated: `<dataDir>/tenants/<verifiedTenantId>/durable/`
+
+### Optional static tenant-owner routing
+
+Multiple workers can use independent data roots when every worker is configured
+with the same static shard map and its own local ID:
+
+```sh
+INNO_DURABLE_SHARD_ID=worker-a
+INNO_DURABLE_SHARD_URLS='{"worker-a":"http://worker-a:3000","worker-b":"http://worker-b:3000"}'
+```
+
+Sharding requires Better Auth, `INNO_MULTI_USER_ENABLED=true`, and
+`INNO_DURABLE_ENABLED=true`. After cookie authentication and personal-tenant
+provisioning, the server hashes the verified tenant ID onto the sorted shard IDs.
+A non-owner forwards the untouched request, including JSON bodies and SSE, to
+that owner before lazy agent bootstrap. The owner authenticates the forwarded
+cookie again. Clients cannot select a tenant or shard through headers.
+
+This colocates a tenant's catalog, workspaces, configuration, and durable SQLite
+files on one worker. Each worker must have its own RWO data volume; the map does
+not make a shared filesystem active-active safe. It is static routing, not
+dynamic service discovery, ordered migration, failover, or network-partition
+fencing. `/api/auth/*`, `/api/session`, and health checks remain local. The
+bearer-authenticated public bridge callback does not yet have tenant-owner
+forwarding, so sharded channel ingress remains pending.
 
 Tenant identity comes only from the verified request context. PostgreSQL
 resource ownership is claimed for every authenticated durable session and is
@@ -381,7 +406,9 @@ and cancelled questions that stay resolved. No paid model endpoint or real
 external channel is used.
 
 The real-PostgreSQL integration suite additionally covers explicit HTTP
-creation, concurrent authenticated durable sessions, tenant-owned durable preset
+creation, a two-worker static-routing topology where a non-owner forwards the
+verified tenant's configuration, session creation, and SSE chat while durable
+SQLite storage appears only on the selected owner, concurrent authenticated durable sessions, tenant-owned durable preset
 instantiation and stable workspace reuse, durable workspace writes with
 SSE `workspace_change` events and tenant-local file activity, PostgreSQL advisory-lock
 contention/release and runtime invalidation on lock loss, per-tenant provider and
@@ -406,5 +433,6 @@ runtime validation, scheduler-origin history, tenant channel delivery, and mixed
 durable/legacy deferred execution with per-tenant credentials, owned workspaces,
 run ledgers, and claim cleanup.
 
-Still pending: durable permissions, tenant/conversation routing, per-shard RWO
-storage, and ordered/fenced failure takeover for sharded single-owner deployment.
+Still pending: durable permissions, sharded public bridge ingress, per-shard RWO
+deployment manifests, and ordered/fenced failure takeover. Static tenant-owner
+routing is implemented and covered by a real two-worker integration test.
