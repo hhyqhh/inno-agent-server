@@ -12,14 +12,20 @@ import { loadEvents } from "../memory/learner/profile-store.js";
 import { closeL3Memory, ScopedL3Memory } from "../memory/l3/l3-tools.js";
 import { ChannelRegistry } from "../channels/channel.js";
 import { setRequestTenant } from "../tenants/http.js";
-import type { TenantContext, TenantStore } from "../tenants/store.js";
+import type { DurableStorageLock, TenantContext, TenantStore } from "../tenants/store.js";
 import { DurableRuntimeDisabledError, DurableSessionService } from "./durable-session-service.js";
 import { DurableSessionRuntime, type DurableSessionRuntimeOptions } from "./durable-runtime.js";
 
 const roots: string[] = [];
 const l3Dirs: string[] = [];
 const services: DurableSessionService[] = [];
-const tenantStore = {} as TenantStore;
+const tenantStore = {
+	acquireDurableStorageLock: async () => ({
+		lost: false,
+		onLost: () => {},
+		release: async () => {},
+	}),
+} as unknown as TenantStore;
 
 function root(): string {
 	const value = mkdtempSync(join(tmpdir(), "inno-durable-service-"));
@@ -427,6 +433,54 @@ describe("DurableSessionService", () => {
 			await generation;
 			expect(service.list(req)[0]).toMatchObject({ name: "手动保留", topicPendingUpgrade: false });
 		});
+	});
+
+	it("invalidates a runtime when its cross-process storage lock is lost", async () => {
+		const base = root();
+		const context = tenant("tenant-a");
+		saveTenantConfig(base, context.tenantId, config("key-a"));
+		let acquisitions = 0;
+		let releases = 0;
+		let closes = 0;
+		const losses: Array<() => void> = [];
+		const store = {
+			acquireDurableStorageLock: async (): Promise<DurableStorageLock> => {
+				acquisitions += 1;
+				let listener: (() => void) | undefined;
+				const lock: DurableStorageLock = {
+					lost: false,
+					onLost: (callback) => { listener = callback; },
+					release: async () => { releases += 1; },
+				};
+				losses.push(() => {
+					(lock as { lost: boolean }).lost = true;
+					listener?.();
+				});
+				return lock;
+			},
+		} as unknown as TenantStore;
+		const service = new DurableSessionService({
+			dataDir: base,
+			getLocalConfig: () => config("local"),
+			enabled: true,
+			resolveWorkspaceDir: () => base,
+			tenantStore: store,
+			openRuntime: async () => ({
+				close: async () => { closes += 1; },
+			}) as unknown as DurableSessionRuntime,
+		});
+		services.push(service);
+		const bound = inTenant(context, (req) => ({ req, session: service.create(req, { workspaceId: "workspace" }) }));
+		const lease = async () => inTenant(context, () => service.lease(bound.req, bound.session.id));
+		const first = await lease();
+		expect(acquisitions).toBe(1);
+		losses[0]!();
+		await first.release();
+		expect({ closes, releases }).toEqual({ closes: 1, releases: 1 });
+		const second = await lease();
+		expect(acquisitions).toBe(2);
+		await second.release();
+		expect({ closes, releases }).toEqual({ closes: 2, releases: 2 });
 	});
 
 	it("requires the explicit runtime gate and leaves legacy JSONL untouched", async () => {

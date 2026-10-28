@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import type { Pool } from "pg";
+import { createHash, randomUUID } from "node:crypto";
+import type { Pool, PoolClient } from "pg";
 import { logger } from "../logger.js";
 import { withTenantTransaction } from "./schema.js";
 
@@ -36,6 +36,60 @@ export class ResourceOwnershipError extends Error {
 export interface JobRunClaim {
 	readonly occurrenceId: string;
 	release(): Promise<void>;
+}
+
+export interface DurableStorageLock {
+	readonly lost: boolean;
+	onLost(listener: () => void): void;
+	release(): Promise<void>;
+}
+
+/** A PostgreSQL connection owns this non-expiring advisory lock. Process death
+ * releases it; connection loss invalidates the old runtime instead of allowing
+ * a timed takeover while a paused process may still write SQLite. */
+class PostgresDurableStorageLock implements DurableStorageLock {
+	private released = false;
+	private invalidated = false;
+	private readonly listeners = new Set<() => void>();
+	private readonly handleError = (): void => {
+		if (this.released || this.invalidated) return;
+		this.invalidated = true;
+		for (const listener of this.listeners) {
+			try { listener(); } catch (error) { logger.error({ err: error }, "durable storage lock loss handler failed"); }
+		}
+	};
+
+	constructor(private readonly client: PoolClient, private readonly key: string) {
+		this.client.on("error", this.handleError);
+	}
+
+	get lost(): boolean { return this.invalidated; }
+
+	onLost(listener: () => void): void {
+		if (this.invalidated) listener();
+		else this.listeners.add(listener);
+	}
+
+	async release(): Promise<void> {
+		if (this.released) return;
+		this.released = true;
+		this.listeners.clear();
+		this.client.off("error", this.handleError);
+		let failure: unknown;
+		try {
+			if (!this.invalidated) await this.client.query("SELECT pg_advisory_unlock($1)", [this.key]);
+		} catch (error) {
+			failure = error;
+		} finally {
+			this.client.release(failure instanceof Error ? failure : undefined);
+		}
+		if (failure) throw failure;
+	}
+}
+
+function durableStorageLockKey(tenantId: string, sessionId: string): string {
+	const digest = createHash("sha256").update(`durable\0${tenantId}\0${sessionId}`).digest();
+	return BigInt.asIntN(64, digest.readBigUInt64BE(0)).toString();
 }
 
 const JOB_RUN_LEASE_MS = 5 * 60_000;
@@ -171,6 +225,38 @@ export class TenantStore {
 			[kind],
 		);
 		return result.rows.map((row) => ({ tenantId: row.tenant_id, userId: row.user_id, role: "owner" }));
+	}
+
+	/** Serialize authenticated durable SQLite owners across server processes.
+	 * The dedicated connection is retained for the entire runtime lease. */
+	async acquireDurableStorageLock(
+		context: TenantContext,
+		sessionId: string,
+	): Promise<DurableStorageLock | null> {
+		const client = await this.pool.connect();
+		try {
+			const owned = await client.query(
+				`SELECT 1 FROM resource_ownership ownership
+				 JOIN tenant_memberships membership ON membership.tenant_id = ownership.tenant_id
+				 WHERE ownership.tenant_id = $1 AND ownership.resource_type = 'session'
+				   AND ownership.resource_id = $2 AND membership.user_id = $3`,
+				[context.tenantId, sessionId, context.userId],
+			);
+			if (owned.rowCount !== 1) throw new ResourceOwnershipError("session", sessionId);
+			const key = durableStorageLockKey(context.tenantId, sessionId);
+			const locked = await client.query<{ locked: boolean }>(
+				"SELECT pg_try_advisory_lock($1) AS locked",
+				[key],
+			);
+			if (locked.rows[0]?.locked !== true) {
+				client.release();
+				return null;
+			}
+			return new PostgresDurableStorageLock(client, key);
+		} catch (error) {
+			client.release(error instanceof Error ? error : undefined);
+			throw error;
+		}
 	}
 
 	/**

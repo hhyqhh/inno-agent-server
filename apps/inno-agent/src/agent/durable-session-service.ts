@@ -11,7 +11,7 @@ import { resolveCurrentTenantConfig } from "../tenants/config.js";
 import { runInTenantContext, runWithoutTenantContext } from "../tenants/current.js";
 import { getRequestTenant } from "../tenants/http.js";
 import { resolveRequestTenantDataRoot } from "../tenants/paths.js";
-import type { TenantStore } from "../tenants/store.js";
+import type { DurableStorageLock, TenantStore } from "../tenants/store.js";
 import { TOPIC_UPGRADE_MESSAGE_THRESHOLD, type SessionMessageSummary, type SessionSummary } from "../server/session-model.js";
 import {
 	buildAttachmentContext,
@@ -84,7 +84,14 @@ export interface PreparedDurableImages {
 
 interface RuntimeEntry {
 	runtime: DurableSessionRuntime;
+	storageLock?: DurableStorageLock;
 	references: number;
+	closePromise?: Promise<void>;
+}
+
+interface OpenedRuntime {
+	runtime: DurableSessionRuntime;
+	storageLock?: DurableStorageLock;
 }
 
 export interface DurableSessionServiceOptions {
@@ -125,8 +132,8 @@ export class DurableRuntimeDisabledError extends Error {
 }
 
 export class DurableSessionBusyError extends Error {
-	constructor() {
-		super("Durable session still has an active operation");
+	constructor(message = "Durable session still has an active operation") {
+		super(message);
 		this.name = "DurableSessionBusyError";
 	}
 }
@@ -169,7 +176,7 @@ function toSummary(record: DurableSessionRecord): DurableSessionSummary {
  * SQLite and is never represented as a legacy SessionManager JSONL file. */
 export class DurableSessionService {
 	private readonly runtimes = new Map<string, RuntimeEntry>();
-	private readonly openings = new Map<string, Promise<DurableSessionRuntime>>();
+	private readonly openings = new Map<string, Promise<OpenedRuntime>>();
 	private readonly questionStores = new Map<string, DurableQuestionStore>();
 	private readonly topicGenerations = new Map<string, Promise<DurableSessionSummary>>();
 	private readonly openRuntime: typeof DurableSessionRuntime.open;
@@ -560,6 +567,19 @@ export class DurableSessionService {
 		}
 	}
 
+	private closeRuntimeEntry(entry: RuntimeEntry): Promise<void> {
+		if (!entry.closePromise) {
+			entry.closePromise = (async () => {
+				try {
+					await entry.runtime.close();
+				} finally {
+					await entry.storageLock?.release();
+				}
+			})();
+		}
+		return entry.closePromise;
+	}
+
 	async lease(req: IncomingMessage, id: string): Promise<DurableSessionLease> {
 		if (!this.options.enabled) throw new DurableRuntimeDisabledError();
 		if (this.closing) throw new Error("Durable session service is shutting down");
@@ -571,77 +591,111 @@ export class DurableSessionService {
 			let opening = this.openings.get(key);
 			if (!opening) {
 				opening = (async () => {
-					const config = resolveCurrentTenantConfig(this.options.dataDir, this.options.getLocalConfig());
-					const selection = await createConfiguredDurableModels(config, {
-						provider: record.provider,
-						modelId: record.modelId,
-					});
-					const workspaceDir = this.options.resolveWorkspaceDir(id, record.workspaceId);
-					if (!workspaceDir) throw new Error(`Durable session workspace not found: ${record.workspaceId}`);
-					const tenantDataRoot = resolveRequestTenantDataRoot(req, this.options.dataDir);
-					const scopedL3 = new ScopedL3Memory(this.options.dataDir, join(this.options.dataDir, "sessions"));
 					const tenant = getRequestTenant(req);
-					if (tenant && !this.options.tenantStore) throw new Error("Authenticated durable L3 recall requires a tenant store");
-					const l3Memory = tenant
-						? {
-							recall: (query: string, excludeSessionId?: string) => runInTenantContext(
-								tenant,
-								this.options.tenantStore!,
-								() => scopedL3.recall(query, excludeSessionId),
-							),
-						}
-						: scopedL3;
-					const memory = {
-						sessionId: id,
-						learnerDataDir: join(tenantDataRoot, "learner"),
-						l2DataDir: join(tenantDataRoot, "l2"),
-						workspaceDir,
-						l1Enabled: config.memory?.l1Enabled !== false,
-						l2Enabled: config.memory?.l2Enabled !== false,
-						l3: { memory: l3Memory, enabled: config.memory?.l3Enabled !== false },
-					};
-					const ocr = {
-						sessionId: id,
-						checkpointDir: join(tenantDataRoot, "ocr"),
-						workspaceDir,
-						ocrApi: config.ocrApi,
-					};
-					const baseChannelRegistry = this.options.getChannelRegistry?.();
-					const channels = baseChannelRegistry ? {
-						sessionId: id,
-						outboxDir: join(tenantDataRoot, "channels", "outbox"),
-						workspaceDir,
-						channelRegistry: bindChannelRegistry(req, baseChannelRegistry, this.options.tenantStore),
-					} : undefined;
-					return this.openRuntime({
-						storagePath: this.storagePath(req, id),
-						...selection,
-						instructions: [
-							buildDurableInstructions(INNO_SYSTEM_PROMPT, memory),
-							...buildWorkspaceContextSections(workspaceDir),
-						].join("\n\n"),
-						workspaceDir,
-						readOnlyTools: true,
-						memory,
-						ocr,
-						channels,
-						questions: {
-							store: this.questionStore(req, id),
+					let storageLock: DurableStorageLock | undefined;
+					if (tenant) {
+						if (!this.options.tenantStore) throw new Error("Authenticated durable storage requires a tenant store");
+						storageLock = await this.options.tenantStore.acquireDurableStorageLock(tenant, id) ?? undefined;
+						if (!storageLock) throw new DurableSessionBusyError("Durable session is owned by another worker");
+					}
+					try {
+						const config = resolveCurrentTenantConfig(this.options.dataDir, this.options.getLocalConfig());
+						const selection = await createConfiguredDurableModels(config, {
+							provider: record.provider,
+							modelId: record.modelId,
+						});
+						const workspaceDir = this.options.resolveWorkspaceDir(id, record.workspaceId);
+						if (!workspaceDir) throw new Error(`Durable session workspace not found: ${record.workspaceId}`);
+						const tenantDataRoot = resolveRequestTenantDataRoot(req, this.options.dataDir);
+						const scopedL3 = new ScopedL3Memory(this.options.dataDir, join(this.options.dataDir, "sessions"));
+						const l3Memory = tenant
+							? {
+								recall: (query: string, excludeSessionId?: string) => runInTenantContext(
+									tenant,
+									this.options.tenantStore!,
+									() => scopedL3.recall(query, excludeSessionId),
+								),
+							}
+							: scopedL3;
+						const memory = {
+							sessionId: id,
+							learnerDataDir: join(tenantDataRoot, "learner"),
+							l2DataDir: join(tenantDataRoot, "l2"),
 							workspaceDir,
-						},
-					});
+							l1Enabled: config.memory?.l1Enabled !== false,
+							l2Enabled: config.memory?.l2Enabled !== false,
+							l3: { memory: l3Memory, enabled: config.memory?.l3Enabled !== false },
+						};
+						const ocr = {
+							sessionId: id,
+							checkpointDir: join(tenantDataRoot, "ocr"),
+							workspaceDir,
+							ocrApi: config.ocrApi,
+						};
+						const baseChannelRegistry = this.options.getChannelRegistry?.();
+						const channels = baseChannelRegistry ? {
+							sessionId: id,
+							outboxDir: join(tenantDataRoot, "channels", "outbox"),
+							workspaceDir,
+							channelRegistry: bindChannelRegistry(req, baseChannelRegistry, this.options.tenantStore),
+						} : undefined;
+						const runtime = await this.openRuntime({
+							storagePath: this.storagePath(req, id),
+							...selection,
+							instructions: [
+								buildDurableInstructions(INNO_SYSTEM_PROMPT, memory),
+								...buildWorkspaceContextSections(workspaceDir),
+							].join("\n\n"),
+							workspaceDir,
+							readOnlyTools: true,
+							memory,
+							ocr,
+							channels,
+							questions: {
+								store: this.questionStore(req, id),
+								workspaceDir,
+							},
+						});
+						return { runtime, ...(storageLock ? { storageLock } : {}) };
+					} catch (error) {
+						await storageLock?.release().catch((releaseError) => {
+							logger.error({ err: releaseError, sessionId: id }, "failed to release durable storage lock after open failure");
+						});
+						throw error;
+					}
 				})();
 				this.openings.set(key, opening);
 			}
 			try {
-				const runtime = await opening;
-				entry = this.runtimes.get(key) ?? { runtime, references: 0 };
+				const opened = await opening;
+				if (this.closing) {
+					await opened.runtime.close().catch(() => undefined);
+					await opened.storageLock?.release();
+					throw new Error("Durable session service is shutting down");
+				}
+				entry = this.runtimes.get(key) ?? {
+					runtime: opened.runtime,
+					...(opened.storageLock ? { storageLock: opened.storageLock } : {}),
+					references: 0,
+				};
 				this.runtimes.set(key, entry);
+				const openedEntry = entry;
+				opened.storageLock?.onLost(() => {
+					if (this.runtimes.get(key) !== openedEntry) return;
+					this.runtimes.delete(key);
+					void this.closeRuntimeEntry(openedEntry).catch((error) => {
+						logger.error({ err: error, sessionId: id }, "failed to close runtime after durable storage lock loss");
+					});
+				});
+				if (this.runtimes.get(key) !== entry) {
+					throw new DurableSessionBusyError("Durable session lost its storage ownership while opening");
+				}
 			} finally {
 				this.openings.delete(key);
 			}
 		}
 		entry.references += 1;
+		const leasedEntry = entry;
 		let released = false;
 		return {
 			runtime: entry.runtime,
@@ -649,11 +703,14 @@ export class DurableSessionService {
 				if (released) return;
 				released = true;
 				const current = this.runtimes.get(key);
-				if (!current) return;
+				if (current !== leasedEntry) {
+					await leasedEntry.closePromise;
+					return;
+				}
 				current.references -= 1;
 				if (current.references <= 0) {
 					this.runtimes.delete(key);
-					await current.runtime.close();
+					await this.closeRuntimeEntry(current);
 				}
 			},
 		};
@@ -667,7 +724,7 @@ export class DurableSessionService {
 		const entry = this.runtimes.get(key);
 		if (entry) {
 			this.runtimes.delete(key);
-			await entry.runtime.close();
+			await this.closeRuntimeEntry(entry);
 		}
 		this.writeCatalog(req, this.catalog(req).filter((record) => record.id !== id));
 		this.questionStores.delete(key);
@@ -689,6 +746,6 @@ export class DurableSessionService {
 		this.openings.clear();
 		this.questionStores.clear();
 		this.topicGenerations.clear();
-		await Promise.all(entries.map((entry) => entry.runtime.close().catch(() => undefined)));
+		await Promise.all(entries.map((entry) => this.closeRuntimeEntry(entry).catch(() => undefined)));
 	}
 }

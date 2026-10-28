@@ -1,6 +1,6 @@
 # Durable runtime migration
 
-## Current stage: cross-restart SSE recovery (3S)
+## Current stage: cross-process storage ownership (3T)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI
 packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
@@ -53,7 +53,8 @@ the SQLite storage, rebuilding model/auth configuration at execution time.
 The current durable slice supports:
 
 - one SQLite database per durable session, with a process-local double-open
-  guard and application-level idle leases;
+  guard, application-level idle leases, and an authenticated PostgreSQL advisory
+  lock held for each open runtime's lifetime;
 - durable admission, submission reacquisition, and `resume()` on reopen;
 - concurrent independent sessions without the legacy global prompt queue;
 - committed snapshots and existing Inno history/SSE event shapes;
@@ -273,10 +274,23 @@ Crash recovery remains at-least-once at the occurrence/model/external-delivery
 boundaries; this stage does not make deferred countdowns or scheduler ledgers
 cross-process durable queues.
 
-One durable storage has **one owner at a time**. The in-process guard does not
-replace deployment routing, lease/fencing, or an ordered old-owner shutdown.
-Never mount the same SQLite database into active-active workers or share it
-through NFS.
+One durable storage has **one owner at a time**. In authenticated mode,
+`TenantStore.acquireDurableStorageLock()` additionally holds a session-level
+PostgreSQL advisory lock on a dedicated connection before opening SQLite. A
+second process cannot acquire that session until the first runtime closes and
+unlocks it; process death releases the lock when PostgreSQL drops the connection.
+A lock-connection error invalidates and closes the old runtime instead of leaving
+it active without its ownership guard. Local mode retains the process-local
+double-open guard and remains single-process.
+
+The advisory lock has no expiry-based takeover: a paused old owner must not lose
+its lock merely because a timer elapsed. It prevents accidental concurrent opens
+while PostgreSQL connectivity is healthy, but it is **not storage-level fencing
+against every network partition**. It does not provide tenant routing, automatic
+failover, or permission to mount one SQLite database into active-active workers
+or through NFS. Sharded deployment still requires a unique conversation owner,
+per-shard RWO storage, ordered old-owner shutdown, and an explicitly fenced
+failure-takeover procedure.
 
 ## SSE is an application projection
 
@@ -345,7 +359,8 @@ and cancelled questions that stay resolved. No paid model endpoint or real
 external channel is used.
 
 The real-PostgreSQL integration suite additionally covers explicit HTTP
-creation, concurrent authenticated durable sessions, per-tenant provider and
+creation, concurrent authenticated durable sessions, PostgreSQL advisory-lock
+contention/release and runtime invalidation on lock loss, per-tenant provider and
 OCR Authorization headers, cross-tenant 404s, completed request-ID retries,
 lack of legacy JSONL creation, SSE disconnect/reconnect replay, HTTP SIGKILL/restart
 recovery of an admitted SSE turn with contiguous event IDs and no duplicate user
@@ -367,4 +382,5 @@ runtime validation, scheduler-origin history, tenant channel delivery, and mixed
 durable/legacy deferred execution with per-tenant credentials, owned workspaces,
 run ledgers, and claim cleanup.
 
-Still pending: durable permissions and sharded single-owner deployment.
+Still pending: durable permissions, tenant/conversation routing, per-shard RWO
+storage, and ordered/fenced failure takeover for sharded single-owner deployment.

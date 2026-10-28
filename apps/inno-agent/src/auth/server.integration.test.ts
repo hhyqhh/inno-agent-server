@@ -1091,10 +1091,13 @@ describe("tenant background execution", () => {
 			configure(cookieB, "background-b-secret", "background-token-b", sidecarOriginB, "background-chat-b"),
 		]);
 		const createJob = async (cookie: string, name: string, prompt: string, runtime?: "legacy" | "durable") => {
+			// Use the next UTC minute, not every minute. The test still exercises the
+			// real cron/deferred path without arming another slot during its cleanup.
+			const scheduled = new Date(Date.now() + 60_000);
 			const response = await api(cookie, "/api/jobs", {
 				method: "POST",
 				body: JSON.stringify({
-					name, cron: "* * * * *", timezone: "UTC", enabled: true,
+					name, cron: `${scheduled.getUTCMinutes()} ${scheduled.getUTCHours()} * * *`, timezone: "UTC", enabled: true,
 					taskType: "custom_prompt", prompt, channel: "qq", runtime,
 				}),
 			});
@@ -1116,17 +1119,6 @@ describe("tenant background execution", () => {
 		expect((await api(cookieB, `/api/jobs/${jobB.id}`, {
 			method: "PATCH", body: JSON.stringify({ enabled: false }),
 		})).status).toBe(200);
-		// A minute boundary can arm the next countdown before the first run is
-		// observed. Settle only this test's extra occurrences instead of letting
-		// their deferred claims outlive the assertions.
-		for (const [cookie, jobId] of [[cookieA, jobA.id], [cookieB, jobB.id]] as const) {
-			const pending = await (await api(cookie, "/api/checkins/pending-runs")).json() as Array<{ jobId: string; occurrenceId: string }>;
-			for (const run of pending.filter((run) => run.jobId === jobId)) {
-				expect((await api(cookie, "/api/checkins/skip", {
-					method: "POST", body: JSON.stringify({ occurrenceId: run.occurrenceId }),
-				})).status).toBe(200);
-			}
-		}
 		await waitFor(async () => {
 			for (const [cookie, jobId] of [[cookieA, jobA.id], [cookieB, jobB.id]] as const) {
 				const runs = await (await api(cookie, "/api/jobs/runs")).json() as Array<{ jobId: string; status: string }>;

@@ -25,7 +25,9 @@ export interface DurableHttpContext {
 }
 
 function errorStatus(error: unknown): number {
-	return error instanceof DurableRuntimeDisabledError ? 503 : 500;
+	if (error instanceof DurableRuntimeDisabledError) return 503;
+	if (error instanceof DurableSessionBusyError) return 409;
+	return 500;
 }
 
 interface DurableStreamContext {

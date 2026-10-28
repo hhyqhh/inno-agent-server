@@ -96,6 +96,25 @@ describe("personal tenant store", () => {
 		await afterRelease!.release();
 	});
 
+	it("holds one durable storage owner until its connection releases", async () => {
+		const a = await store.ensurePersonalTenant("user-a");
+		const b = await store.ensurePersonalTenant("user-b");
+		await store.claimResource(a, "session", "durable-lock-test");
+		const first = await store.acquireDurableStorageLock(a, "durable-lock-test");
+		expect(first).not.toBeNull();
+		const competitors = await Promise.all(Array.from({ length: 8 }, () =>
+			store.acquireDurableStorageLock(a, "durable-lock-test"),
+		));
+		expect(competitors.every((lock) => lock === null)).toBe(true);
+		await expect(store.acquireDurableStorageLock(b, "durable-lock-test"))
+			.rejects.toBeInstanceOf(ResourceOwnershipError);
+		await first!.release();
+		await first!.release();
+		const second = await store.acquireDurableStorageLock(a, "durable-lock-test");
+		expect(second).not.toBeNull();
+		await second!.release();
+	});
+
 	it("supports non-writing dry runs, idempotent backfill and ownership conflicts", async () => {
 		const resources = { sessions: ["legacy-session"], workspaces: ["legacy-workspace"] };
 		const dry = await store.migrateLegacyResources("user-c", resources, true);
