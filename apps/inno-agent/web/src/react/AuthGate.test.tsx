@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthGate } from "./AuthGate.js";
+import { sessionsStore } from "../stores/sessions-store.js";
 import "../i18n/index.js";
 
 function sessionResponse(body: unknown): Response {
@@ -13,16 +14,18 @@ function sessionResponse(body: unknown): Response {
 
 afterEach(() => {
 	cleanup();
+	sessionsStore.durableEnabled = false;
 	vi.unstubAllGlobals();
 });
 
 describe("AuthGate", () => {
 	it("renders local mode without requiring an account", async () => {
 		vi.stubGlobal("fetch", vi.fn().mockResolvedValue(sessionResponse({
-			mode: "local", allowSignUp: false, user: null,
+			mode: "local", allowSignUp: false, durableEnabled: true, user: null,
 		})));
 		render(<AuthGate><div>protected app</div></AuthGate>);
 		expect(await screen.findByText("protected app")).toBeTruthy();
+		expect(sessionsStore.durableEnabled).toBe(true);
 		expect(fetch).toHaveBeenCalledTimes(1);
 	});
 

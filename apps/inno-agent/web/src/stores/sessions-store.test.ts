@@ -90,9 +90,30 @@ describe("SessionsStore navigation", () => {
 		mocks.createSession.mockResolvedValue({ id: "created.jsonl", active: true, workspaceId: "workspace-1" });
 		const store = new SessionsStoreImpl();
 		await store.createSessionWith({ workspaceId: "workspace-1" });
+		expect(mocks.createSession).toHaveBeenCalledWith({ workspaceId: "workspace-1" });
 		expect(store.currentSessionId).toBe("created.jsonl");
 		expect(new URL(window.location.href).searchParams.get("session")).toBe("created.jsonl");
 		expect(window.history.replaceState).toHaveBeenCalled();
+	});
+
+	it("defaults new UI sessions to durable when the server enables it", async () => {
+		mocks.createSession.mockResolvedValue({ id: "durable-created", active: true, runtime: "durable" });
+		const store = new SessionsStoreImpl();
+		store.durableEnabled = true;
+		await store.createSessionWith({ workspaceId: "workspace-1" });
+		expect(mocks.createSession).toHaveBeenCalledWith({ workspaceId: "workspace-1", runtime: "durable" });
+		await store.createSessionWith({ newWorkspace: { isTemp: true } });
+		expect(mocks.createSession).toHaveBeenCalledWith({ newWorkspace: { isTemp: true }, runtime: "durable" });
+		await store.createSessionWith({ presetId: "lesson-plan" });
+		expect(mocks.createSession).toHaveBeenCalledWith({ presetId: "lesson-plan" });
+	});
+
+	it("keeps an explicit legacy runtime selection when durable is enabled", async () => {
+		mocks.createSession.mockResolvedValue({ id: "created.jsonl", active: true, runtime: "legacy" });
+		const store = new SessionsStoreImpl();
+		store.durableEnabled = true;
+		await store.createSessionWith({ runtime: "legacy" });
+		expect(mocks.createSession).toHaveBeenCalledWith({ runtime: "legacy" });
 	});
 
 	it("signals context usage after the session runtime is activated", async () => {

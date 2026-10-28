@@ -53,6 +53,8 @@ export class SessionsStoreImpl extends EventEmitter<SessionsStoreEvents> {
 	sessions: SessionMeta[] = [];
 	currentSessionId: string | null = null;
 	isLoading = false;
+	/** Set from the server session probe; new UI sessions opt into durable when available. */
+	durableEnabled = false;
 	openingSessionId: string | null = null;
 	/** Incremented after the backend runtime finishes activating a session so
 	 * context-usage can make one definitive refresh after navigation. */
@@ -384,6 +386,9 @@ export class SessionsStoreImpl extends EventEmitter<SessionsStoreEvents> {
 	 * Create a session bound to a specific workspace (or new workspace), then open it.
 	 */
 	async createSessionWith(input: CreateSessionInput = {}): Promise<void> {
+		const createInput = input.runtime === undefined && this.durableEnabled && !input.presetId
+			? { ...input, runtime: "durable" as const }
+			: input;
 		this.isLoading = true;
 		this.pendingNewSession = false;
 		this.preselectedWorkspaceId = null;
@@ -399,7 +404,7 @@ export class SessionsStoreImpl extends EventEmitter<SessionsStoreEvents> {
 			// Server answers 409 session_busy within ~8s when another session's
 			// turn holds the queue; the 45s ceiling is only a last-resort guard
 			// (first-time preset downloads can legitimately take a while).
-			const created = await withTimeout(createSession(input), 45_000, "创建会话超时，请重试");
+			const created = await withTimeout(createSession(createInput), 45_000, "创建会话超时，请重试");
 			this.busyBlocker = null;
 			this._lastCreateInput = null;
 			this._messageCache.clear();
@@ -424,7 +429,7 @@ export class SessionsStoreImpl extends EventEmitter<SessionsStoreEvents> {
 					turnId: blocking.turnId,
 					questionPending: blocking.questionPending === true,
 				};
-				this._lastCreateInput = input;
+				this._lastCreateInput = createInput;
 			} else {
 				// ChatWelcome's preset cards own the inline error and stale-card
 				// removal. Re-throw preset failures so they can distinguish them

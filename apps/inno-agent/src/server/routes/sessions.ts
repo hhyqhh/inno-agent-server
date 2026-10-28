@@ -639,12 +639,20 @@ export async function handleSessionsRoutes(
 		}
 		if (body.runtime === "durable") {
 			if (!durableSessions) { json(res, 503, { error: "Durable session service is unavailable" }); return true; }
-			if (presetId || newWorkspaceSpec) {
-				json(res, 400, { error: "Durable session creation does not yet support presets or newWorkspace" });
+			if (presetId) {
+				json(res, 400, { error: "Durable session creation does not yet support presets" });
 				return true;
 			}
-			const workspace = await resolveRequestWorkspace(req, workspaceRegistry, tenantStore, explicitWorkspaceId || TEMP_WORKSPACE_ID);
+			const workspace = newWorkspaceSpec && !newWorkspaceSpec.isTemp
+				? workspaceRegistry.createWorkspace({
+					name: typeof newWorkspaceSpec.name === "string" ? newWorkspaceSpec.name : undefined,
+					isTemp: false,
+				})
+				: await resolveRequestWorkspace(req, workspaceRegistry, tenantStore, explicitWorkspaceId || TEMP_WORKSPACE_ID);
 			if (!workspace) { json(res, 404, { error: "Workspace not found" }); return true; }
+			if (newWorkspaceSpec && !newWorkspaceSpec.isTemp) {
+				await claimRequestResource(req, tenantStore, "workspace", workspace.id);
+			}
 			let createdId = "";
 			let claimed = false;
 			try {

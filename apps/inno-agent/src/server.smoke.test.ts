@@ -165,6 +165,12 @@ describe("server smoke", () => {
 		expect(await res.json()).toEqual({ status: "ok" });
 	});
 
+	it("GET /api/session reports that durable is disabled by default", async () => {
+		const res = await api("/api/session");
+		expect(res.status).toBe(200);
+		expect(await res.json()).toMatchObject({ mode: "local", durableEnabled: false });
+	});
+
 	it("GET /api/settings returns 200 with provider API keys redacted", async () => {
 		const res = await api("/api/settings");
 		expect(res.status).toBe(200);

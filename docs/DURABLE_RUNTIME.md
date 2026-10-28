@@ -7,8 +7,9 @@ packages. Node.js **22.19.0 or newer** is required. The isolated host lives in
 `apps/inno-agent/src/agent/durable-runtime.ts`; the application catalog and
 runtime leases live in `durable-session-service.ts`.
 
-Durable execution is disabled by default. Set `INNO_DURABLE_ENABLED=true`, then
-create a session explicitly:
+Durable execution is disabled by default. Set `INNO_DURABLE_ENABLED=true` to
+make the Web UI default new non-preset sessions to durable. The explicit HTTP
+creation contract is:
 
 ```http
 POST /api/sessions
@@ -18,10 +19,11 @@ Content-Type: application/json
 ```
 
 An owned existing `workspaceId` may be supplied. The authenticated temporary
-workspace fallback is also supported. `presetId` and `newWorkspace` are not yet
-supported on this creation path. Omitting `runtime`, or passing `"legacy"`,
-keeps the existing PI `SessionManager` JSONL behavior. Historical JSONL is never
-migrated or opened as durable storage.
+workspace fallback and `newWorkspace` (temporary or named) are also supported.
+`presetId` is not yet supported on this creation path, so preset cards continue
+to create legacy sessions. Omitting `runtime`, or passing `"legacy"`, keeps the
+existing PI `SessionManager` JSONL behavior. Historical JSONL is never migrated
+or opened as durable storage.
 
 Durable IDs have the form `durable-<uuid>` and never pass through legacy
 `.jsonl` filename helpers. Each tenant has its own application catalog and

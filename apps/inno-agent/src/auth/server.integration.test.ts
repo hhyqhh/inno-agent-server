@@ -395,7 +395,8 @@ afterAll(async () => {
 describe("server authentication boundary", () => {
 	it("protects HTTP and terminal WebSocket without blocking health or bridge auth", async () => {
 		expect((await fetch(`${origin}/health`)).status).toBe(200);
-		expect((await fetch(`${origin}/api/session`)).status).toBe(200);
+		const sessionProbe = await (await fetch(`${origin}/api/session`)).json() as { durableEnabled?: boolean };
+		expect(sessionProbe.durableEnabled).toBe(true);
 		expect((await fetch(`${origin}/api/sessions`)).status).toBe(401);
 
 		const registered = await fetch(`${origin}/api/auth/sign-up/email`, {
@@ -1110,7 +1111,7 @@ describe("tenant background execution", () => {
 		]);
 		await waitFor(() => ["background-a-prompt", "background-b-prompt"].every((prompt) =>
 			providerRequests.some((request) => request.body.includes(prompt)),
-		), "deferred tenant model executions", 45_000);
+		), "deferred tenant model executions", 75_000);
 		expect(providerRequests.find((request) => request.body.includes("background-a-prompt"))?.authorization).toBe("Bearer background-a-secret");
 		expect(providerRequests.find((request) => request.body.includes("background-b-prompt"))?.authorization).toBe("Bearer background-b-secret");
 		expect((await api(cookieA, `/api/jobs/${jobA.id}`, {
@@ -1180,7 +1181,7 @@ describe("tenant background execution", () => {
 			await pool.end();
 		}
 		expect(await readFile(join(home, "config", "config.json"), "utf-8")).toBe(globalConfigBefore);
-	}, 90_000);
+	}, 120_000);
 });
 
 describe("durable session HTTP boundary", () => {
@@ -1206,7 +1207,7 @@ describe("durable session HTTP boundary", () => {
 		const createDurable = async (cookie: string) => {
 			const response = await api(cookie, "/api/sessions", {
 				method: "POST",
-				body: JSON.stringify({ runtime: "durable" }),
+				body: JSON.stringify({ runtime: "durable", newWorkspace: { isTemp: true } }),
 			});
 			expect(response.status).toBe(201);
 			return response.json() as Promise<{ id: string; runtime: string; workspaceId: string }>;

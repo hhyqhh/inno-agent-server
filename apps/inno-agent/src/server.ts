@@ -1703,6 +1703,7 @@ const server = createServer(async (req, response) => {
 			json(res, 200, {
 				mode: auth.mode,
 				allowSignUp: auth.allowSignUp,
+				durableEnabled: durableSessions.enabled,
 				user: session?.principal ?? null,
 			});
 			return;
