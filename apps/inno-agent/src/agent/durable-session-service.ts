@@ -24,7 +24,7 @@ import {
 	mergeSessionAttachments,
 	recordSessionAttachments,
 } from "../server/attachments-store.js";
-import { clearWorkspaceActivity, recordWorkspaceAttachmentActivity, recordWorkspaceFileAccess } from "../server/workspace-activity-store.js";
+import { clearWorkspaceActivity, markWorkspaceTrackingIncomplete, recordWorkspaceAttachmentActivity, recordWorkspaceFileAccess } from "../server/workspace-activity-store.js";
 import { buildImagePathsHint, parseInlineImages, persistInlineImages } from "../server/inline-images.js";
 import { fallbackTopicFromMessages, generateSessionTopicWithCompletion } from "../server/session-topic.js";
 import { completeConfiguredDurablePrompt, createConfiguredDurableModels } from "./durable-models.js";
@@ -487,6 +487,26 @@ export class DurableSessionService {
 				access: "write",
 			});
 		}
+	}
+
+	recordWorkspaceWriteActivity(
+		req: IncomingMessage,
+		id: string,
+		workspaceId: string,
+		workspaceRoot: string,
+		paths: string[],
+		trackingIncomplete: boolean,
+	): void {
+		const dataRoot = resolveRequestTenantDataRoot(req, this.options.dataDir);
+		if (trackingIncomplete) markWorkspaceTrackingIncomplete(dataRoot, id);
+		if (paths.length === 0) return;
+		recordWorkspaceFileAccess(dataRoot, {
+			sessionId: id,
+			workspaceId,
+			workspaceRoot,
+			paths,
+			access: "write",
+		});
 	}
 
 	/** Build threshold-gated recall as separate model-only input. The visible

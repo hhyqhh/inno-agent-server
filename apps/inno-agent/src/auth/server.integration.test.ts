@@ -173,6 +173,32 @@ beforeAll(async () => {
 			if (body.includes("durable-restart-prompt")) {
 				await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
 			}
+			if (body.includes("durable-workspace-write")) {
+				const request = JSON.parse(body) as { messages?: Array<{ role?: string }> };
+				const toolResults = request.messages?.filter((message) => message.role === "tool").length ?? 0;
+				if (toolResults === 0) {
+					res.writeHead(200, { "Content-Type": "text/event-stream" });
+					res.end([
+						`data: ${JSON.stringify({
+							id: "tenant-stub", object: "chat.completion.chunk", created: 0, model: "tenant-model",
+							choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{
+								index: 0, id: "durable-workspace-write-call", type: "function",
+								function: { name: "write", arguments: JSON.stringify({ path: "nested/durable-preview.txt", content: "durable preview content" }) },
+							}] }, finish_reason: null }],
+						})}`,
+						"",
+						`data: ${JSON.stringify({
+							id: "tenant-stub", object: "chat.completion.chunk", created: 0, model: "tenant-model",
+							choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+						})}`,
+						"",
+						"data: [DONE]",
+						"",
+						"",
+					].join("\n"));
+					return;
+				}
+			}
 			const questionPrompt = body.includes("durable-question");
 			if (questionPrompt) {
 				const request = JSON.parse(body) as { messages?: Array<{ role?: string }> };
@@ -1282,6 +1308,52 @@ describe("durable session HTTP boundary", () => {
 		};
 		expect(recovered.messages.some((message) => message.role === "user" && message.content === "durable-reconnect")).toBe(true);
 		expect(recovered.messages.some((message) => message.role === "assistant" && message.content === "tenant stub response")).toBe(true);
+	}, 60_000);
+
+	it("emits workspace changes and records file activity for durable writes", async () => {
+		const cookie = await registerUser("durable-workspace-write@example.com");
+		expect((await api(cookie, "/api/settings/providers", {
+			method: "PUT",
+			body: JSON.stringify({
+				providerId: "shared", baseUrl: providerOrigin, apiKey: "durable-workspace-write-secret",
+				api: "openai-completions", makeDefault: true,
+				models: [{ id: "tenant-model", name: "Tenant model", contextWindow: 32_000, maxTokens: 2_000 }],
+			}),
+		})).status).toBe(200);
+		const created = await api(cookie, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ runtime: "durable", newWorkspace: { isTemp: true } }),
+		});
+		expect(created.status).toBe(201);
+		const session = await created.json() as { id: string; workspaceId: string };
+		const response = await api(cookie, "/api/chat/stream", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId: session.id,
+				prompt: "durable-workspace-write",
+				clientRequestId: "durable-workspace-write-request",
+			}),
+		});
+		expect(response.status).toBe(200);
+		const streamed = await response.text();
+		expect(streamed).toContain('"type":"workspace_change"');
+		expect(streamed).toContain('"toolName":"write"');
+		expect(streamed).toContain('"path":"nested/durable-preview.txt"');
+		expect(streamed).toContain(`"workspaceId":"${session.workspaceId}"`);
+		expect(streamed).toContain('"type":"done"');
+		const file = await api(cookie, `/api/workspace/file?path=${encodeURIComponent("nested/durable-preview.txt")}&workspaceId=${encodeURIComponent(session.workspaceId)}`);
+		expect(file.status).toBe(200);
+		expect(await file.json()).toMatchObject({ path: "nested/durable-preview.txt", content: "durable preview content" });
+
+		const tenantIds = await readdir(join(home, "data", "tenants"));
+		const activityFiles = await Promise.all(tenantIds.map(async (tenantId) => {
+			try {
+				return await readFile(join(home, "data", "tenants", tenantId, "sessions", "workspace-activity.json"), "utf-8");
+			} catch {
+				return "";
+			}
+		}));
+		const activity = activityFiles.find((content) => content.includes(session.id)) ?? "";
+		expect(activity).toContain("nested/durable-preview.txt");
 	}, 60_000);
 
 	it("streams manual durable jobs and validates explicit runtime selection", async () => {

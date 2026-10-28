@@ -17,6 +17,7 @@ import { releaseRequestResource } from "../tenants/http.js";
 import type { TenantStore } from "../tenants/store.js";
 import type { WorkspaceRegistry } from "../workspace/workspace-registry.js";
 import { json, matchRoute, readBody } from "./http-helpers.js";
+import { createWorkspaceChangeMonitor } from "./workspace-change-monitor.js";
 
 export interface DurableHttpContext {
 	service: DurableSessionService;
@@ -205,6 +206,11 @@ async function streamDurableTurn(
 	const projector = new DurableSseProjector();
 	let lease: Awaited<ReturnType<DurableSessionService["lease"]>> | undefined;
 	let stream: { stop(): Promise<unknown> } | undefined;
+	let workspaceMonitor: ReturnType<typeof createWorkspaceChangeMonitor>;
+	const closeWorkspaceMonitor = () => {
+		workspaceMonitor?.close();
+		workspaceMonitor = null;
+	};
 	try {
 		const journal = store.load(state.sessionId, state.turnId);
 		if (!journal) throw new Error("Durable stream journal not found");
@@ -213,10 +219,40 @@ async function streamDurableTurn(
 			turnId: state.turnId,
 			emit: (event) => publishDurableEvent(context, event),
 		});
+		workspaceMonitor = createWorkspaceChangeMonitor(state.workspaceRoot, (event) => {
+			const changeEvent = event as {
+				type: string;
+				changes?: Array<{ path?: unknown }>;
+				truncated?: boolean;
+			};
+			const paths = (changeEvent.changes ?? [])
+				.map((change) => typeof change.path === "string" ? change.path : "")
+				.filter(Boolean);
+			try {
+				service.recordWorkspaceWriteActivity(
+					req,
+					state.sessionId,
+					state.workspaceId,
+					state.workspaceRoot,
+					paths,
+					changeEvent.truncated === true,
+				);
+			} catch (error) {
+				logger.warn({ err: error, sessionId: state.sessionId, turnId: state.turnId }, "durable workspace activity write failed");
+			}
+			if (!state.terminalEventPublished) {
+				publishDurableEvent(context, { ...changeEvent, workspaceId: state.workspaceId } as ChatStreamEvent);
+			}
+		});
 		const activeStream = await lease.runtime.watch(async (events) => {
 			if (state.terminalEventPublished) return;
 			for (const event of events) {
 				for (const projected of projector.project(event)) {
+					if (projected.type === "tool_end"
+						&& typeof projected.toolCallId === "string"
+						&& typeof projected.toolName === "string") {
+						workspaceMonitor?.noteToolEnd(projected.toolCallId, projected.toolName);
+					}
 					// A watch snapshot is useful to native durable consumers but is not
 					// an Inno historical replay event. Canonical history is reloaded on done.
 					if (projected.type === "durable_snapshot") continue;
@@ -246,6 +282,7 @@ async function streamDurableTurn(
 		const result = await lease.runtime.waitForSubmission(submissionId);
 		await activeStream.stop();
 		stream = undefined;
+		closeWorkspaceMonitor();
 		await lease.release();
 		lease = undefined;
 		const detail = await service.snapshot(req, state.sessionId);
@@ -305,6 +342,7 @@ async function streamDurableTurn(
 			}
 		}
 	} finally {
+		closeWorkspaceMonitor();
 		if (stream) await stream.stop().catch(() => undefined);
 		if (lease) {
 			lease.runtime.unbindQuestionTurn(state.turnId);

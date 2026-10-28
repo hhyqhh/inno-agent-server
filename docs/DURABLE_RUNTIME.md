@@ -64,6 +64,8 @@ The current durable slice supports:
   original-submission recovery after a process restart;
 - workspace-contained `read`, `write`, and exact-replacement `edit` tools,
   including automatic parent creation and canonical symlink containment;
+  streaming turns emit `workspace_change` events and persist tenant-local file
+  activity so the existing workspace UI refreshes written files;
 - replay-safe, tenant-local L1 context/event/evidence tools, direct profile
   patch/update mutations, and L2 archive, query, and lint tools;
 - tenant-local L1 profile/recent-event context in durable instructions;
@@ -377,7 +379,8 @@ and cancelled questions that stay resolved. No paid model endpoint or real
 external channel is used.
 
 The real-PostgreSQL integration suite additionally covers explicit HTTP
-creation, concurrent authenticated durable sessions, PostgreSQL advisory-lock
+creation, concurrent authenticated durable sessions, durable workspace writes with
+SSE `workspace_change` events and tenant-local file activity, PostgreSQL advisory-lock
 contention/release and runtime invalidation on lock loss, per-tenant provider and
 OCR Authorization headers, cross-tenant 404s, completed request-ID retries,
 lack of legacy JSONL creation, SSE disconnect/reconnect replay, HTTP SIGKILL/restart
