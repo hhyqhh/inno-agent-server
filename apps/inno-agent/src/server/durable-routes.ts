@@ -282,6 +282,7 @@ async function streamDurableTurn(
 		const result = await lease.runtime.waitForSubmission(submissionId);
 		await activeStream.stop();
 		stream = undefined;
+		await workspaceMonitor?.settle();
 		closeWorkspaceMonitor();
 		await lease.release();
 		lease = undefined;

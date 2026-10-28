@@ -10,6 +10,8 @@ export interface WorkspaceFileChange {
 
 export interface WorkspaceChangeMonitor {
 	noteToolEnd(toolCallId: string, toolName: string): void;
+	/** Allow the final filesystem notifications to arrive before terminal SSE. */
+	settle(): Promise<void>;
 	close(): void;
 }
 
@@ -88,6 +90,11 @@ export function createWorkspaceChangeMonitor(
 		noteToolEnd(toolCallId, toolName) {
 			context = { toolCallId, toolName };
 			scheduleFlush();
+		},
+		async settle() {
+			if (closed) return;
+			await new Promise((resolveWait) => setTimeout(resolveWait, WORKSPACE_CHANGE_SETTLE_MS));
+			flush();
 		},
 		close() {
 			closed = true;
