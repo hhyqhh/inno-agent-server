@@ -637,49 +637,9 @@ export async function handleSessionsRoutes(
 			json(res, 400, { error: "runtime must be legacy or durable" });
 			return true;
 		}
-		if (body.runtime === "durable") {
-			if (!durableSessions) { json(res, 503, { error: "Durable session service is unavailable" }); return true; }
-			if (presetId) {
-				json(res, 400, { error: "Durable session creation does not yet support presets" });
-				return true;
-			}
-			const workspace = newWorkspaceSpec && !newWorkspaceSpec.isTemp
-				? workspaceRegistry.createWorkspace({
-					name: typeof newWorkspaceSpec.name === "string" ? newWorkspaceSpec.name : undefined,
-					isTemp: false,
-				})
-				: await resolveRequestWorkspace(req, workspaceRegistry, tenantStore, explicitWorkspaceId || TEMP_WORKSPACE_ID);
-			if (!workspace) { json(res, 404, { error: "Workspace not found" }); return true; }
-			if (newWorkspaceSpec && !newWorkspaceSpec.isTemp) {
-				await claimRequestResource(req, tenantStore, "workspace", workspace.id);
-			}
-			let createdId = "";
-			let claimed = false;
-			try {
-				const summary = durableSessions.create(req, { workspaceId: workspace.id });
-				createdId = summary.id;
-				if (!workspaceRegistry.bindSession(summary.id, workspace.id)) throw new Error("Workspace not found");
-				await claimRequestResource(req, tenantStore, "session", summary.id);
-				claimed = true;
-				json(res, 201, { id: summary.id, active: true, workspaceId: workspace.id, runtime: "durable" });
-			} catch (error) {
-				if (createdId) {
-					await durableSessions.delete(req, createdId).catch(() => undefined);
-					workspaceRegistry.unbindSession(createdId);
-					if (claimed) await releaseRequestResource(req, tenantStore, "session", createdId).catch(() => undefined);
-				}
-				json(res, error instanceof Error && error.name === "DurableRuntimeDisabledError" ? 400 : 500, {
-					error: error instanceof Error ? error.message : String(error),
-				});
-			}
-			return true;
-		}
-
-		// Validate stale preset cards before creating a session. A preset that has
-		// already been loaded keeps working through its stable workspace even if
-		// the remote catalog later removes it. New cards still require a current
-		// catalog entry; if the hub is temporarily unreachable,
-		// ensurePresetAvailable can still use an existing cache.
+		// Validate stale preset cards before creating either runtime. A preset that
+		// has already been loaded keeps working through its stable workspace even
+		// if the remote catalog later removes it.
 		if (presetId && !existingPresetWorkspace) {
 			try {
 				await ensurePresetAvailable(
@@ -706,6 +666,42 @@ export async function handleSessionsRoutes(
 				}
 				return true;
 			}
+		}
+
+		if (body.runtime === "durable") {
+			if (!durableSessions) { json(res, 503, { error: "Durable session service is unavailable" }); return true; }
+			const workspace = presetId
+				? existingPresetWorkspace ?? instantiatePreset(paths, workspaceRegistry, presetId, tenant?.tenantId)
+				: newWorkspaceSpec && !newWorkspaceSpec.isTemp
+					? workspaceRegistry.createWorkspace({
+						name: typeof newWorkspaceSpec.name === "string" ? newWorkspaceSpec.name : undefined,
+						isTemp: false,
+					})
+					: await resolveRequestWorkspace(req, workspaceRegistry, tenantStore, explicitWorkspaceId || TEMP_WORKSPACE_ID);
+			if (!workspace) { json(res, 404, { error: "Workspace not found" }); return true; }
+			if ((presetId && !existingPresetWorkspace) || (newWorkspaceSpec && !newWorkspaceSpec.isTemp)) {
+				await claimRequestResource(req, tenantStore, "workspace", workspace.id);
+			}
+			let createdId = "";
+			let claimed = false;
+			try {
+				const summary = durableSessions.create(req, { workspaceId: workspace.id });
+				createdId = summary.id;
+				if (!workspaceRegistry.bindSession(summary.id, workspace.id)) throw new Error("Workspace not found");
+				await claimRequestResource(req, tenantStore, "session", summary.id);
+				claimed = true;
+				json(res, 201, { id: summary.id, active: true, workspaceId: workspace.id, runtime: "durable" });
+			} catch (error) {
+				if (createdId) {
+					await durableSessions.delete(req, createdId).catch(() => undefined);
+					workspaceRegistry.unbindSession(createdId);
+					if (claimed) await releaseRequestResource(req, tenantStore, "session", createdId).catch(() => undefined);
+				}
+				json(res, error instanceof Error && error.name === "DurableRuntimeDisabledError" ? 400 : 500, {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			return true;
 		}
 
 		// A new session is always a different session — release the queue

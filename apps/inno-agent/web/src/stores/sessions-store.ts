@@ -386,7 +386,7 @@ export class SessionsStoreImpl extends EventEmitter<SessionsStoreEvents> {
 	 * Create a session bound to a specific workspace (or new workspace), then open it.
 	 */
 	async createSessionWith(input: CreateSessionInput = {}): Promise<void> {
-		const createInput = input.runtime === undefined && this.durableEnabled && !input.presetId
+		const createInput = input.runtime === undefined && this.durableEnabled
 			? { ...input, runtime: "durable" as const }
 			: input;
 		this.isLoading = true;

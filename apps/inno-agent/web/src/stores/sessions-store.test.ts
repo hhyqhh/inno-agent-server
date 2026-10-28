@@ -105,7 +105,7 @@ describe("SessionsStore navigation", () => {
 		await store.createSessionWith({ newWorkspace: { isTemp: true } });
 		expect(mocks.createSession).toHaveBeenCalledWith({ newWorkspace: { isTemp: true }, runtime: "durable" });
 		await store.createSessionWith({ presetId: "lesson-plan" });
-		expect(mocks.createSession).toHaveBeenCalledWith({ presetId: "lesson-plan" });
+		expect(mocks.createSession).toHaveBeenCalledWith({ presetId: "lesson-plan", runtime: "durable" });
 	});
 
 	it("keeps an explicit legacy runtime selection when durable is enabled", async () => {

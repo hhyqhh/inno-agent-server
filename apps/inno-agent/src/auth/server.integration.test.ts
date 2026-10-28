@@ -139,6 +139,11 @@ beforeAll(async () => {
 		req.setEncoding("utf-8");
 		req.on("data", (chunk) => { body += chunk; });
 		req.on("end", async () => {
+			if (req.method === "GET" && req.url === "/index.json") {
+				res.writeHead(200, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ presets: [{ id: "durable-preset", name: "Durable preset" }] }));
+				return;
+			}
 			providerRequests.push({ authorization: req.headers.authorization ?? "", body });
 			if (body.includes("请用一句简短的中文短语概括")) {
 				const topic = req.headers.authorization === "Bearer durable-topic-a-secret"
@@ -387,6 +392,7 @@ beforeAll(async () => {
 				models: [{ id: "dummy-model" }],
 			},
 		},
+		contentHub: { type: "bundle", baseUrl: providerOrigin },
 	}));
 	await migrateAuthDatabase(readAuthRuntimeConfig({
 		INNO_AUTH_MODE: "better-auth",
@@ -1354,6 +1360,41 @@ describe("durable session HTTP boundary", () => {
 		}));
 		const activity = activityFiles.find((content) => content.includes(session.id)) ?? "";
 		expect(activity).toContain("nested/durable-preview.txt");
+	}, 60_000);
+
+	it("instantiates preset workspaces for durable sessions with tenant ownership", async () => {
+		const presetDir = join(home, "data", "preset-cache", "durable-preset");
+		await mkdir(presetDir, { recursive: true });
+		await writeFile(join(presetDir, "preset.json"), JSON.stringify({ id: "durable-preset", name: "Durable preset" }));
+		await writeFile(join(presetDir, "agent.md"), "durable preset workspace instructions");
+		const [cookieA, cookieB] = await Promise.all([
+			registerUser("durable-preset-a@example.com"),
+			registerUser("durable-preset-b@example.com"),
+		]);
+		expect((await api(cookieA, "/api/settings/providers", {
+			method: "PUT",
+			body: JSON.stringify({
+				providerId: "shared", baseUrl: providerOrigin, apiKey: "durable-preset-secret",
+				api: "openai-completions", makeDefault: true,
+				models: [{ id: "tenant-model", name: "Tenant model", contextWindow: 32_000, maxTokens: 2_000 }],
+			}),
+		})).status).toBe(200);
+		const createPreset = () => api(cookieA, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ runtime: "durable", presetId: "durable-preset" }),
+		});
+		const first = await createPreset();
+		expect(first.status).toBe(201);
+		const session = await first.json() as { id: string; runtime: string; workspaceId: string };
+		expect(session.runtime).toBe("durable");
+		expect(session.workspaceId).toMatch(/^preset-durable-preset-/);
+		const instructions = await api(cookieA, `/api/workspace/file?path=agent.md&workspaceId=${encodeURIComponent(session.workspaceId)}`);
+		expect(instructions.status).toBe(200);
+		expect(await instructions.json()).toMatchObject({ content: "durable preset workspace instructions" });
+		const second = await createPreset();
+		expect(second.status).toBe(201);
+		expect(await second.json()).toMatchObject({ runtime: "durable", workspaceId: session.workspaceId });
+		expect((await api(cookieB, `/api/sessions/${session.id}`)).status).toBe(404);
+		expect((await api(cookieB, `/api/workspace/file?path=agent.md&workspaceId=${encodeURIComponent(session.workspaceId)}`)).status).toBe(404);
 	}, 60_000);
 
 	it("streams manual durable jobs and validates explicit runtime selection", async () => {

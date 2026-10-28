@@ -59,6 +59,8 @@ The current durable slice supports:
   lock held for each open runtime's lifetime;
 - durable admission, submission reacquisition, and `resume()` on reopen;
 - concurrent independent sessions without the legacy global prompt queue;
+- preset instantiation into stable tenant-owned workspaces, including `agent.md`
+  and private skills, with repeated opens reusing the preset workspace;
 - committed snapshots and existing Inno history/SSE event shapes;
 - tenant-local application SSE journals with exact numeric event replay and
   original-submission recovery after a process restart;
@@ -379,7 +381,8 @@ and cancelled questions that stay resolved. No paid model endpoint or real
 external channel is used.
 
 The real-PostgreSQL integration suite additionally covers explicit HTTP
-creation, concurrent authenticated durable sessions, durable workspace writes with
+creation, concurrent authenticated durable sessions, tenant-owned durable preset
+instantiation and stable workspace reuse, durable workspace writes with
 SSE `workspace_change` events and tenant-local file activity, PostgreSQL advisory-lock
 contention/release and runtime invalidation on lock loss, per-tenant provider and
 OCR Authorization headers, cross-tenant 404s, completed request-ID retries,
