@@ -26,7 +26,9 @@ interface Worker {
 
 let postgres: TemporaryPostgres;
 let provider: HttpServer;
+let sidecar: HttpServer;
 let providerOrigin = "";
+let sidecarOrigin = "";
 let publicOrigin = "";
 let shardConfig: DurableShardConfig;
 const workers: Record<WorkerId, Worker> = {
@@ -113,6 +115,16 @@ beforeAll(async () => {
 	});
 	await new Promise<void>((resolveListen) => provider.listen(0, "127.0.0.1", resolveListen));
 	providerOrigin = `http://127.0.0.1:${(provider.address() as AddressInfo).port}`;
+	sidecar = createHttpServer((req, res) => {
+		let body = "";
+		req.on("data", (chunk) => { body += chunk; });
+		req.on("end", () => {
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ ok: true }));
+		});
+	});
+	await new Promise<void>((resolveListen) => sidecar.listen(0, "127.0.0.1", resolveListen));
+	sidecarOrigin = `http://127.0.0.1:${(sidecar.address() as AddressInfo).port}`;
 	const [portA, portB] = await Promise.all([freePort(), freePort()]);
 	workers["worker-a"].origin = `http://127.0.0.1:${portA}`;
 	workers["worker-b"].origin = `http://127.0.0.1:${portB}`;
@@ -150,6 +162,10 @@ afterAll(async () => {
 	if (provider) {
 		provider.closeAllConnections();
 		await new Promise<void>((resolveClose) => provider.close(() => resolveClose()));
+	}
+	if (sidecar) {
+		sidecar.closeAllConnections();
+		await new Promise<void>((resolveClose) => sidecar.close(() => resolveClose()));
 	}
 	await postgres?.close();
 });
@@ -215,4 +231,34 @@ it("routes a verified tenant and its durable stream to one owning worker", async
 	expect(detail.status).toBe(200);
 	expect(await detail.json()).toMatchObject({ id: session.id, runtime: "durable" });
 	expect(existsSync(tenantStorage(nonOwner))).toBe(false);
+
+	const bridgeToken = "durable-shard-bridge-token";
+	const channels = await api(nonOwner, cookie, "/api/settings/channels", {
+		method: "PUT",
+		body: JSON.stringify({
+			bridge: { token: bridgeToken },
+			channels: { qq: { enabled: true, mode: "bridge", sidecarBaseUrl: sidecarOrigin } },
+		}),
+	});
+	expect(channels.status).toBe(200);
+	expect(channels.headers.get("x-inno-durable-shard")).toBe(ownerId);
+	const callback = await fetch(`${nonOwner.origin}/api/bridge/messages`, {
+		method: "POST",
+		headers: { Authorization: `Bearer ${bridgeToken}`, "Content-Type": "application/json" },
+		body: JSON.stringify({ channel: "qq", messageId: "shard-inbound", chatId: "shard-chat", text: "bridge shard prompt" }),
+	});
+	expect(callback.status).toBe(200);
+	expect(callback.headers.get("x-inno-durable-shard")).toBe(ownerId);
+	let runs: Array<{ messageId: string; status: string }> = [];
+	const deadline = Date.now() + 15_000;
+	while (!runs.some((run) => run.messageId === "shard-inbound" && run.status === "success")) {
+		const response = await api(nonOwner, cookie, "/api/channels/runs");
+		expect(response.status).toBe(200);
+		runs = await response.json() as Array<{ messageId: string; status: string }>;
+		if (Date.now() > deadline) throw new Error(`Bridge callback did not finish on its owner: ${JSON.stringify(runs)}`);
+		await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+	}
+	const runLog = (worker: Worker) => join(worker.home, "data", "tenants", tenantId, "channels", "runs.jsonl");
+	expect(existsSync(runLog(owner))).toBe(true);
+	expect(existsSync(runLog(nonOwner))).toBe(false);
 }, 60_000);

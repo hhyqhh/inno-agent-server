@@ -54,8 +54,11 @@ files on one worker. Each worker must have its own RWO data volume; the map does
 not make a shared filesystem active-active safe. It is static routing, not
 dynamic service discovery, ordered migration, failover, or network-partition
 fencing. `/api/auth/*`, `/api/session`, and health checks remain local. The
-bearer-authenticated public bridge callback does not yet have tenant-owner
-forwarding, so sharded channel ingress remains pending.
+bearer-authenticated public bridge callback hashes the token into PostgreSQL's
+external-connection ownership key, recovers the verified tenant, and forwards the
+untouched callback to that tenant's owner before local channel bootstrap. The
+owner repeats the normal bearer-token, ownership, validation, dedupe, and dispatch
+path; request bodies cannot supply tenant identity.
 
 Tenant identity comes only from the verified request context. PostgreSQL
 resource ownership is claimed for every authenticated durable session and is
@@ -429,8 +432,9 @@ external channel is used.
 
 The real-PostgreSQL integration suite additionally covers explicit HTTP
 creation, a two-worker static-routing topology where a non-owner forwards the
-verified tenant's configuration, session creation, and SSE chat while durable
-SQLite storage appears only on the selected owner, concurrent authenticated durable sessions, tenant-owned durable preset
+verified tenant's configuration, session creation, SSE chat, and bearer-authenticated
+public bridge callback while durable SQLite storage and the channel run log appear
+only on the selected owner, concurrent authenticated durable sessions, tenant-owned durable preset
 instantiation and stable workspace reuse, durable workspace writes with approval
 cards, stale-turn 409 and cross-tenant 404 responses, non-streaming `no_ui`
 write denial, SSE `workspace_change` events and tenant-local file activity, PostgreSQL advisory-lock
@@ -456,6 +460,6 @@ runtime validation, scheduler-origin history, tenant channel delivery, and mixed
 durable/legacy deferred execution with per-tenant credentials, owned workspaces,
 run ledgers, and claim cleanup.
 
-Still pending: sharded public bridge ingress, per-shard RWO deployment manifests,
-and ordered/fenced failure takeover. Static tenant-owner
-routing is implemented and covered by a real two-worker integration test.
+Still pending: per-shard RWO deployment manifests and ordered/fenced failure
+takeover. Static tenant-owner routing, including public bridge ingress, is
+implemented and covered by a real two-worker integration test.

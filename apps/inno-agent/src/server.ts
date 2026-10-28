@@ -35,7 +35,7 @@ import { ChannelRegistry } from "./channels/channel.js";
 import type { ChannelStreamEvent } from "./channels/channel.js";
 import { FeishuChannel } from "./channels/feishu/feishu-channel.js";
 import { PersonalChannelDispatcher, type PersonalChannelDispatcherOptions } from "./channels/personal-dispatcher.js";
-import { TenantChannelManager } from "./channels/tenant-channel-manager.js";
+import { bridgeChannelResourceId, TenantChannelManager } from "./channels/tenant-channel-manager.js";
 import { bridgeBearerToken, handleBridgeMessage } from "./channels/bridge/bridge-server.js";
 import { BridgeChannel } from "./channels/bridge/bridge-channel.js";
 import { WeChatChannel } from "./channels/wechat/wechat-channel.js";
@@ -1723,6 +1723,18 @@ const server = createServer(async (req, response) => {
 				setRequestTenant(req, tenant, auth.tenantStore);
 				if (durableShardConfig && forwardDurableTenantRequest(req, res, tenant, durableShardConfig)) return;
 			}
+		}
+
+		// Public sidecar callbacks have no cookie. Recover their tenant only from
+		// PostgreSQL token ownership, then forward the untouched body to the same
+		// durable owner before bootstrapping any local channel runtime. The owner
+		// repeats the bearer-token and ownership checks in the normal bridge route.
+		if (durableShardConfig && auth.tenantStore && method === "POST" && path === "/api/bridge/messages") {
+			const token = bridgeBearerToken(req.headers.authorization);
+			const tenant = token
+				? await auth.tenantStore.findResourceOwner("channel", bridgeChannelResourceId(token))
+				: null;
+			if (tenant && forwardDurableTenantRequest(req, res, tenant, durableShardConfig)) return;
 		}
 
 		// --- Lazy bootstrap on first API request ---
