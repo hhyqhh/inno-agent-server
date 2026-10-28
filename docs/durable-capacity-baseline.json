@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "createdAt": "2026-10-28T00:58:45.100Z",
+  "environment": {
+    "node": "v22.22.3",
+    "platform": "darwin",
+    "arch": "arm64",
+    "logicalCpus": 18,
+    "totalMemoryMiB": 65536
+  },
+  "config": {
+    "sessions": 16,
+    "runs": 32,
+    "concurrency": 8,
+    "providerDelayMs": 100,
+    "provider": "faux (no network or paid model calls)"
+  },
+  "load": {
+    "openMs": 39.377,
+    "wallMs": 437.498,
+    "closeMs": 18.793,
+    "maxActiveRuns": 8,
+    "throughputRunsPerSecond": 73.143,
+    "admissionMs": {
+      "samples": 32,
+      "min": 0.205,
+      "p50": 0.366,
+      "p95": 2.716,
+      "p99": 2.78,
+      "max": 2.78,
+      "mean": 0.921
+    },
+    "turnMs": {
+      "samples": 32,
+      "min": 101.777,
+      "p50": 104.728,
+      "p95": 120.576,
+      "p99": 121.838,
+      "max": 121.838,
+      "mean": 107.861
+    },
+    "snapshotReadMs": {
+      "samples": 32,
+      "min": 0.062,
+      "p50": 0.113,
+      "p95": 0.391,
+      "p99": 0.416,
+      "max": 0.416,
+      "mean": 0.137
+    },
+    "sqliteProbeMs": {
+      "samples": 32,
+      "min": 0.006,
+      "p50": 0.011,
+      "p95": 0.037,
+      "p99": 0.048,
+      "max": 0.048,
+      "mean": 0.014
+    },
+    "eventLoopLagMs": {
+      "samples": 19,
+      "min": 19.431,
+      "p50": 20.906,
+      "p95": 22.282,
+      "p99": 29.508,
+      "max": 29.508,
+      "mean": 21.569
+    },
+    "memory": {
+      "startRssMiB": 261.984,
+      "openRssMiB": 269.234,
+      "peakRssMiB": 274.578,
+      "peakHeapUsedMiB": 87.48,
+      "finalRssMiB": 274.188
+    }
+  },
+  "recovery": {
+    "wallMs": 2.659,
+    "providerCalls": 1,
+    "userMessages": 1
+  }
+}

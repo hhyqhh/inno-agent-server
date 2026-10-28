@@ -327,6 +327,14 @@ recent appends just as it can lose recent WAL commits; the recovery guarantee is
 for process crash/restart with an intact journal within the single-owner
 deployment boundary.
 
+## Capacity baseline
+
+`npm run benchmark:durable` exercises minimal durable runtimes with faux delayed
+providers, independent-session concurrency, RSS/event-loop/SQLite measurements,
+and a real SIGKILL/reopen check. See [DURABLE_CAPACITY.md](./DURABLE_CAPACITY.md)
+for the recorded local baseline and metric boundaries. It does not include the
+HTTP/tenant/tool stack and is not sufficient to choose production shard sizes.
+
 ## Verification
 
 The PostgreSQL-free suite uses only `fauxProvider()` and temporary directories.
