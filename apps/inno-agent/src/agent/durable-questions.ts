@@ -1,12 +1,10 @@
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { defineTool } from "@earendil-works/pi-coding-agent";
-import type { ToolRegistration } from "@earendil-works/pi-durable";
+import type { JsonValue } from "@earendil-works/chord";
+import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import { writeJson } from "../storage/file-store.js";
 import type { PersistedQuestion, QuestionBridgeResult, QuestionResponseStatus } from "./question-bridge.js";
-import { createDurableToolRegistrations } from "./durable-tool-adapter.js";
 import { resolvePluginFile } from "./permission-system-config.js";
 
 export interface DurableQuestionBinding {
@@ -223,7 +221,7 @@ export interface DurableQuestionToolOptions {
 }
 
 interface QuestionnaireSupport {
-	parameters: ToolDefinition["parameters"];
+	parameters: ToolRegistration["parameters"];
 	validate: (params: unknown) => { ok: boolean; error?: string; message?: string };
 	buildResponse: (result: QuestionBridgeResult, params: unknown) => {
 		content: Array<{ type: "text"; text: string }>;
@@ -245,7 +243,7 @@ async function loadQuestionnaireSupport(): Promise<QuestionnaireSupport> {
 	const envelope = await jiti.import(envelopePath) as Record<string, unknown>;
 	const validation = await jiti.import(validationPath) as Record<string, unknown>;
 	return {
-		parameters: types.QuestionParamsSchema as ToolDefinition["parameters"],
+		parameters: types.QuestionParamsSchema as ToolRegistration["parameters"],
 		validate: validation.validateQuestionnaire as QuestionnaireSupport["validate"],
 		buildResponse: envelope.buildQuestionnaireResponse as QuestionnaireSupport["buildResponse"],
 		buildError: envelope.buildToolResult as QuestionnaireSupport["buildError"],
@@ -260,20 +258,22 @@ export async function createDurableQuestionRegistrations(
 	const support = await loadQuestionnaireSupport();
 	const tool = defineTool({
 		name: "ask_user_question",
-		label: "Ask User Question",
 		description: "Ask the user one or more questions with predefined options. Supports single-select, multi-select, free text input, and option previews.",
 		parameters: support.parameters,
 		executionMode: "sequential",
-		async execute(toolCallId, params, signal) {
+		replay: "safe",
+		async execute(params, api, context) {
 			const validation = support.validate(params);
 			if (!validation.ok) {
-				return support.buildError(validation.message ?? "Invalid questionnaire", {
+				const result = support.buildError(validation.message ?? "Invalid questionnaire", {
 					answers: [], cancelled: true, ...(validation.error ? { error: validation.error } : {}),
 				});
+				return { output: result.content, details: result.details as JsonValue };
 			}
-			const result = await options.store.ask(toolCallId, params, signal ?? new AbortController().signal);
-			return support.buildResponse(result, params);
+			const answer = await options.store.ask(api.callId, params, context.abortSignal ?? new AbortController().signal);
+			const result = support.buildResponse(answer, params);
+			return { output: result.content, details: result.details as JsonValue };
 		},
-	} as ToolDefinition);
-	return createDurableToolRegistrations([tool], { cwd: options.workspaceDir });
+	});
+	return [tool];
 }

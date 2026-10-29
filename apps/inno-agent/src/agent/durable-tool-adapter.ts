@@ -1,12 +1,40 @@
 import type { JsonValue } from "@earendil-works/chord";
-import type { ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
+
+export interface DurableExecutableToolResult {
+	content: ToolResultMessage["content"];
+	details?: unknown;
+	structuredContent?: unknown;
+	isError?: boolean;
+	usage?: Usage;
+	terminate?: boolean;
+}
+
+/** Structural contract for replay-safe Inno tools adapted from the legacy
+ * five-argument execution ABI. Durable itself does not import that runtime. */
+export interface DurableExecutableTool {
+	name: string;
+	description: string;
+	parameters: ToolRegistration["parameters"];
+	executionMode?: ToolRegistration["executionMode"];
+	prepareArguments?: ToolRegistration["prepareArguments"];
+	outputSchema?: ToolRegistration["structuredOutputSchema"];
+	execute(
+		toolCallId: string,
+		params: unknown,
+		signal: AbortSignal | undefined,
+		onUpdate: ((partial: { content: Array<{ type: string; text?: string }>; details?: unknown }) => void) | undefined,
+		// The legacy extension context stays opaque at this adapter boundary.
+		context: any,
+	): Promise<DurableExecutableToolResult>;
+}
 
 /** Adapt an Inno tool whose replay contract has been made durable-safe. The
  * stable durable call ID and abort signal are preserved across reopen. */
 export function createDurableToolRegistrations(
-	tools: ToolDefinition[],
-	legacyContext: Pick<ExtensionToolContext, "cwd">,
+	tools: DurableExecutableTool[],
+	legacyContext: { cwd: string },
 ): ToolRegistration[] {
 	return tools.map((tool) => defineTool({
 		name: tool.name,
@@ -29,7 +57,7 @@ export function createDurableToolRegistrations(
 				...legacyContext,
 				model: undefined,
 				modelRegistry: undefined,
-			} as unknown as ExtensionToolContext;
+			};
 			const result = await tool.execute(api.callId, args, context.abortSignal, onUpdate, toolContext);
 			return {
 				output: result.content,

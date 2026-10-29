@@ -1,11 +1,10 @@
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import { createLearnerTools } from "../memory/learner/learner-tools.js";
 import { buildContextPack, formatContextPackForPrompt } from "../memory/learner/context-pack.js";
 import { isProfileEmpty, loadProfile, loadRecentEvents } from "../memory/learner/profile-store.js";
 import { createL2Tools } from "../memory/l2/l2-tools.js";
 import { createL3Tools, type ScopedL3Memory } from "../memory/l3/l3-tools.js";
-import { createDurableToolRegistrations } from "./durable-tool-adapter.js";
+import { createDurableToolRegistrations, type DurableExecutableTool } from "./durable-tool-adapter.js";
 import { ONBOARDING_GUIDE } from "./system-prompt.js";
 
 export interface DurableMemoryToolOptions {
@@ -48,7 +47,7 @@ export function buildDurableInstructions(
  * stable durable tool-call identity; L2 archive resumes by content hash and
  * manifest without nested model calls. Direct profile patch/update mutations
  * use the same per-session/tool-call operation markers and atomic profile write. */
-export function createDurableMemoryTools(options: DurableMemoryToolOptions): ToolDefinition[] {
+export function createDurableMemoryTools(options: DurableMemoryToolOptions): DurableExecutableTool[] {
 	const learnerTools = createLearnerTools(
 		options.learnerDataDir,
 		"default",
