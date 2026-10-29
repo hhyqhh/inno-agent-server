@@ -16,6 +16,7 @@ import { createL3Tools, formatRecallForPrompt, ScopedL3Memory } from "../memory/
 import { createPracticeTools } from "./practice-tools.js";
 import { createDocumentTools } from "./document-tools.js";
 import { createOcrTools } from "./ocr-tools.js";
+import { createLegacyToolDefinitions } from "./legacy-tool-adapter.js";
 import { createTavilyTools } from "./tavily-tools.js";
 import { ensureWebAccessConfig, resolvePiAiJitiAliases } from "./web-access-config.js";
 import { ensurePermissionSystemConfig, INNO_WEB_AUTHORIZER_NAME, resolvePluginFile, writePermissionPolicyConfig } from "./permission-system-config.js";
@@ -329,7 +330,7 @@ export function createInnoExtension(
 		// 4c. Register OCR tool (Baidu PaddleOCR-VL). Used when the configured
 		// chat model cannot natively recognize images. Reads credentials live
 		// from configHolder so settings changes take effect without restart.
-		const ocrTools = createOcrTools(configHolder, { restrictToWorkspace: deps?.sharedExtensionsDisabled });
+		const ocrTools = createLegacyToolDefinitions(createOcrTools(configHolder, { restrictToWorkspace: deps?.sharedExtensionsDisabled }));
 		for (const tool of ocrTools) {
 			pi.registerTool(tool);
 		}

@@ -26,14 +26,12 @@ describe("ocr_image workspace boundary", () => {
 		symlinkSync(outside, join(workspace, "linked.png"));
 		const fetchMock = vi.fn();
 		vi.stubGlobal("fetch", fetchMock);
-		const tool = createOcrTools(config(), { restrictToWorkspace: true })[0];
+		const tool = createOcrTools(config(), { restrictToWorkspace: true, workspaceDir: workspace })[0];
 
 		const result = await tool.execute(
-			"test-call",
 			{ filePath: "linked.png" },
-			undefined,
-			undefined,
-			{ cwd: workspace } as never,
+			{ callId: "test-call" } as never,
+			{ abortSignal: undefined } as never,
 		);
 
 		expect(result.details).toMatchObject({ error: "submit_failed" });
@@ -58,23 +56,22 @@ describe("ocr_image workspace boundary", () => {
 		vi.stubGlobal("fetch", fetchMock);
 		const tool = createOcrTools(config(), {
 			restrictToWorkspace: true,
+			workspaceDir: workspace,
 			durable: {
 				checkpointDir: join(tempRoot, "ocr"),
 				getOperationId: (callId) => `ocr_image:durable-session:${callId}`,
 			},
 		})[0];
 		const execute = () => tool.execute(
-			"stable-call",
 			{ filePath: "note.png" },
-			undefined,
-			undefined,
-			{ cwd: workspace } as never,
+			{ callId: "stable-call" } as never,
+			{ abortSignal: undefined } as never,
 		);
 
 		const first = await execute();
 		const retry = await execute();
 
-		expect(first.content[0]).toEqual({ type: "text", text: "识别文本" });
+		expect(first.output?.[0]).toEqual({ type: "text", text: "识别文本" });
 		expect(retry).toEqual(first);
 		expect(fetchMock).toHaveBeenCalledTimes(3);
 	});

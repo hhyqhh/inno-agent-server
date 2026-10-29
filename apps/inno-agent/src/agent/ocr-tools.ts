@@ -16,15 +16,18 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
-import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ToolRegistration } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import type { ConfigHolder } from "./inno-extension.js";
+import { defineInnoTool } from "./inno-tool.js";
 import { logger } from "../logger.js";
 import { writeJson } from "../storage/file-store.js";
 import { checkWorkspaceMutationPath } from "./workspace-path-guard.js";
 
 export interface OcrToolOptions {
 	restrictToWorkspace?: boolean;
+	/** Fixed workspace for native durable execution. Legacy uses its adapter context. */
+	workspaceDir?: string;
 	/** Persist submit/result checkpoints for replay-safe durable tool calls. */
 	durable?: {
 		checkpointDir: string;
@@ -253,9 +256,10 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
  * Create the OCR tool. Reads the API credentials live from configHolder so
  * settings changes take effect without a restart.
  */
-export function createOcrTools(configHolder: ConfigHolder, options: OcrToolOptions = {}): ToolDefinition[] {
-	const tool = defineTool({
+export function createOcrTools(configHolder: ConfigHolder, options: OcrToolOptions = {}): ToolRegistration[] {
+	const tool = defineInnoTool({
 		name: "ocr_image",
+		...(options.durable ? { replay: "safe" as const } : {}),
 		label: "图片文字识别 (OCR)",
 		description:
 			"调用百度 vl-ocr（PaddleOCR-VL）API 提取图片中的文字，返回 markdown 文本。" +
@@ -267,7 +271,7 @@ export function createOcrTools(configHolder: ConfigHolder, options: OcrToolOptio
 				description: "要识别的图片路径（工作区相对路径、绝对路径或 http(s) URL）",
 			}),
 		}),
-		async execute(toolCallId, params, upstreamSignal, _onUpdate, ctx) {
+		async execute(params, api, context) {
 			const typed = params as { filePath: string };
 			const filePath = String(typed.filePath ?? "").trim();
 			if (!filePath) {
@@ -278,7 +282,7 @@ export function createOcrTools(configHolder: ConfigHolder, options: OcrToolOptio
 			}
 
 			const durable = options.durable;
-			const operationId = durable?.getOperationId(toolCallId);
+			const operationId = durable?.getOperationId(api.callId);
 			let checkpoint: OcrCheckpoint | undefined;
 			if (durable && operationId) {
 				try {
@@ -311,6 +315,7 @@ export function createOcrTools(configHolder: ConfigHolder, options: OcrToolOptio
 
 			const controller = new AbortController();
 			const totalTimer = setTimeout(() => controller.abort(), MAX_TOTAL_TIMEOUT_MS);
+			const upstreamSignal = context.abortSignal;
 			const signal = upstreamSignal
 				? AbortSignal.any([controller.signal, upstreamSignal])
 				: controller.signal;
@@ -326,7 +331,7 @@ export function createOcrTools(configHolder: ConfigHolder, options: OcrToolOptio
 						jobId = await submitJob(
 							cfg,
 							filePath,
-							ctx.cwd,
+							options.workspaceDir ?? api.innoLegacy?.cwd ?? process.cwd(),
 							requestSignal(signal),
 							Boolean(options.restrictToWorkspace),
 						);
