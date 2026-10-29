@@ -1,10 +1,10 @@
 # Inno Agent
 
-> 开源的**个人学习智能体**——分层记忆、主动调度、多渠道消息、工作区级练习实验室,基于 [Pi coding-agent SDK](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 构建,**不修改其内核**。
+> 开源的**个人学习智能体**——分层记忆、主动调度、多渠道消息，以及可选的**多租户 Durable 运行时**；基于 PI SDK 构建，**不修改其内核**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19.0-brightgreen.svg)](https://nodejs.org)
-[![Release](https://img.shields.io/github/v/release/hhyqhh/inno-agent.svg)](https://github.com/hhyqhh/inno-agent/releases)
+[![Release](https://img.shields.io/github/v/release/hhyqhh/inno-agent-server.svg)](https://github.com/hhyqhh/inno-agent-server/releases)
 [![Website](https://img.shields.io/badge/Website-Inno%20Agent-ff6b35.svg)](https://hhyqhh.github.io/inno-agent-website/)
 
 [English](./README.md) | **简体中文**
@@ -14,6 +14,8 @@
 <p align="center">
   <img src="./docs/assets/app-overview-2026-09-13-v2.png" alt="Inno Agent — 重构后的欢迎页与预设工作区" width="100%" />
 </p>
+
+> 🚀 **2026 年 10 月 —— 多用户 Durable 重构**：Better Auth + PostgreSQL personal tenant、独立会话并发、SQLite 崩溃恢复、租户级 memory/OCR/channel、可恢复的问题卡与工作区审批，以及可选的静态 tenant-owner worker 路由。CLI/Desktop/local legacy 行为继续保留。详见[多用户 Durable 指南](./docs/MULTI_USER_DURABLE.md)。
 
 > 🎨 **2026 年 9 月 —— Web UI 基于 InnoSpark 设计语言整体重构**(亮色 + 暗色双主题):一键打开预设工作区的欢迎页、集成权限模式与模型选择的统一输入框、作为 artifact 浏览器的右侧面板,以及对话内的流式富文本渲染(Mermaid / SVG / ECharts / 可运行代码块)。
 
@@ -32,9 +34,23 @@ Inno Agent 是服务于单个学习者的长期学习伙伴。它把长期学习
 - **分层记忆,而非扁平的聊天摘要**——学习者状态、归档知识与近期对话生命周期不同,各自独立成层。
 - **持久事实写入工具,而非回复**——凡影响后续教学的内容都通过工具写入 L1/L2,个性化决策有据可查。
 - **开放、可纠正的学习者模型**——L1 画像对学习者可检视、可编辑,系统提示词禁止无证据的标签。
-- **永不修改 SDK 内核**——所有学习行为通过注册工具和单个扩展钩子实现,运行时始终与上游兼容。
+- **永不修改 SDK 内核**——所有学习行为通过注册工具和扩展钩子实现，运行时始终与上游兼容。
+
+### 运行时边界
+
+当前有两条显式执行路径：
+
+- **Legacy 兼容路径**——CLI、Desktop 和 local server 默认保留单例 `AgentSession`、JSONL 历史、宿主工具和串行 prompt queue，仍是最简单的个人运行方式。
+- **Durable 执行路径**——`INNO_DURABLE_ENABLED=true` 启用独立的 per-session SQLite runtime；多用户模式强制使用 Durable，不回退到 legacy 全局队列。支持独立会话并发、request-ID 去重、崩溃恢复、连续 SSE 回放、可恢复的问题卡/审批，以及 tenant-local memory/OCR/channel。
+- **经验证的租户隔离**——Better Auth + PostgreSQL 提供 personal tenant 和资源所有权。provider 凭证、记忆、工作区、频道和任务均使用 tenant 数据根；未认证返回 401，跨租户资源返回 404。authenticated 模式关闭宿主 shell/通用文件工具和 PTY。
+- **单 owner 存储**——一个 durable storage 同时只有一个 owner。静态 tenant-owner 路由要求每个 worker 使用独立 RWO 数据根；不支持共享 SQLite/NFS active-active、自动 failover 或网络分区 fencing。
+- **明确的恢复语义**——已提交状态和应用 checkpoint 可以恢复，但模型调用、首次远端 OCR 提交、频道投递和部分文件 mutation 仍有 at-least-once crash window。
+
+架构、验证范围和剩余生产事项见[多用户 Durable 指南](./docs/MULTI_USER_DURABLE.md)与 [Durable 运行时契约](./docs/DURABLE_RUNTIME.md)。
 
 ## 功能特性
+
+- 👥 **多用户 Durable 服务**——Better Auth + PostgreSQL personal tenant、独立会话并发、租户级凭证与存储、崩溃恢复、SSE 回放和可选静态 worker 路由。
 
 - 🧠 **三层记忆**
   - **L1 学习者画像**——目标、知识状态、误解、偏好;每轮汇总为上下文包注入系统提示词。
@@ -55,7 +71,7 @@ Inno Agent 是服务于单个学习者的长期学习伙伴。它把长期学习
 
 ### 方式 A —— 桌面应用(最简单)
 
-从 [**GitHub Releases**](https://github.com/hhyqhh/inno-agent/releases) 下载最新安装包:
+从 [**GitHub Releases**](https://github.com/hhyqhh/inno-agent-server/releases) 下载最新安装包:
 
 - **macOS**(Apple Silicon):`Inno.Agent-x.y.z-arm64.dmg` —— 未签名,首次启动请右键 → 打开。
 - **Windows**(x64):`Inno.Agent.Setup.x.y.z.exe` 或 `.msi`。
@@ -65,8 +81,8 @@ Inno Agent 是服务于单个学习者的长期学习伙伴。它把长期学习
 ### 方式 B —— 源码运行
 
 ```bash
-git clone https://github.com/hhyqhh/inno-agent.git
-cd inno-agent
+git clone https://github.com/hhyqhh/inno-agent-server.git
+cd inno-agent-server
 
 npm install      # 从 npm 拉取 Pi SDK
 npm run build    # 编译后端 + 前端
@@ -99,6 +115,22 @@ npm run dev:server & npm run web:dev
 ```
 
 `restart-dev.sh` 编排完整开发生命周期(构建、启动、停止、状态、日志、冒烟测试)——运行 `bash restart-dev.sh --help` 查看。
+
+### 多用户 Durable 服务
+
+```bash
+export INNO_AUTH_MODE=better-auth
+export INNO_MULTI_USER_ENABLED=true
+export INNO_DURABLE_ENABLED=true
+export DATABASE_URL=postgresql://inno:inno@127.0.0.1:5432/inno
+export BETTER_AUTH_SECRET='replace-with-at-least-32-random-characters'
+export BETTER_AUTH_URL=http://127.0.0.1:3000
+
+npm run auth:migrate --workspace inno-agent
+npm run server -- --home ./runtime --workspace ./workspace --port 3000
+```
+
+每个账号在 Settings 中配置自己的 provider/model。该模式面向受控部署，不代表公网账号安全或生产容量已经验收。完整边界见[认证与租户隔离](./docs/AUTHENTICATION.md)和[多用户 Durable 指南](./docs/MULTI_USER_DURABLE.md)。
 
 ## 配置
 
@@ -169,22 +201,24 @@ CLI 与 server 都通过 `apps/inno-agent/src/runtime.ts` 解析路径。优先�
 
 ## 架构
 
-四层结构:**用户界面 → 应用层 → Pi agent 运行时 → 分层记忆。**
+四层结构：**用户界面 → 认证与租户应用层 → legacy 或 Durable agent 运行时 → 分层记忆。**
 
 ```text
 用户界面          CLI · Web UI (React) · 桌面应用 · 飞书 · 微信
         ↓
-应用层            渠道适配 · HTTP API (SSE) · 记忆编排
-                  cron 调度器 · 练习实验室 · WebSocket 终端
+应用层            Better Auth · personal tenant · ownership · HTTP/SSE
+                  渠道 · 调度器 · 工作区 · Practice Lab (local)
         ↓
-Agent 运行时      Pi AgentSession · 注册工具 · inno 扩展
-(Pi SDK,未修改)  通用 LLM 供应商  ──或──  蒸馏教育模型
+Agent 运行时      Legacy PI AgentSession ──或── pi-durable session runtimes
+(PI SDK,未修改)   共享原生工具；legacy 独立反向适配器
         ↓
-分层记忆          L1 学习者画像 · L2 原生 wiki · L3 会话记录
+分层记忆          L1 学习者画像 · L2 原生 wiki · L3 会话检索
+                  local 使用全局目录；多用户使用经验证的 tenant 数据根
 ```
 
-- **Agent 核心**——`@earendil-works/pi-coding-agent` 提供主循环。[`inno-extension.ts`](./apps/inno-agent/src/agent/inno-extension.ts) 注册供应商与工具(L1/L2/L3、调度器、练习实验室、文档、OCR),并通过 `before_agent_start` 钩子把 L1 上下文包与阈值门控的 L3 召回注入系统提示词。
-- **记忆**——L1(`src/memory/learner/`):证据驱动的画像 + 事件日志。L2(`src/memory/l2/`):带图谱、摘要、文档摄入与混合检索的结构化 wiki,经 agent 工具和 `/api/wiki/*` 暴露。L3(`src/memory/l3/`):叠加在 Pi 会话 JSONL 文件上的 SQLite FTS5 索引。
+- **Agent 核心**——legacy 使用 `@earendil-works/pi-coding-agent` 与 [`inno-extension.ts`](./apps/inno-agent/src/agent/inno-extension.ts)；Durable 使用独立的 `pi-durable` runtime，不经过 legacy 全局 prompt queue。memory/OCR/channel 工具使用原生 `(params, api, context)` ABI，legacy 仅通过独立反向适配器复用。PI SDK 内核不被修改。
+- **多用户与恢复**——Better Auth + PostgreSQL 验证身份和所有权。Durable 提供 per-session SQLite、request-ID 去重、应用 SSE journal、问题/审批恢复和独立会话并发。详见[多用户 Durable 指南](./docs/MULTI_USER_DURABLE.md)。
+- **记忆**——L1(`src/memory/learner/`):证据驱动的画像 + 事件日志。L2(`src/memory/l2/`):带图谱、摘要、文档摄入与混合检索的结构化 wiki,经 agent 工具和 `/api/wiki/*` 暴露。L3(`src/memory/l3/`):tenant-scoped SQLite FTS5 索引,覆盖 owned legacy JSONL 与已提交的 Durable 历史。
 - **调度器**(`src/scheduler/`)——cron 任务持久化到 `jobs.json` + `runs.jsonl`。
 - **渠道**(`src/channels/`)——`ChannelRegistry`,支持飞书、微信(iLink / bridge)、QQ(bridge)。
 - **HTTP 服务**(`src/server.ts`)——原生 Node `http.createServer`,SSE 流式对话 + WebSocket 终端;路由表见 [`apps/inno-agent/README.md`](./apps/inno-agent/README.md)。
@@ -215,17 +249,20 @@ INNO_PORT=3000 \
 npm run server
 ```
 
-提供 [`Dockerfile`](./Dockerfile) 与 [`docker-compose.yml`](./docker-compose.yml) 作为起点;完整依赖说明见 [`docs/SYSTEM_DEPENDENCIES.md`](./docs/SYSTEM_DEPENDENCIES.md)。桌面打包说明见 [`ELECTRON_BUILD.md`](./ELECTRON_BUILD.md)。
+提供 [`Dockerfile`](./Dockerfile) 与 [`docker-compose.yml`](./docker-compose.yml) 作为起点；完整依赖说明见 [`docs/SYSTEM_DEPENDENCIES.md`](./docs/SYSTEM_DEPENDENCIES.md)。Better Auth + PostgreSQL、租户隔离和公网账号限制见 [`docs/AUTHENTICATION.md`](./docs/AUTHENTICATION.md)；Durable 架构、静态 worker 路由、验收结果和单 owner 部署边界见 [`docs/MULTI_USER_DURABLE.md`](./docs/MULTI_USER_DURABLE.md)。桌面打包说明见 [`ELECTRON_BUILD.md`](./ELECTRON_BUILD.md)。
 
 ## 使用案例与文档
 
+- [多用户 Durable 架构与验收](./docs/MULTI_USER_DURABLE.md)——重构目标、租户边界、恢复语义、真实服务验收和生产缺口。
+- [Durable 运行时契约](./docs/DURABLE_RUNTIME.md)——存储、重放、工具、调度和频道实现细节。
+- [认证与租户隔离](./docs/AUTHENTICATION.md)——Better Auth 配置、显式 legacy-owner 迁移和账号安全边界。
 - [技能教程 —— 构建工作区 Agent](./docs/use-cases/skill-tutorial.md)——用 `agent.md` 和 `.skills/` 构建工作区范围的自定义学习 agent。
 - [QUICKSTART.md](./QUICKSTART.md)——5 分钟上手指南。
 - [apps/inno-agent/README.md](./apps/inno-agent/README.md)——后端 API 路由表。
 
 ## 贡献
 
-欢迎 Issue 和 PR。提交 PR 前请先在本地运行 `npm run build`——TypeScript 构建兼作健全性检查(暂未配置 lint/测试流程)。保持改动聚焦,遵循现有代码风格,行为变更时同步更新文档。
+欢迎 Issue 和 PR。提交 PR 前请运行 `npm test` 与 `npm run build`；涉及认证、租户所有权或 Durable 恢复的改动，还应使用真实 PostgreSQL 运行 `npm run test:integration`。保持改动聚焦，遵循现有代码风格，行为变更时同步更新文档。
 
 ## 社区
 
@@ -248,6 +285,6 @@ npm run server
   year         = {2026},
   publisher    = {GitHub},
   journal      = {GitHub repository},
-  howpublished = {\url{https://github.com/hhyqhh/inno-agent}}
+  howpublished = {\url{https://github.com/hhyqhh/inno-agent-server}}
 }
 ```

@@ -1,8 +1,8 @@
 # Inno Agent
 
-基于 PI SDK 的个人学习 Agent，支持多渠道交互（CLI / Web UI / 飞书 / 微信）、三层记忆系统（L1 学习者画像 + L2 Wiki 知识库 + L3 会话记录及跨对话检索）、定时任务调度、Practice Lab 网页终端。
+基于 PI SDK 的个人学习 Agent 后端，支持 CLI / Web UI / 飞书 / 微信、三层记忆、定时任务与 Practice Lab；同时提供基于 `pi-durable` 的独立会话并发、SQLite 持久执行和 Better Auth + PostgreSQL 多租户运行时。
 
-> 本文档聚焦后端开发与运行细节。项目整体介绍、架构和定位见仓库根目录的 [README.md](../../README.md)。
+> 本文档聚焦后端开发与运行细节。项目整体介绍见仓库根目录的 [README.md](../../README.md)；多用户架构、隔离与恢复边界见 [docs/MULTI_USER_DURABLE.md](../../docs/MULTI_USER_DURABLE.md)，实现契约见 [docs/DURABLE_RUNTIME.md](../../docs/DURABLE_RUNTIME.md)。
 
 ## 前置条件
 

@@ -40,6 +40,7 @@ Three tsconfig files, each self-contained (no `extends` chain):
 - **[ELECTRON_BUILD.md](./ELECTRON_BUILD.md)** — Electron packaging notes (Chinese).
 - **[apps/inno-agent/README.md](./apps/inno-agent/README.md)** — backend API route table and project structure (Chinese).
 - **[docs/SYSTEM_DEPENDENCIES.md](./docs/SYSTEM_DEPENDENCIES.md)** — full system-level dependency reference (build-time, runtime, Python environment, native modules). Essential for Docker/deployment work.
+- **[docs/MULTI_USER_DURABLE.md](./docs/MULTI_USER_DURABLE.md)** — multi-user Durable refactor overview, tenant isolation, storage/recovery semantics, real-service acceptance results, and production limitations.
 - **[docs/DURABLE_RUNTIME.md](./docs/DURABLE_RUNTIME.md)** — opt-in pi-durable migration boundary, recovery semantics, single-owner storage rule, and SSE projection constraints.
 - **[docs/DURABLE_CAPACITY.md](./docs/DURABLE_CAPACITY.md)** — faux-provider durable capacity command, metric boundaries, recorded baseline, and shard-sizing limitations.
 - **[docs/PERMISSIONS_AND_SANDBOX.md](./docs/PERMISSIONS_AND_SANDBOX.md)** — permission layer (three policy modes, approval cards, deny floor) and sandbox layer (`--sandbox`, filesystem/network policy) explained with configuration details.

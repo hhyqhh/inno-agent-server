@@ -1,5 +1,7 @@
 # Durable runtime migration
 
+> For the refactor overview, tenant architecture, startup example, and real-service acceptance results, see [MULTI_USER_DURABLE.md](./MULTI_USER_DURABLE.md). This document is the detailed runtime and recovery contract.
+
 ## Current stage: static tenant-owner routing (3U)
 
 `@earendil-works/pi-durable` is pinned to `1.4.0` together with the backend PI

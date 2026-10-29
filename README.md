@@ -1,10 +1,10 @@
 # Inno Agent
 
-> An open-source **personal learning agent** with layered memory, a proactive scheduler, multi-channel messaging, and a workspace-scoped Practice Lab — built on the [Pi coding-agent SDK](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) **without modifying its kernel**.
+> An open-source **personal learning agent** with layered memory, proactive scheduling, multi-channel messaging, and an optional **multi-tenant Durable runtime** — built on the PI SDK **without modifying its kernel**.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19.0-brightgreen.svg)](https://nodejs.org)
-[![Release](https://img.shields.io/github/v/release/hhyqhh/inno-agent.svg)](https://github.com/hhyqhh/inno-agent/releases)
+[![Release](https://img.shields.io/github/v/release/hhyqhh/inno-agent-server.svg)](https://github.com/hhyqhh/inno-agent-server/releases)
 [![Website](https://img.shields.io/badge/Website-Inno%20Agent-ff6b35.svg)](https://hhyqhh.github.io/inno-agent-website/)
 
 **English** | [简体中文](./README.zh-CN.md)
@@ -14,6 +14,8 @@
 <p align="center">
   <img src="./docs/assets/app-overview-2026-09-13-v2.png" alt="Inno Agent — redesigned welcome page with preset workspaces" width="100%" />
 </p>
+
+> 🚀 **October 2026 — multi-user Durable refactor:** Better Auth + PostgreSQL personal tenants, independent per-session concurrency, SQLite-backed crash recovery, tenant-local memory/OCR/channels, replay-safe questions and workspace approvals, and optional static tenant-owner worker routing. Legacy CLI/Desktop/local behavior remains available. See the [multi-user Durable guide](./docs/MULTI_USER_DURABLE.md).
 
 > 🎨 **September 2026 — the Web UI was rebuilt around the InnoSpark design language** (light + dark themes): a welcome page with one-click preset workspaces, a unified composer with permission-mode and model pills, an artifact-browser right panel, and rich streaming Markdown (Mermaid / SVG / ECharts / runnable code blocks) in the conversation.
 
@@ -32,22 +34,27 @@ General-purpose coding agents optimize for open-ended software engineering. Educ
 - **Layered memory, not a flat chat summary** — learner state, archived knowledge, and recent dialogue have different lifecycles and live in separate layers.
 - **Durable facts go to tools, not replies** — anything that affects future teaching is written to L1/L2 via tools, so personalization is evidence-driven and traceable.
 - **An open, correctable learner model** — the L1 profile is inspectable and editable by the learner; unevidenced labels are forbidden.
-- **The SDK kernel is never modified** — all learning behavior is added through registered tools and one extension hook, keeping the runtime upstream-compatible.
+- **The SDK kernel is never modified** — learning behavior is added through registered tools and explicit runtime hooks, keeping both legacy and Durable execution upstream-compatible.
 
-### Non-goals
+### Runtime boundaries
 
-Inno Agent is a **personal** agent, and the architecture deliberately reflects that:
+Inno Agent now supports two explicit execution paths:
 
-- **One process, one active agent session.** A single in-memory prompt queue serializes all work; sessions, workspaces, and channels share it. Session switching swaps session files in place — there is no per-session agent pool.
-- **No active-active storage.** Better Auth + PostgreSQL provides account and tenant isolation for a restricted, explicitly enabled (`INNO_MULTI_USER_ENABLED=true`) multi-user runtime. Authenticated mode disables PI host shell/file tools and PTY terminals and hides their Practice Lab controls rather than offering unconfined host execution. Each file-backed data root has one owner; optional static tenant-owner routing forwards authenticated requests between durable workers with independent data roots, never shared active-active SQLite/NFS. Public bridge callbacks recover verified tenants from PostgreSQL token ownership and forward to the same owner; ordered/fenced failover remains pending.
-- **Durable sessions, mandatory in multi-user mode.** With `INNO_DURABLE_ENABLED=true`, the Web UI defaults new sessions to durable, and `POST /api/sessions` accepts `{runtime:"durable"}` for new tenant-scoped SQLite sessions with request-ID deduplication, crash resume, workspace-contained read/write/edit tools with symlink escape denial, replay-safe persisted write/edit approval cards, non-streaming `no_ui` write denial, and streaming workspace-change/file-activity refresh, replay-safe tenant-local L1/L2 memory tools and direct learner profile patch/update, tenant-scoped explicit and threshold-gated automatic L3 recall with revision-idempotent indexing of committed durable history and hidden model-only injection, OCR job-ID recovery, persistent channel file-delivery outboxes with payload snapshots and completion caching, and question cards whose accepted answers resume the original run after a restart. Tenant-local application SSE journals preserve exact event-ID replay across a process restart and reacquire the original durable submission without a duplicate user turn; completed journals use the existing five-minute reconnect retention. Completed channel/question/permission recovery records use proven-idle 30-day retention, and session deletion removes the session's recovery records and outbox. Scoped active-turn cancellation persists abort marks and clears pending question and permission cards. Durable instructions also include the workspace's `agent.md` and private-skill prompt context. Streaming and non-streaming structured workspace attachments are canonically validated, supplied as model-only context, and restored in history through request-ID-deduplicated sidecars. Inline images persist in the workspace, use native vision input or text-only OCR path hints, retry provider-rejected native payloads with OCR context in the same durable submission, and restore workspace previews. Durable sessions also generate first-message fallback topics and richer automatic upgrades through their pinned provider/model and tenant credentials, without overwriting manual renames; explicit topic regeneration uses the same isolated completion path. External OCR submission and channel delivery retain documented at-least-once crash windows. Agent jobs can explicitly select `runtime:"durable"` for manual, cron, and deferred execution while preserving scheduler ownership, occurrence leases, check-ins, ledgers, and channel delivery. Local and authenticated compatibility mode keeps legacy jobs/sessions as the default. Better Auth with `INNO_MULTI_USER_ENABLED=true` requires Durable at startup, defaults omitted runtimes to Durable, and rejects legacy execution with 409 `durable_required`; owned legacy history stays readable and is never migrated. Channel inbound and scheduled/manual agent work use tenant-owned Durable sessions without the shared legacy queue. Authenticated durable runtimes also hold a per-session PostgreSQL advisory lock until close, reject a second process owner, and close on lock-connection loss; this guards accidental double-open but is not network-partition-proof storage fencing. Optional static tenant-owner routing forwards authenticated JSON/SSE requests between workers with independent data roots. This is not active-active storage or automatic failover. See [docs/DURABLE_RUNTIME.md](./docs/DURABLE_RUNTIME.md).
-- **Durable capacity harness.** `npm run benchmark:durable` measures independent-session concurrency, admission/turn/snapshot latency, raw SQLite probes, RSS, event-loop delay, and real SIGKILL/reopen recovery using only faux providers. The recorded development baseline and its limitations are in [docs/DURABLE_CAPACITY.md](./docs/DURABLE_CAPACITY.md); it is not a production shard-size or savings guarantee.
-- **Backpressure is a feature, not a bug.** When the queue is busy (e.g. another session's long turn or an unanswered question card), cross-session operations answer `409 session_busy` with blocker details instead of silently queueing for minutes — the UI surfaces this so you can finish or abort the blocking turn. See [issue #124](https://github.com/hhyqhh/inno-agent/issues/124) for the design discussion.
+- **Legacy compatibility** — CLI, Desktop, and local server keep the original singleton `AgentSession`, JSONL history, host tools, and serialized prompt queue by default. This remains the simplest personal runtime.
+- **Durable execution** — `INNO_DURABLE_ENABLED=true` enables independent per-session SQLite runtimes. Multi-user mode requires Durable; new work never falls back to the shared legacy queue. Durable supports concurrent sessions, request-ID deduplication, crash resume, exact application SSE replay, workspace-contained file tools, replay-safe question/permission cards, tenant-local memory/OCR/channel state, and durable scheduler/channel execution.
+- **Verified tenant isolation** — Better Auth + PostgreSQL provides personal tenants and resource ownership. Provider credentials, memory, workspaces, channels, and jobs use verified tenant roots; unauthenticated requests return 401 and cross-tenant resources return 404. Host shell/file tools and PTY terminals are disabled in authenticated mode.
+- **Single-owner storage** — one durable storage has one owner. Optional static tenant-owner routing uses workers with independent RWO data roots; shared active-active SQLite/NFS, automatic failover, and network-partition fencing are not supported.
+- **Honest recovery semantics** — committed state and application checkpoints recover work, but model calls, initial remote OCR submission, channel delivery, and some file mutations retain documented at-least-once crash windows.
 
-These constraints keep the memory layers, scheduler, and channels simple enough to reason about — which matters more for a tool that watches how you learn than for one that serves a crowd.
+- **Durable capacity harness.** `npm run benchmark:durable` measures independent-session concurrency, admission/turn/snapshot latency, SQLite probes, RSS, event-loop delay, and SIGKILL/reopen recovery using faux providers only. See [docs/DURABLE_CAPACITY.md](./docs/DURABLE_CAPACITY.md); it is not a production sizing guarantee.
+- **Legacy backpressure remains explicit.** The legacy queue returns `409 session_busy` when blocked; Durable sessions do not share that queue. See the original [issue #124](https://github.com/hhyqhh/inno-agent/issues/124) for the backpressure design discussion.
+
+See the [multi-user Durable guide](./docs/MULTI_USER_DURABLE.md) and [runtime contract](./docs/DURABLE_RUNTIME.md) for supported capabilities, configuration, verification, and production limitations.
 
 ## Features
 
+- 👥 **Multi-user Durable server**
+  - Better Auth + PostgreSQL personal tenants, independent session concurrency, tenant-scoped credentials and storage, crash recovery, SSE replay, and optional static worker routing. [Architecture and limits](./docs/MULTI_USER_DURABLE.md).
 - 🧠 **Three-layer memory**
   - **L1 learner profile** — goals, knowledge states, misconceptions, preferences; summarized into a context pack injected each turn.
   - **L2 native wiki** — human-readable, agent-queryable pages with hybrid retrieval (lexical BM25 + knowledge graph), LLM-assisted summarization, and PDF/Office/image ingestion.
@@ -68,7 +75,7 @@ These constraints keep the memory layers, scheduler, and channels simple enough 
 
 ### Option A — Desktop app (easiest)
 
-Download the latest installer from [**GitHub Releases**](https://github.com/hhyqhh/inno-agent/releases):
+Download the latest installer from [**GitHub Releases**](https://github.com/hhyqhh/inno-agent-server/releases):
 
 - **macOS** (Apple Silicon): `Inno.Agent-x.y.z-arm64.dmg` — unsigned; right-click → Open on first launch.
 - **Windows** (x64): `Inno.Agent.Setup.x.y.z.exe` or `.msi`.
@@ -78,8 +85,8 @@ On first launch a default config is created at `~/.inno-agent/config/config.json
 ### Option B — From source
 
 ```bash
-git clone https://github.com/hhyqhh/inno-agent.git
-cd inno-agent
+git clone https://github.com/hhyqhh/inno-agent-server.git
+cd inno-agent-server
 
 npm install      # pulls the Pi SDK from npm
 npm run build    # compiles backend + web
@@ -112,6 +119,22 @@ npm run dev:server & npm run web:dev
 ```
 
 `restart-dev.sh` orchestrates the dev lifecycle (build, start, stop, status, logs, smoke-test) — run `bash restart-dev.sh --help`.
+
+### Multi-user Durable server
+
+```bash
+export INNO_AUTH_MODE=better-auth
+export INNO_MULTI_USER_ENABLED=true
+export INNO_DURABLE_ENABLED=true
+export DATABASE_URL=postgresql://inno:inno@127.0.0.1:5432/inno
+export BETTER_AUTH_SECRET='replace-with-at-least-32-random-characters'
+export BETTER_AUTH_URL=http://127.0.0.1:3000
+
+npm run auth:migrate --workspace inno-agent
+npm run server -- --home ./runtime --workspace ./workspace --port 3000
+```
+
+Each account configures its own provider/model in Settings. This is a restricted controlled-deployment runtime, not an internet-facing account-security or production-capacity sign-off. See [Authentication](./docs/AUTHENTICATION.md) and the [multi-user Durable guide](./docs/MULTI_USER_DURABLE.md).
 
 ## Configuration
 
@@ -186,22 +209,24 @@ The skill library and Simple Mode presets are fetched from a remote **content hu
 
 ## Architecture
 
-Four layers: **user interfaces → application layer → Pi agent runtime → layered memory.**
+Four layers: **user interfaces → authenticated application services → legacy or Durable agent runtime → tenant-scoped memory.**
 
 ```text
 User Interfaces      CLI · Web UI (React) · Desktop · Feishu · WeChat
         ↓
-Application Layer    Channel adapters · HTTP API (SSE) · Memory orchestration
-                     Cron scheduler · Practice Lab · WebSocket terminal
+Application Layer    Better Auth · personal tenants · ownership · HTTP/SSE
+                     Channels · scheduler · workspaces · Practice Lab (local)
         ↓
-Agent Runtime        Pi AgentSession · registered tools · inno extension
-(Pi SDK, unmodified) General LLM provider  ──or──  distilled educational model
+Agent Runtime        Legacy PI AgentSession ──or── pi-durable session runtimes
+(PI SDK, unmodified) Shared native tools; legacy-only reverse adapter
         ↓
-Layered Memory       L1 learner profile · L2 native wiki · L3 session records
+Layered Memory       L1 learner profile · L2 native wiki · L3 session recall
+                     Global in local mode; verified tenant roots in multi-user mode
 ```
 
-- **Agent core** — `@earendil-works/pi-coding-agent` provides the loop. [`inno-extension.ts`](./apps/inno-agent/src/agent/inno-extension.ts) registers providers and tools (L1/L2/L3, scheduler, practice lab, documents, OCR) and a `before_agent_start` hook that injects the L1 context pack and threshold-gated L3 recall into the system prompt.
-- **Memory** — L1 (`src/memory/learner/`): evidence-driven profile + event log. L2 (`src/memory/l2/`): structured wiki with graph, summarizer, ingestion, and hybrid retrieval; exposed via agent tools and `/api/wiki/*`. L3 (`src/memory/l3/`): a SQLite FTS5 index layered over Pi session JSONL files.
+- **Agent core** — legacy uses `@earendil-works/pi-coding-agent` and [`inno-extension.ts`](./apps/inno-agent/src/agent/inno-extension.ts); Durable uses isolated `pi-durable` runtimes without the legacy global prompt queue. Memory/OCR/channel tools use the native `(params, api, context)` ABI, with a legacy-only reverse adapter for compatibility. The PI SDK kernel is not modified.
+- **Multi-user and recovery** — Better Auth + PostgreSQL verifies identity and ownership. Durable adds per-session SQLite, request-ID deduplication, application SSE journals, replay-safe question/permission recovery, and independent session concurrency. See [docs/MULTI_USER_DURABLE.md](./docs/MULTI_USER_DURABLE.md).
+- **Memory** — L1 (`src/memory/learner/`): evidence-driven profile + event log. L2 (`src/memory/l2/`): structured wiki with graph, summarizer, ingestion, and hybrid retrieval; exposed via agent tools and `/api/wiki/*`. L3 (`src/memory/l3/`): a tenant-scoped SQLite FTS5 index over owned legacy JSONL and committed Durable history.
 - **Scheduler** (`src/scheduler/`) — cron jobs persisted to `jobs.json` + `runs.jsonl`.
 - **Channels** (`src/channels/`) — `ChannelRegistry` with Feishu, WeChat (iLink / bridge), and QQ (bridge).
 - **HTTP server** (`src/server.ts`) — plain Node `http.createServer` with SSE chat streaming and a WebSocket terminal; route table in [`apps/inno-agent/README.md`](./apps/inno-agent/README.md).
@@ -233,7 +258,7 @@ INNO_PORT=3000 \
 npm run server
 ```
 
-A [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](./docker-compose.yml) are provided as starting points; see [`docs/SYSTEM_DEPENDENCIES.md`](./docs/SYSTEM_DEPENDENCIES.md) for the full dependency reference. Optional Better Auth + PostgreSQL setup, the current tenant-isolation status, and the single-process deployment boundary are documented in [`docs/AUTHENTICATION.md`](./docs/AUTHENTICATION.md). Desktop packaging notes are in [`ELECTRON_BUILD.md`](./ELECTRON_BUILD.md).
+A [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](./docker-compose.yml) are provided as starting points; see [`docs/SYSTEM_DEPENDENCIES.md`](./docs/SYSTEM_DEPENDENCIES.md) for the full dependency reference. Better Auth + PostgreSQL setup, tenant isolation, and public-account limitations are in [`docs/AUTHENTICATION.md`](./docs/AUTHENTICATION.md). The Durable architecture, static worker routing, verification results, and single-owner deployment boundary are in [`docs/MULTI_USER_DURABLE.md`](./docs/MULTI_USER_DURABLE.md). Desktop packaging notes are in [`ELECTRON_BUILD.md`](./ELECTRON_BUILD.md).
 
 ## Showcase — Session Replay Site
 
@@ -253,13 +278,16 @@ Exported cases land in `runtime/data/showcase-exports/cases/` in local/CLI mode,
 
 ## Use Cases & Docs
 
+- [Multi-user Durable architecture and verification](./docs/MULTI_USER_DURABLE.md) — refactor overview, tenant boundaries, recovery semantics, real-service acceptance, and production gaps.
+- [Durable runtime contract](./docs/DURABLE_RUNTIME.md) — detailed storage, replay, tool, scheduler, and channel behavior.
+- [Authentication and tenant isolation](./docs/AUTHENTICATION.md) — Better Auth setup, explicit legacy-owner migration, and account-security limits.
 - [Skill Tutorial — Building a Workspace Agent](./docs/use-cases/skill-tutorial.md) — use `agent.md` and `.skills/` to build a custom learning agent scoped to a workspace.
 - [QUICKSTART.md](./QUICKSTART.md) — 5-minute setup guide (中文).
 - [apps/inno-agent/README.md](./apps/inno-agent/README.md) — backend API route table (中文).
 
 ## Contributing
 
-Issues and PRs are welcome. Before opening a PR, run `npm run build` locally — the TypeScript build doubles as the sanity check (no lint/test runner is wired up yet). Keep changes focused, match the existing code style, and update docs when behavior changes.
+Issues and PRs are welcome. Before opening a PR, run `npm test` and `npm run build`. Changes touching authentication, tenant ownership, or Durable recovery should also run `npm run test:integration` against real PostgreSQL. Keep changes focused, match the existing code style, and update docs when behavior changes.
 
 ## Community
 
@@ -282,6 +310,6 @@ Join the WeChat user group to ask questions, share use cases, and follow updates
   year         = {2026},
   publisher    = {GitHub},
   journal      = {GitHub repository},
-  howpublished = {\url{https://github.com/hhyqhh/inno-agent}}
+  howpublished = {\url{https://github.com/hhyqhh/inno-agent-server}}
 }
 ```

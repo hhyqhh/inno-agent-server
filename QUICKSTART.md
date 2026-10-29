@@ -12,8 +12,8 @@
 ## 2. 安装
 
 ```bash
-git clone <your-repo-url> inno-agent
-cd inno-agent
+git clone https://github.com/hhyqhh/inno-agent-server.git
+cd inno-agent-server
 
 npm install      # 会从 npm 拉 PI SDK，约 60s
 npm run build    # 编译 backend + 前端，约 10s
@@ -134,6 +134,8 @@ npm run web:dev        # 终端 2 — Vite :5173（代理 /api 到 :3000）
 
 ## 下一步
 
+- 多用户 Durable 架构、真实服务验收与部署边界：[docs/MULTI_USER_DURABLE.md](./docs/MULTI_USER_DURABLE.md)
+- Better Auth + PostgreSQL 多用户启动与 legacy-owner 迁移：[docs/AUTHENTICATION.md](./docs/AUTHENTICATION.md)
 - 完整文档见 [README.md](./README.md)
 - 权限审批与 OS 沙箱(三档权限模式、`--sandbox` 启动、deny 底线与配置细节):[docs/PERMISSIONS_AND_SANDBOX.md](./docs/PERMISSIONS_AND_SANDBOX.md)
 - 自定义 skill：把 `<skill-name>.zip` 通过 Web UI 的 Skills 页面上传，或直接放进 `runtime/skills/<name>/`
