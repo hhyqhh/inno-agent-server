@@ -1078,7 +1078,7 @@ describe("channel runtime isolation", () => {
 					apiKey,
 					api: "openai-completions",
 					makeDefault: true,
-					models: [{ id: "tenant-model", name: "Tenant stub" }],
+					models: [{ id: "tenant-model", name: "Tenant stub", input: ["text", "image"] }],
 				}),
 			});
 			expect(response.status).toBe(200);
@@ -1135,6 +1135,7 @@ describe("channel runtime isolation", () => {
 		const inboundResponses = await Promise.all([
 			bridgeMessage("channel-token-a", {
 				channel: "qq", messageId: "inbound-a", chatId: "chat-a", text: "channel-a-inbound",
+				attachments: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }],
 			}),
 			bridgeMessage("channel-token-b", {
 				channel: "qq", messageId: "inbound-b", chatId: "chat-b", text: "channel-b-inbound",
@@ -1147,6 +1148,9 @@ describe("channel runtime isolation", () => {
 		await waitFor(() => ["inbound-a", "inbound-b"].every((messageId) =>
 			sidecarRequests.some((request) => request.path === "/reply" && request.body.includes(messageId)),
 		), "tenant bridge replies");
+		const channelProviderBodyA = providerRequests.find((request) => request.body.includes("channel-a-inbound"))?.body ?? "";
+		expect(channelProviderBodyA).toContain("image_url");
+		expect(channelProviderBodyA).toContain("aW1hZ2U=");
 		expect(providerRequests.find((request) => request.body.includes("channel-a-inbound"))?.authorization).toBe("Bearer channel-a-secret");
 		expect(providerRequests.find((request) => request.body.includes("channel-b-inbound"))?.authorization).toBe("Bearer channel-b-secret");
 		const replyA = sidecarRequests.find((request) => request.path === "/reply" && request.body.includes("inbound-a"));
@@ -1178,7 +1182,16 @@ describe("channel runtime isolation", () => {
 		const channelSessionB = JSON.parse(chatMapB)["qq:chat-b"] as string;
 		expect(channelSessionA).toMatch(/^durable-/);
 		expect(channelSessionB).toMatch(/^durable-/);
-		expect(await (await api(cookieA, `/api/sessions/${channelSessionA}`)).json()).toMatchObject({ runtime: "durable" });
+		const channelDetailA = await (await api(cookieA, `/api/sessions/${channelSessionA}`)).json() as {
+			runtime: string;
+			messages: Array<{ role: string; content: string; images?: Array<{ previewUrl: string }> }>;
+		};
+		expect(channelDetailA.runtime).toBe("durable");
+		const channelMessageA = channelDetailA.messages.find((message) => message.content.includes("channel-a-inbound"));
+		expect(channelMessageA, JSON.stringify(channelDetailA.messages)).toBeDefined();
+		const channelImage = channelMessageA?.images?.[0];
+		expect(channelImage, JSON.stringify(channelMessageA)).toBeDefined();
+		expect((await api(cookieA, channelImage!.previewUrl)).status).toBe(200);
 		expect(await (await api(cookieB, `/api/sessions/${channelSessionB}`)).json()).toMatchObject({ runtime: "durable" });
 		expect(existsSync(join(home, "data", "channels", "chat-sessions.json"))).toBe(false);
 		const workspacesA = await (await api(cookieA, "/api/workspaces")).json() as Array<{ id: string }>;

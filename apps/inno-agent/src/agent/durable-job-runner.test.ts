@@ -25,6 +25,8 @@ function fixture(overrides: { pending?: boolean } = {}) {
 	const service = {
 		pendingQuestion: vi.fn(() => overrides.pending ? { questionId: "pending" } : undefined),
 		pendingPermission: vi.fn(() => undefined),
+		prepareImages: vi.fn(() => null),
+		recordTurnMetadata: vi.fn(),
 		prepareRecallContext: vi.fn(async () => "recalled context"),
 		lease: vi.fn(async () => ({ runtime, release })),
 		noteSubmission: vi.fn(),
@@ -73,6 +75,32 @@ describe("runDurableJobPrompt", () => {
 		});
 		expect(binding).toHaveBeenCalledWith({ turnId: "channel-turn", emit: onEvent, noUi: true });
 		expect(permissionBinding).toHaveBeenCalledWith({ turnId: "channel-turn", emit: onEvent, noUi: true });
+	});
+
+	it.each([{ native: true }, { native: false }])("prepares channel images with native=$native and restores their sidecar metadata", async ({ native }) => {
+		const { service, submit } = fixture();
+		const image = { type: "image" as const, data: "aW1hZ2U=", mimeType: "image/png" };
+		const prepared = {
+			nativeImages: native ? [image] : [],
+			images: [{ mimeType: "image/png", workspacePath: ".chat-images/channel.png" }],
+			fallbackContext: "Image path hints",
+			workspaceId: "workspace-1",
+			workspaceRoot: "/tmp/workspace-1",
+		};
+		vi.mocked(service.prepareImages).mockReturnValue(prepared);
+
+		await runDurableJobPrompt(req, service, "durable-session", "describe this", {
+			requestId: "channel-request", turnId: "channel-turn", images: [image], noUi: true,
+		});
+
+		expect(service.prepareImages).toHaveBeenCalledWith(req, "durable-session", [image], "channel-request");
+		expect(service.recordTurnMetadata).toHaveBeenCalledWith(req, "durable-session", null, prepared, "describe this", "channel-request");
+		expect(submit).toHaveBeenCalledWith([
+			{ type: "text", text: "describe this" },
+			...(native ? [image] : []),
+			{ type: "text", text: "Image path hints" },
+			{ type: "text", text: "recalled context" },
+		], "channel-request");
 	});
 
 	it("rejects a pending question before opening a headless run", async () => {

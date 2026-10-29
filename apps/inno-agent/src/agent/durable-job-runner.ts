@@ -1,4 +1,5 @@
 import type { IncomingMessage } from "node:http";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import type { UserInput } from "@earendil-works/pi-durable";
 import { DurableSseProjector } from "./durable-projection.js";
 import type { DurableSessionService } from "./durable-session-service.js";
@@ -9,6 +10,7 @@ export interface DurableJobPromptOptions {
 	onEvent?: (event: any) => void;
 	/** Streaming output does not imply an interactive UI (for example, IM cards). */
 	noUi?: boolean;
+	images?: ImageContent[];
 }
 
 /** Execute one scheduler prompt without passing through legacy JSONL or the
@@ -27,6 +29,7 @@ export async function runDurableJobPrompt(
 	if ((options.noUi || !options.onEvent) && service.pendingPermission(req, sessionId)) {
 		throw new Error("This session has a pending permission request; answer it through the streaming UI");
 	}
+	const images = service.prepareImages(req, sessionId, options.images, options.requestId);
 	const recallContext = await service.prepareRecallContext(req, sessionId, prompt);
 	let lease: Awaited<ReturnType<DurableSessionService["lease"]>> | undefined;
 	let stream: { stop(): Promise<unknown> } | undefined;
@@ -53,9 +56,15 @@ export async function runDurableJobPrompt(
 				}
 			});
 		}
-		const input: UserInput = recallContext
-			? [{ type: "text", text: prompt }, { type: "text", text: recallContext }]
+		const input: UserInput = images || recallContext
+			? [
+				{ type: "text", text: prompt },
+				...(images?.nativeImages ?? []),
+				...(images?.fallbackContext ? [{ type: "text" as const, text: images.fallbackContext }] : []),
+				...(recallContext ? [{ type: "text" as const, text: recallContext }] : []),
+			]
 			: prompt;
+		service.recordTurnMetadata(req, sessionId, null, images, prompt, options.requestId);
 		const submission = await lease.runtime.submit(input, options.requestId);
 		service.noteSubmission(req, sessionId, prompt);
 		const result = await lease.runtime.waitForSubmission(submission.id);

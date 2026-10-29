@@ -328,12 +328,12 @@ async function ensureBootstrapped(): Promise<void> {
 			onEvent?: StreamEventCallback,
 			images?: ImageContent[],
 		) => {
-			if (images?.length) throw new Error("Durable channel image attachments are not supported yet");
 			const turnId = `channel-${randomUUID()}`;
 			return runDurableJobPrompt(backgroundTenantRequest(), durableSessions, sessionId, prompt, {
 				requestId: `channel-request-${randomUUID()}`,
 				turnId,
 				onEvent,
+				images,
 				noUi: true,
 			});
 		};

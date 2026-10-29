@@ -139,15 +139,15 @@ The current durable slice supports:
   deferred scheduler paths, with owned scheduler sessions/workspaces and the
   existing occurrence, check-in, run-ledger, and channel behavior;
 - tenant-owned channel sessions identified by durable catalog IDs, with stale
-  legacy bindings replaced rather than executed; streaming IM cards still bind
-  questions and workspace permissions as `no_ui`;
+  legacy bindings replaced rather than executed; inbound images use the same
+  persisted native/OCR preparation and history sidecars as Web chat, while
+  streaming IM cards still bind questions and workspace permissions as `no_ui`;
 - BTW side questions over committed durable history.
 
 Shell, append/truncate, delete, rename, and other workspace mutations, MCP,
 subagents, codemode, and computer-use remain disabled. Branching/editing and
-showcase export are not implemented on this path yet. BTW bring-back and channel
-image attachments also fail explicitly; unsupported operations never fall back
-to legacy execution.
+showcase export are not implemented on this path yet. BTW bring-back also fails
+explicitly; unsupported operations never fall back to legacy execution.
 Workspace-private skills are injected as prompt resources; they do not alter the
 process-global PI resource loader or enable otherwise unsupported durable tools.
 
