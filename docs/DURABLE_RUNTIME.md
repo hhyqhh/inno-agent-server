@@ -171,6 +171,12 @@ work, and `harness.submission(id)` reacquires its receipt. Memory tools are
 registered as replay-safe; an interrupted committed tool intent therefore
 re-executes with the same provider tool-call ID after reopen.
 
+Memory, OCR, and channel tools are pi-durable-native registrations using the
+`(params, api, context)` execution contract. Durable does not load the legacy
+five-argument tool adapter. Shared business logic stays unchanged; the legacy
+extension reaches these native definitions only through its own reverse
+adapter, which supplies legacy-only model/session context where required.
+
 Replay safety requires application-level idempotency. Durable L1 event and
 evidence operations use IDs namespaced by session and tool call. The event is
 appended first; all derived profile changes and an `applied_operation_ids`

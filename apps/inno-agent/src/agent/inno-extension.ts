@@ -241,13 +241,13 @@ export function createInnoExtension(
 		const isL2Enabled = () => configHolder.current.memory?.l2Enabled !== false;
 
 		// 2. Register L1 learner tools (gated on config.memory.l1Enabled)
-		const learnerTools = createLearnerTools(
+		const learnerTools = createLegacyToolDefinitions(createLearnerTools(
 			() => resolveCurrentTenantDataDir(paths.dataDir, "learner"),
 			"default",
 			isL1Enabled,
 			() => resolveCurrentTenantDataDir(paths.dataDir, "l2"),
 			isL2Enabled,
-		);
+		));
 		for (const tool of learnerTools) {
 			pi.registerTool(tool);
 		}
@@ -292,13 +292,13 @@ export function createInnoExtension(
 
 		// 4. Register L2 Wiki memory tools (gated on config.memory.l2Enabled)
 		const resolveL2Memory = () => getL2Memory(resolveCurrentTenantDataDir(paths.dataDir, "l2"));
-		const l2Tools = createL2Tools(
+		const l2Tools = createLegacyToolDefinitions(createL2Tools(
 			() => resolveCurrentTenantDataDir(paths.dataDir, "l2"),
 			isL2Enabled,
 			resolveL2Memory,
 			() => resolveActiveWorkspaceDir(paths, deps),
 			deps?.sharedExtensionsDisabled,
-		);
+		));
 		for (const tool of l2Tools) {
 			pi.registerTool(tool);
 		}
@@ -314,7 +314,7 @@ export function createInnoExtension(
 		// switch can be flipped back on without a backfill gap.
 		const l3Memory = new ScopedL3Memory(paths.dataDir, paths.sessionDir);
 		const isL3Enabled = () => configHolder.current.memory?.l3Enabled !== false;
-		const l3Tools = createL3Tools(l3Memory, deps?.getCurrentSessionId, isL3Enabled);
+		const l3Tools = createLegacyToolDefinitions(createL3Tools(l3Memory, deps?.getCurrentSessionId, isL3Enabled));
 		for (const tool of l3Tools) {
 			pi.registerTool(tool);
 		}

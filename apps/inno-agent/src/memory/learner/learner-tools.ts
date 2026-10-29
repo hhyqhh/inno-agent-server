@@ -1,6 +1,7 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ToolRegistration } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
+import { defineInnoTool } from "../../agent/inno-tool.js";
 import { applyProfileOperationOnce, loadEvents, loadProfile, saveProfile } from "./profile-store.js";
 import { recordEventAndApplyProfileOnce, recordEventAndUpdateProfile } from "./profile-store.js";
 import { applyLearningEventToProfile } from "./auto-profile.js";
@@ -95,7 +96,7 @@ export function createLearnerTools(
 	l2DataDir?: string | (() => string),
 	isL2Enabled?: () => boolean,
 	getDurableOperationId?: (toolCallId: string) => string,
-): ToolDefinition[] {
+): ToolRegistration[] {
 	const resolveDataDir = () => typeof dataDir === "function" ? dataDir() : dataDir;
 	const resolveL2DataDir = () => typeof l2DataDir === "function" ? l2DataDir() : l2DataDir;
 	const L1_DISABLED_TEXT = "L1 学习者画像已在设置中关闭，当前不读取也不更新学习者画像。";
@@ -104,7 +105,7 @@ export function createLearnerTools(
 		details: { disabled: true } as Record<string, unknown>,
 	});
 
-	const getLearnerContextTool = defineTool({
+	const getLearnerContextTool = defineInnoTool({
 		name: "get_learner_context",
 		label: "Get Learner Context",
 		description:
@@ -121,7 +122,7 @@ export function createLearnerTools(
 		},
 	});
 
-	const recordLearningEventTool = defineTool({
+	const recordLearningEventTool = defineInnoTool({
 		name: "record_learning_event",
 		label: "Record Learning Event",
 		description:
@@ -153,7 +154,7 @@ export function createLearnerTools(
 				}),
 			),
 		}),
-		async execute(toolCallId, params) {
+		async execute(params, api) {
 			try {
 				if (isEnabled && !isEnabled()) return disabledResult();
 				const event = createLearningEvent(
@@ -163,7 +164,7 @@ export function createLearnerTools(
 					params.payload as Record<string, unknown>,
 					params.derived_signals,
 				);
-				const durableOperationId = getDurableOperationId?.(toolCallId);
+				const durableOperationId = getDurableOperationId?.(api.callId);
 				if (durableOperationId) {
 					event.dedupe_key = `record_learning_event:${durableOperationId}`;
 					const result = recordEventAndApplyProfileOnce(resolveDataDir(), event, (profile, persisted) => {
@@ -196,7 +197,7 @@ export function createLearnerTools(
 		},
 		});
 
-	const recordLearningEvidenceTool = defineTool({
+	const recordLearningEvidenceTool = defineInnoTool({
 		name: "record_learning_evidence",
 		label: "Record Learning Evidence",
 		description:
@@ -228,7 +229,7 @@ export function createLearnerTools(
 			dedupe_key: Type.Optional(Type.String({ description: "Stable key for retry-safe writes" })),
 			metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 		}),
-		async execute(toolCallId, params) {
+		async execute(params, api) {
 			try {
 				if (isEnabled && !isEnabled()) return disabledResult();
 				if (params.dedupe_key && !getDurableOperationId) {
@@ -244,7 +245,7 @@ export function createLearnerTools(
 					...params,
 					hint_level: (params.hint_level ?? 0) as 0 | 1 | 2 | 3,
 				});
-				const durableOperationId = getDurableOperationId?.(toolCallId);
+				const durableOperationId = getDurableOperationId?.(api.callId);
 				if (durableOperationId) {
 					event.dedupe_key = `record_learning_evidence:${durableOperationId}`;
 					const result = recordEventAndApplyProfileOnce(resolveDataDir(), event, (profile, persisted) => {
@@ -294,7 +295,7 @@ export function createLearnerTools(
 		},
 	});
 
-	const assessLearningPrerequisitesTool = defineTool({
+	const assessLearningPrerequisitesTool = defineInnoTool({
 		name: "assess_learning_prerequisites",
 		label: "Assess Learning Prerequisites",
 		description:
@@ -316,7 +317,7 @@ export function createLearnerTools(
 				scope: Type.Optional(Type.String()),
 			}))),
 		}),
-		async execute(_toolCallId, params) {
+		async execute(params) {
 			try {
 				if (isEnabled && !isEnabled()) return disabledResult();
 				const stored = !isL2Enabled || isL2Enabled()
@@ -354,7 +355,7 @@ export function createLearnerTools(
 		},
 	});
 
-	const patchLearnerProfileTool = defineTool({
+	const patchLearnerProfileTool = defineInnoTool({
 		name: "patch_learner_profile",
 		label: "Patch Learner Profile",
 		description:
@@ -375,13 +376,13 @@ export function createLearnerTools(
 			preferences_append: Type.Optional(PreferencesSchema),
 			profile_summary_append: Type.Optional(Type.String({ description: "One concise sentence to append to profile summary" })),
 		}),
-		async execute(toolCallId, params) {
+		async execute(params, api) {
 			try {
 				if (isEnabled && !isEnabled()) return disabledResult();
 				const mutation = getDurableOperationId
 					? applyProfileOperationOnce(
 						resolveDataDir(),
-						`patch_learner_profile:${getDurableOperationId(toolCallId)}`,
+						`patch_learner_profile:${getDurableOperationId(api.callId)}`,
 						(profile) => applyProfilePatch(profile, params),
 					)
 					: { profile: patchProfile(resolveDataDir(), params), duplicate: false };
@@ -402,7 +403,7 @@ export function createLearnerTools(
 		},
 	});
 
-	const updateLearnerProfileTool = defineTool({
+	const updateLearnerProfileTool = defineInnoTool({
 		name: "update_learner_profile",
 		label: "Update Learner Profile",
 		description:
@@ -414,13 +415,13 @@ export function createLearnerTools(
 			preferences: Type.Optional(PreferencesSchema),
 			profile_summary: Type.Optional(Type.String({ description: "Updated profile summary text" })),
 		}),
-		async execute(toolCallId, params) {
+		async execute(params, api) {
 			try {
 				if (isEnabled && !isEnabled()) return disabledResult();
 				const mutation = getDurableOperationId
 					? applyProfileOperationOnce(
 						resolveDataDir(),
-						`update_learner_profile:${getDurableOperationId(toolCallId)}`,
+						`update_learner_profile:${getDurableOperationId(api.callId)}`,
 						(profile) => applyProfileUpdate(profile, params),
 					)
 					: { profile: updateProfile(resolveDataDir(), params), duplicate: false };
@@ -441,7 +442,7 @@ export function createLearnerTools(
 		},
 	});
 
-	const reviewLearnerProfileTool = defineTool({
+	const reviewLearnerProfileTool = defineInnoTool({
 		name: "review_learner_profile",
 		label: "Review Learner Profile",
 		description:

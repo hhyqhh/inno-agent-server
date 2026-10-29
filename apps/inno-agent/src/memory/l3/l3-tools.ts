@@ -14,7 +14,8 @@
 
 import { logger } from "../../logger.js";
 import { Type } from "typebox";
-import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ToolRegistration } from "@earendil-works/pi-durable";
+import { defineInnoTool } from "../../agent/inno-tool.js";
 import { openL3Store, type L3Store } from "./sqlite-store.js";
 import { indexAllSessions, indexSession, indexSessionMessages, type L3IndexMessage } from "./indexer.js";
 import { recall, formatRecallForPrompt, type RecallResult } from "./recall.js";
@@ -164,8 +165,8 @@ export function createL3Tools(
 	memory: Pick<L3Memory, "recall"> | ScopedL3Memory,
 	getCurrentSessionId?: () => string,
 	isEnabled?: () => boolean,
-): ToolDefinition[] {
-	const recallTool = defineTool({
+): ToolRegistration[] {
+	const recallTool = defineInnoTool({
 		name: "l3_recall",
 		label: "回忆历史对话",
 		description:
@@ -180,7 +181,7 @@ export function createL3Tools(
 				Type.Number({ description: "最多返回片段数，默认 4。", default: 4 }),
 			),
 		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(params, api) {
 			if (isEnabled && !isEnabled()) {
 				return {
 					content: [{ type: "text" as const, text: "跨对话历史检索（L3）已在设置中关闭，当前仅使用本工作区与当前对话上下文。" }],
@@ -195,15 +196,10 @@ export function createL3Tools(
 					details: { results: 0 },
 				};
 			}
-			// Resolve current session id from ctx (preferred) or the provided getter.
-			let current = "";
-			try {
-				const sid = ctx.sessionManager.getSessionFile?.();
-				if (sid) current = sid.split(/[\\/]/).pop() ?? "";
-			} catch (err) {
-				logger.warn({ err }, "failed to get session id from getter");
-				// ignore
-			}
+			// The legacy adapter supplies its session file; durable supplies the
+			// explicit getter so recall always excludes the owning conversation.
+			let current = api.innoLegacy?.sessionId ?? "";
+			if (current) current = current.split(/[\\/]/).pop() ?? "";
 			if (!current && getCurrentSessionId) {
 				try {
 					current = getCurrentSessionId();

@@ -1,6 +1,7 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ToolRegistration } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
+import { defineInnoTool } from "../../agent/inno-tool.js";
 import { randomUUID, createHash } from "node:crypto";
 import { basename, join, isAbsolute, resolve } from "node:path";
 import { unlinkSync } from "node:fs";
@@ -74,7 +75,7 @@ export function createL2Tools(
 	getActiveWorkspaceDir?: () => string,
 	restrictToWorkspace = false,
 	durableMode = false,
-): ToolDefinition[] {
+): ToolRegistration[] {
 	const resolveDataDir = () => typeof l2DataDirInput === "function" ? l2DataDirInput() : l2DataDirInput;
 	const resolveMemory = (dataDir: string) => typeof l2Memory === "function"
 		? l2Memory(dataDir)
@@ -85,7 +86,7 @@ export function createL2Tools(
 	});
 
 	// ---- Tool 1: l2_archive ----
-	const archiveTool = defineTool({
+	const archiveTool = defineInnoTool({
 		name: "l2_archive",
 		label: "归档到 L2 Wiki",
 		description:
@@ -111,16 +112,15 @@ export function createL2Tools(
 			sessionId: Type.Optional(Type.String({ description: "关联的会话 ID" })),
 			force: Type.Optional(Type.Boolean({ description: "为 true 时跳过重复检查，强制归档" })),
 		}),
-			async execute(_toolCallId, params, signal, onUpdate, ctx) {
-				const model = durableMode ? undefined : ctx.model;
-				const modelRegistry = durableMode ? undefined : ctx.modelRegistry;
+			async execute(params, api, context) {
+				const signal = context.abortSignal;
+				const model = durableMode ? undefined : api.innoLegacy?.model;
+				const modelRegistry = durableMode ? undefined : api.innoLegacy?.modelRegistry;
 				if (isEnabled && !isEnabled()) return l2DisabledResult();
 				const reportProgress = (text: string, phase: string): void => {
 					try {
-						onUpdate?.({
-							content: [{ type: "text" as const, text }],
-							details: { phase },
-						});
+						api.output(text);
+						void api.details({ phase }, context).catch(() => undefined);
 					} catch {
 						// Progress reporting is best-effort and must never fail archiving.
 					}
@@ -478,7 +478,7 @@ export function createL2Tools(
 	});
 
 	// ---- Tool 2: l2_query ----
-	const queryTool = defineTool({
+	const queryTool = defineInnoTool({
 		name: "l2_query",
 		label: "查询 L2 Wiki",
 		description:
@@ -494,7 +494,7 @@ export function createL2Tools(
 				}),
 			),
 		}),
-		async execute(_toolCallId, params) {
+		async execute(params) {
 			if (isEnabled && !isEnabled()) return l2DisabledResult();
 			const l2DataDir = resolveDataDir();
 			const memory = resolveMemory(l2DataDir);
@@ -510,7 +510,7 @@ export function createL2Tools(
 	});
 
 	// ---- Tool 3: l2_lint ----
-	const lintTool = defineTool({
+	const lintTool = defineInnoTool({
 		name: "l2_lint",
 		label: "检查 L2 Wiki",
 		description: "只读检查 L2 Wiki 的 frontmatter、双链、来源追溯、manifest 和 index 一致性。不会修改或自动修复文件。",

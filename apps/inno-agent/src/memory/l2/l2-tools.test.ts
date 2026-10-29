@@ -44,14 +44,30 @@ function fakeMemory(root: string): L2Memory {
 	} as unknown as L2Memory;
 }
 
+function executeTool(
+	tool: ReturnType<typeof createL2Tools>[number],
+	callId: string,
+	params: Record<string, unknown>,
+	legacy: { model?: unknown; modelRegistry?: unknown } = {},
+) {
+	return (tool.execute as (...args: any[]) => Promise<any>)(
+		params,
+		{
+			callId,
+			innoLegacy: legacy,
+			output: vi.fn(),
+			details: vi.fn(async () => undefined),
+		},
+		{ abortSignal: undefined },
+	);
+}
+
 async function archive(root: string, content: string) {
 	const tool = createL2Tools(root, undefined, fakeMemory(root))[0];
-	return (tool.execute as (...args: any[]) => Promise<any>)(
+	return executeTool(
+		tool,
 		"call-1",
 		{ title: "学习资料", content, sourceType: "markdown", tags: ["test"] },
-		undefined,
-		undefined,
-		{ model: undefined, modelRegistry: undefined },
 	);
 }
 
@@ -71,12 +87,10 @@ async function archiveFile(
 	title: string,
 	filePath: string,
 ) {
-	return (tool.execute as (...args: any[]) => Promise<any>)(
+	return executeTool(
+		tool,
 		callId,
 		{ title, filePath, sourceType: "pdf", tags: ["test"] },
-		undefined,
-		undefined,
-		{ model: undefined, modelRegistry: undefined },
 	);
 }
 
@@ -116,11 +130,10 @@ describe("l2_archive", () => {
 	it("keeps durable archive deterministic even when a model context is available", async () => {
 		const root = makeTempDir();
 		const tool = createL2Tools(root, undefined, fakeMemory(root), undefined, false, true)[0];
-		await (tool.execute as (...args: any[]) => Promise<any>)(
+		await executeTool(
+			tool,
 			"durable-call-1",
 			{ title: "Durable 资料", content: "确定性归档正文", sourceType: "markdown" },
-			undefined,
-			undefined,
 			{ model: {}, modelRegistry: {} },
 		);
 
@@ -234,11 +247,10 @@ describe("l2_archive", () => {
 			unrecoveredTruncatedPaths: [],
 		});
 
-		await expect((tool.execute as (...args: any[]) => Promise<any>)(
+		await expect(executeTool(
+			tool,
 			"partial-write",
 			{ title: "学习资料", content: "正文", sourceType: "markdown" },
-			undefined,
-			undefined,
 			{ model: {} as never, modelRegistry: {} as never },
 		)).rejects.toThrow("Ingest incomplete: 1 wiki file write failure(s)");
 
@@ -262,11 +274,10 @@ describe("l2_archive", () => {
 			unrecoveredTruncatedPaths: [],
 		});
 
-		const result = await (tool.execute as (...args: any[]) => Promise<any>)(
+		const result = await executeTool(
+			tool,
 			"soft-warning",
 			{ title: "学习资料", content: "正文", sourceType: "markdown" },
-			undefined,
-			undefined,
 			{ model: {} as never, modelRegistry: {} as never },
 		);
 
@@ -274,8 +285,8 @@ describe("l2_archive", () => {
 			reviewCount: 2,
 			warnings: ["Dropped wiki/concepts/off-route.md"],
 		});
-		expect(result.content[0].text).toContain("待审阅事项: 2 个");
-		expect(result.content[0].text).toContain("归档完成，但有 1 条警告");
+		expect(result.output[0].text).toContain("待审阅事项: 2 个");
+		expect(result.output[0].text).toContain("归档完成，但有 1 条警告");
 	});
 
 	it("adds a deterministic ingest log when rich generation omits wiki/log.md", async () => {
@@ -292,11 +303,10 @@ describe("l2_archive", () => {
 			unrecoveredTruncatedPaths: [],
 		});
 
-		await (tool.execute as (...args: any[]) => Promise<any>)(
+		await executeTool(
+			tool,
 			"deterministic-log",
 			{ title: "学习资料", content: "正文", sourceType: "markdown", sourceIdentity: "source.md" },
-			undefined,
-			undefined,
 			{ model: {} as never, modelRegistry: {} as never },
 		);
 
@@ -318,11 +328,10 @@ describe("l2_archive", () => {
 			unrecoveredTruncatedPaths: [],
 		});
 
-		const result = await (tool.execute as (...args: any[]) => Promise<any>)(
+		const result = await executeTool(
+			tool,
 			"missing-fallback",
 			{ title: "缺失来源", content: "正文", sourceType: "markdown" },
-			undefined,
-			undefined,
 			{ model: {} as never, modelRegistry: {} as never },
 		);
 
@@ -349,12 +358,10 @@ describe("l2_archive", () => {
 		process.env.INNO_WORKSPACE_DIR = fallbackWorkspace;
 		try {
 			const tool = createL2Tools(root, undefined, fakeMemory(root), () => activeWorkspace)[0];
-			await (tool.execute as (...args: any[]) => Promise<any>)(
+			await executeTool(
+				tool,
 				"call-file",
 				{ title: "会话资料", filePath: "sources/lesson.pdf", sourceType: "pdf" },
-				undefined,
-				undefined,
-				{ model: undefined, modelRegistry: undefined },
 			);
 		} finally {
 			if (previousWorkspace === undefined) delete process.env.INNO_WORKSPACE_DIR;
@@ -412,20 +419,16 @@ describe("l2_archive", () => {
 		const firstTool = createL2Tools(root, undefined, memory)[0];
 		const secondTool = createL2Tools(root, undefined, memory)[0];
 
-		const firstArchive = (firstTool.execute as (...args: any[]) => Promise<any>)(
+		const firstArchive = executeTool(
+			firstTool,
 			"call-first",
 			{ title: "失败资料", content: "第一篇正文", sourceType: "markdown" },
-			undefined,
-			undefined,
-			{ model: undefined, modelRegistry: undefined },
 		);
 		await vi.waitFor(() => expect(memory.indexPageByPath).toHaveBeenCalledTimes(1));
-		const secondArchive = (secondTool.execute as (...args: any[]) => Promise<any>)(
+		const secondArchive = executeTool(
+			secondTool,
 			"call-second",
 			{ title: "后续资料", content: "第二篇正文", sourceType: "markdown" },
-			undefined,
-			undefined,
-			{ model: undefined, modelRegistry: undefined },
 		);
 		await Promise.resolve();
 		expect(readManifest(root)).toHaveLength(1);

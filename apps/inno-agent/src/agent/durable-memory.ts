@@ -4,7 +4,6 @@ import { buildContextPack, formatContextPackForPrompt } from "../memory/learner/
 import { isProfileEmpty, loadProfile, loadRecentEvents } from "../memory/learner/profile-store.js";
 import { createL2Tools } from "../memory/l2/l2-tools.js";
 import { createL3Tools, type ScopedL3Memory } from "../memory/l3/l3-tools.js";
-import { createDurableToolRegistrations, type DurableExecutableTool } from "./durable-tool-adapter.js";
 import { ONBOARDING_GUIDE } from "./system-prompt.js";
 
 export interface DurableMemoryToolOptions {
@@ -47,7 +46,7 @@ export function buildDurableInstructions(
  * stable durable tool-call identity; L2 archive resumes by content hash and
  * manifest without nested model calls. Direct profile patch/update mutations
  * use the same per-session/tool-call operation markers and atomic profile write. */
-export function createDurableMemoryTools(options: DurableMemoryToolOptions): DurableExecutableTool[] {
+export function createDurableMemoryTools(options: DurableMemoryToolOptions): ToolRegistration[] {
 	const learnerTools = createLearnerTools(
 		options.learnerDataDir,
 		"default",
@@ -70,10 +69,10 @@ export function createDurableMemoryTools(options: DurableMemoryToolOptions): Dur
 	return [...learnerTools, ...l2Tools, ...l3Tools];
 }
 
-/** Adapt the memory tools above; durable L2 mode does not use the legacy
- * extension context's model registry or nested executeTool surface. */
+/** Return native registrations; replay-safe tools reuse their stable durable
+ * call IDs and persisted operation markers after reopen. */
 export function createDurableMemoryRegistrations(
 	options: DurableMemoryToolOptions,
 ): ToolRegistration[] {
-	return createDurableToolRegistrations(createDurableMemoryTools(options), { cwd: options.workspaceDir });
+	return createDurableMemoryTools(options).map((tool) => ({ ...tool, replay: "safe" }));
 }

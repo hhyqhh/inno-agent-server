@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadEvents, loadProfile } from "../memory/learner/profile-store.js";
-import { createDurableMemoryTools, buildDurableInstructions } from "./durable-memory.js";
+import { createDurableMemoryRegistrations, createDurableMemoryTools, buildDurableInstructions } from "./durable-memory.js";
 
 const roots: string[] = [];
 
@@ -24,14 +24,26 @@ function options(base: string, sessionId: string) {
 	};
 }
 
+function executeTool(
+	tool: ReturnType<typeof createDurableMemoryTools>[number],
+	callId: string,
+	params: Record<string, unknown>,
+) {
+	return (tool.execute as (...args: any[]) => Promise<any>)(
+		params,
+		{ callId },
+		{ abortSignal: undefined },
+	);
+}
+
 async function recordGoal(base: string, sessionId: string) {
 	const tools = createDurableMemoryTools(options(base, sessionId));
 	const tool = tools.find((item) => item.name === "record_learning_event")!;
-	return (tool.execute as (...args: any[]) => Promise<any>)("shared-tool-call", {
+	return executeTool(tool, "shared-tool-call", {
 		event_type: "goal_declared",
 		context: { goal_id: "goal-rust" },
 		payload: { goal_description: "学习 Rust", action: "active" },
-	}, undefined, undefined, {});
+	});
 }
 
 afterEach(() => {
@@ -58,7 +70,8 @@ describe("durable memory tools", () => {
 
 	it("exposes replay-safe event and direct profile mutation tools", () => {
 		const base = root();
-		const names = createDurableMemoryTools(options(base, "durable-a")).map((tool) => tool.name);
+		const tools = createDurableMemoryRegistrations(options(base, "durable-a"));
+		const names = tools.map((tool) => tool.name);
 		expect(names).toEqual(expect.arrayContaining([
 			"get_learner_context",
 			"record_learning_event",
@@ -71,6 +84,7 @@ describe("durable memory tools", () => {
 			"l2_query",
 			"l2_lint",
 		]));
+		expect(tools.every((tool) => tool.replay === "safe")).toBe(true);
 	});
 
 	it("applies direct profile patch and update once across stable-call retries", async () => {
@@ -78,7 +92,7 @@ describe("durable memory tools", () => {
 		const tools = createDurableMemoryTools(options(base, "durable-a"));
 		const execute = (name: string, params: Record<string, unknown>) => {
 			const tool = tools.find((item) => item.name === name)!;
-			return (tool.execute as (...args: any[]) => Promise<any>)("shared-profile-call", params, undefined, undefined, {});
+			return executeTool(tool, "shared-profile-call", params);
 		};
 		const patch = {
 			concept_id: "rust.ownership",
@@ -122,9 +136,9 @@ describe("durable memory tools", () => {
 			},
 		});
 		const tool = tools.find((item) => item.name === "l3_recall")!;
-		const result = await (tool.execute as (...args: any[]) => Promise<any>)("l3-call", { query: "机器学习" }, undefined, undefined, {});
+		const result = await executeTool(tool, "l3-call", { query: "机器学习" });
 		expect(calls).toEqual([{ query: "机器学习", exclude: "durable-current" }]);
-		expect(result.content[0].text).toContain("之前的机器学习计划");
+		expect(result.output[0].text).toContain("之前的机器学习计划");
 		expect(result.details).toEqual({ results: 1 });
 	});
 
