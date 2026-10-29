@@ -595,6 +595,16 @@ export class DurableSessionService {
 		}
 	}
 
+	async appendAssistantNotification(req: IncomingMessage, id: string, text: string, requestId: string): Promise<void> {
+		const lease = await this.lease(req, id);
+		try {
+			await lease.runtime.appendAssistantNotification(text, requestId);
+			await this.snapshot(req, id);
+		} finally {
+			await lease.release();
+		}
+	}
+
 	async snapshot(req: IncomingMessage, id: string): Promise<{
 		summary: DurableSessionSummary;
 		messages: ReturnType<typeof durableEntriesToMessages>;

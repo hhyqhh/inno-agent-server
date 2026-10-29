@@ -275,7 +275,19 @@ export async function handleBtwRoutes(
 			return true;
 		}
 		if (ctx.durableSessions?.get(req, sessionId)) {
-			json(res, 409, { error: "Bring-back is not yet supported for durable sessions", code: "durable_bring_back_unavailable" });
+			const clientRequestId = typeof body.clientRequestId === "string" ? body.clientRequestId.trim() : "";
+			if (!clientRequestId) {
+				json(res, 400, { error: "Missing clientRequestId for durable bring-back" });
+				return true;
+			}
+			try {
+				await ctx.durableSessions.appendAssistantNotification(req, sessionId, formatBtwForSession(question, answer), clientRequestId);
+			} catch (err) {
+				logger.warn({ err, sessionId }, "durable btw bring-back failed");
+				json(res, 500, { error: "Failed to append the note to the session" });
+				return true;
+			}
+			json(res, 200, { ok: true });
 			return true;
 		}
 		const sessionPath = sessionPathFor(ctx, sessionId);

@@ -249,6 +249,36 @@ export class DurableSessionRuntime {
 		return { id: submission.id };
 	}
 
+	async appendAssistantNotification(text: string, requestId: string): Promise<void> {
+		if (!requestId.trim()) throw new Error("A durable requestId is required");
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: "inno-background",
+			provider: "inno",
+			model: "scheduler",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		const submission = await this.rootConversation.submit({
+			type: "write",
+			requestId,
+			entry: { kind: AssistantEntry.kind, model: [message] },
+		}, BACKGROUND_CONTEXT);
+		const settled = await submission.wait(BACKGROUND_CONTEXT);
+		if (settled.type !== "write" || settled.status !== "done") {
+			throw new Error(`Durable assistant notification was not committed: ${settled.status}`);
+		}
+	}
+
 	async waitForSubmission(id: SubmissionId, context: Context = BACKGROUND_CONTEXT): Promise<DurableSubmissionResult> {
 		const submission = await this.harness.submission(id, context);
 		if (!submission) throw new Error(`Durable submission not found: ${id}`);

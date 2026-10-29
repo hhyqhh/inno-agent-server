@@ -142,12 +142,14 @@ The current durable slice supports:
   legacy bindings replaced rather than executed; inbound images use the same
   persisted native/OCR preparation and history sidecars as Web chat, while
   streaming IM cards still bind questions and workspace permissions as `no_ui`;
-- BTW side questions over committed durable history.
+- BTW side questions over committed durable history, plus bring-back as a
+  request-ID-deduplicated assistant-only write with no synthetic user/model turn;
+  committed snapshots and L3 indexing refresh after the write.
 
 Shell, append/truncate, delete, rename, and other workspace mutations, MCP,
 subagents, codemode, and computer-use remain disabled. Branching/editing and
-showcase export are not implemented on this path yet. BTW bring-back also fails
-explicitly; unsupported operations never fall back to legacy execution.
+showcase export are not implemented on this path yet; unsupported operations
+never fall back to legacy execution.
 Workspace-private skills are injected as prompt resources; they do not alter the
 process-global PI resource loader or enable otherwise unsupported durable tools.
 

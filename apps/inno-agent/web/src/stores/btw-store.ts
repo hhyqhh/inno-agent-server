@@ -348,7 +348,7 @@ export class BtwStoreImpl extends EventEmitter<BtwStoreEvents> {
 		if (!tabId) return;
 		const exchange = this.exchangeFor(sessionId, tabId, exchangeId);
 		if (!exchange || exchange.status !== "done" || exchange.broughtBack) return;
-		await bringBackBtw(sessionId, exchange.question, exchange.answer);
+		await bringBackBtw(sessionId, exchange.question, exchange.answer, exchange.id);
 		this.updateExchange(sessionId, tabId, exchangeId, { broughtBack: true });
 	}
 

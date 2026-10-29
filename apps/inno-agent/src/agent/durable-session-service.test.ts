@@ -226,6 +226,44 @@ describe("DurableSessionService", () => {
 		});
 	});
 
+	it("persists and deduplicates assistant notifications without a model turn", async () => {
+		await runWithoutTenantContext(async () => {
+			const base = root();
+			l3Dirs.push(join(base, "l3"));
+			const faux = fauxProvider();
+			const service = new DurableSessionService({
+				dataDir: base,
+				getLocalConfig: () => config("local"),
+				enabled: true,
+				resolveWorkspaceDir: () => base,
+				openRuntime: async (options) => {
+					const models = createModels();
+					models.setProvider(faux.provider);
+					return DurableSessionRuntime.open({ ...options, models, model: { provider: faux.provider.id, modelId: faux.getModel().id } });
+				},
+			});
+			services.push(service);
+			const req = { headers: {} } as IncomingMessage;
+			const session = service.create(req, { workspaceId: "workspace" });
+			const note = "📌 旁注问答\nQ: 什么是闭包？\nA: 闭包会保留词法环境。";
+
+			await service.appendAssistantNotification(req, session.id, note, "btw-exchange-request");
+			const first = await service.snapshot(req, session.id);
+			expect(first.messages).toHaveLength(1);
+			expect(first.messages[0]).toMatchObject({ role: "assistant", content: note });
+			expect(first.messages.filter((message) => message.role === "user")).toHaveLength(0);
+			expect(faux.state.callCount).toBe(0);
+
+			await service.appendAssistantNotification(req, session.id, note, "btw-exchange-request");
+			const duplicate = await service.snapshot(req, session.id);
+			expect(duplicate.messages).toEqual(first.messages);
+			expect(duplicate.revision).toBe(first.revision);
+			expect(faux.state.callCount).toBe(0);
+			const memory = new ScopedL3Memory(base, join(base, "sessions"));
+			expect((await memory.recall("闭包", "another-session")).some((result) => result.sessionId === session.id)).toBe(true);
+		});
+	});
+
 	it("loads workspace agent and private-skill context afresh on reopen", async () => {
 		const base = root();
 		const workspace = join(base, "workspace");

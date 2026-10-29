@@ -1355,6 +1355,38 @@ describe("tenant background execution", () => {
 });
 
 describe("durable session HTTP boundary", () => {
+	it("persists BTW bring-back once without a synthetic user or model turn", async () => {
+		const cookie = await registerUser("durable-btw-bring-back@example.com");
+		await configureTestProvider(cookie, "durable-btw-secret");
+		const created = await api(cookie, "/api/sessions", {
+			method: "POST", body: JSON.stringify({ newWorkspace: { isTemp: true } }),
+		});
+		expect(created.status).toBe(201);
+		const session = await created.json() as { id: string };
+		const providerCount = providerRequests.length;
+		const payload = {
+			sessionId: session.id,
+			question: "什么是闭包？",
+			answer: "闭包会保留词法环境。",
+			clientRequestId: "btw-exchange-durable-1",
+		};
+		expect((await api(cookie, "/api/btw/bring-back", {
+			method: "POST", body: JSON.stringify({ ...payload, clientRequestId: undefined }),
+		})).status).toBe(400);
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			const response = await api(cookie, "/api/btw/bring-back", { method: "POST", body: JSON.stringify(payload) });
+			expect(response.status).toBe(200);
+		}
+		const detail = await (await api(cookie, `/api/sessions/${session.id}`)).json() as {
+			messages: Array<{ role: string; content: string }>;
+		};
+		expect(detail.messages).toHaveLength(1);
+		expect(detail.messages[0]).toMatchObject({ role: "assistant" });
+		expect(detail.messages[0].content).toContain("Q: 什么是闭包？");
+		expect(detail.messages[0].content).toContain("A: 闭包会保留词法环境。");
+		expect(providerRequests).toHaveLength(providerCount);
+	});
+
 	it("isolates tenants, deduplicates request IDs, and replays SSE after disconnect", async () => {
 		const [cookieA, cookieB] = await Promise.all([
 			registerUser("durable-a@example.com"),

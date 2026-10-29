@@ -221,11 +221,24 @@ describe("BtwStore", () => {
 		await store.ask("s1", "问题");
 		const id = store.threadFor("s1")[0].id;
 		await store.bringBack("s1", id);
-		expect(mocks.bringBackBtw).toHaveBeenCalledWith("s1", "问题", "答");
+		expect(mocks.bringBackBtw).toHaveBeenCalledWith("s1", "问题", "答", id);
 		expect(store.threadFor("s1")[0].broughtBack).toBe(true);
 		// A second call is a no-op.
 		await store.bringBack("s1", id);
 		expect(mocks.bringBackBtw).toHaveBeenCalledTimes(1);
+	});
+
+	it("retries a failed bring-back with the same durable request ID", async () => {
+		mocks.askBtw.mockResolvedValue("答");
+		mocks.bringBackBtw.mockRejectedValueOnce(new Error("network lost")).mockResolvedValue(undefined);
+		await store.ask("s1", "问题");
+		const id = store.threadFor("s1")[0].id;
+		await expect(store.bringBack("s1", id)).rejects.toThrow("network lost");
+		expect(store.threadFor("s1")[0].broughtBack).toBeUndefined();
+		await store.bringBack("s1", id);
+		expect(mocks.bringBackBtw).toHaveBeenNthCalledWith(1, "s1", "问题", "答", id);
+		expect(mocks.bringBackBtw).toHaveBeenNthCalledWith(2, "s1", "问题", "答", id);
+		expect(store.threadFor("s1")[0].broughtBack).toBe(true);
 	});
 
 	it("refuses to bring back a pending or failed exchange", async () => {

@@ -215,6 +215,35 @@ describe("handleBtwRoutes /api/btw/bring-back", () => {
 		expect(text).toContain("A: 闭包是…");
 	});
 
+	it("appends to durable history with a stable request ID", async () => {
+		const append = vi.fn(async () => undefined);
+		ctx.durableSessions = {
+			get: () => ({ id: "durable-1" }),
+			appendAssistantNotification: append,
+		} as never;
+		const req = fakeReq({
+			sessionId: "durable-1", question: "什么是闭包？", answer: "闭包是…", clientRequestId: "btw-exchange-1",
+		});
+		const res = fakeRes();
+		await handleBtwRoutes(req, res as ServerResponse, "POST", "/api/btw/bring-back", ctx);
+		expect(res.statusCode).toBe(200);
+		expect(append).toHaveBeenCalledWith(req, "durable-1", expect.stringContaining("📌 旁注问答"), "btw-exchange-1");
+		expect(mockedAppend).not.toHaveBeenCalled();
+	});
+
+	it("requires a request ID before writing durable bring-back history", async () => {
+		const append = vi.fn(async () => undefined);
+		ctx.durableSessions = {
+			get: () => ({ id: "durable-1" }),
+			appendAssistantNotification: append,
+		} as never;
+		const res = fakeRes();
+		await handleBtwRoutes(fakeReq({ sessionId: "durable-1", question: "q", answer: "a" }), res as ServerResponse, "POST", "/api/btw/bring-back", ctx);
+		expect(res.statusCode).toBe(400);
+		expect(append).not.toHaveBeenCalled();
+		expect(mockedAppend).not.toHaveBeenCalled();
+	});
+
 	it("returns 500 when the append fails", async () => {
 		mockedAppend.mockRejectedValue(new Error("queue busy"));
 		const res = fakeRes();

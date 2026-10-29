@@ -26,9 +26,9 @@ export async function askBtw(sessionId: string, question: string, thread: BtwThr
 
 /** Append a confirmed btw Q/A pair to the main session as an assistant
  *  notification, so the agent can build on it in later turns. */
-export async function bringBackBtw(sessionId: string, question: string, answer: string): Promise<void> {
+export async function bringBackBtw(sessionId: string, question: string, answer: string, clientRequestId: string): Promise<void> {
 	await apiFetch("/api/btw/bring-back", {
 		method: "POST",
-		body: JSON.stringify({ sessionId, question, answer }),
+		body: JSON.stringify({ sessionId, question, answer, clientRequestId }),
 	});
 }
