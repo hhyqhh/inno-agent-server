@@ -81,9 +81,9 @@ model call. Session list/detail, rename, archive, activate, workspace lookup,
 and deletion have durable implementations. Activate does not switch the legacy
 singleton runtime.
 
-Each open builds an isolated `ModelRuntime` from the resolved local/tenant
-config with an in-memory credential store. It does not read the shared legacy
-`models.json` or `auth.json`. Provider credentials are not copied between
+Each open builds an isolated pi-ai `Models` runtime from the resolved
+local/tenant config with an in-memory credential store. It does not read the
+shared legacy `models.json` or `auth.json`, or use the legacy `ModelRuntime`. Provider credentials are not copied between
 sessions or tenants. Idle runtimes close; the next operation reopens and resumes
 the SQLite storage, rebuilding model/auth configuration at execution time.
 
@@ -214,7 +214,7 @@ and leaves the prompt unchanged.
 Durable topics share the legacy excerpt, cleaning, and fallback helpers. The
 first submission records a generated first-message preview; a completed turn
 with at least six messages triggers one background richer upgrade. Generation
-uses a stateless `ModelRuntime.completeSimple()` call built from the verified
+uses a stateless pi-ai `Models.completeSimple()` call built from the verified
 tenant configuration captured at launch and the catalog's pinned
 provider/model, not the legacy active session or a later default-model change.
 It does not append to durable history. Per-tenant/session promises deduplicate
