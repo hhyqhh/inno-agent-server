@@ -54,6 +54,14 @@ function setup(workspaceDir: string | null, fallbackDir: string) {
 	return { registry, sends, tool };
 }
 
+function executeTool(
+	tool: ReturnType<typeof createChannelTools>[number],
+	callId: string,
+	params: { filePath: string },
+) {
+	return tool.execute(params, { callId } as never, { abortSignal: undefined } as never);
+}
+
 describe("tenant-safe channel file tools", () => {
 	it("sends from the active session workspace to the scoped default target", async () => {
 		const workspace = tempDir();
@@ -62,7 +70,7 @@ describe("tenant-safe channel file tools", () => {
 		writeFileSync(join(fallback, "report.txt"), "global file");
 		const { sends, tool } = setup(workspace, fallback);
 
-		const result = await tool.execute("call", { filePath: "report.txt" }, undefined, undefined, {} as never);
+		const result = await executeTool(tool, "call", { filePath: "report.txt" });
 
 		expect(result.details).toMatchObject({ channel: "feishu", chatId: "tenant-chat" });
 		expect(sends).toEqual([{ target: { channel: "feishu", chatId: "tenant-chat" }, filePath: join(workspace, "report.txt") }]);
@@ -73,7 +81,7 @@ describe("tenant-safe channel file tools", () => {
 		writeFileSync(join(fallback, "report.txt"), "global file");
 		const { sends, tool } = setup(null, fallback);
 
-		const result = await tool.execute("call", { filePath: "report.txt" }, undefined, undefined, {} as never);
+		const result = await executeTool(tool, "call", { filePath: "report.txt" });
 
 		expect(result.details).toMatchObject({ error: "workspace_unavailable" });
 		expect(sends).toEqual([]);
@@ -102,7 +110,7 @@ describe("tenant-safe channel file tools", () => {
 				getOperationId: (callId) => `send_file_to_channel:durable-session:${callId}`,
 			},
 		})[0];
-		const execute = () => tool.execute("stable-call", { filePath: "report.txt" }, undefined, undefined, {} as never);
+		const execute = () => executeTool(tool, "stable-call", { filePath: "report.txt" });
 
 		const first = await execute();
 		expect(sends).toHaveLength(1);

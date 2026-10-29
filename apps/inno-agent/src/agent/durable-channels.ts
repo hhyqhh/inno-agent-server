@@ -1,7 +1,6 @@
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import type { ChannelRegistry } from "../channels/channel.js";
 import { createChannelTools } from "../channels/channel-tools.js";
-import { createDurableToolRegistrations } from "./durable-tool-adapter.js";
 
 export interface DurableChannelToolOptions {
 	sessionId: string;
@@ -14,7 +13,7 @@ export interface DurableChannelToolOptions {
  * prevents another send after the marker commits; the earlier crash window is
  * explicitly at-least-once because channel APIs have no common idempotency key. */
 export function createDurableChannelRegistrations(options: DurableChannelToolOptions): ToolRegistration[] {
-	const tools = createChannelTools({
+	return createChannelTools({
 		channelRegistry: options.channelRegistry,
 		workspaceDir: options.workspaceDir,
 		allowWorkspaceFallback: true,
@@ -23,5 +22,4 @@ export function createDurableChannelRegistrations(options: DurableChannelToolOpt
 			getOperationId: (toolCallId) => `send_file_to_channel:${options.sessionId}:${toolCallId}`,
 		},
 	});
-	return createDurableToolRegistrations(tools, { cwd: options.workspaceDir });
 }

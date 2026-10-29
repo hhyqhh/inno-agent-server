@@ -1,8 +1,9 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { basename, isAbsolute, relative, resolve } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ToolRegistration } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
+import { defineInnoTool } from "../agent/inno-tool.js";
 import { ChannelRegistry, FileSendNotSupportedError } from "./channel.js";
 import {
 	channelOutboxPayloadPath,
@@ -83,9 +84,10 @@ function safeResolveInWorkspace(workspaceDir: string, userPath: string): string 
  * Create channel-facing tools. Currently exposes `send_file_to_channel`, which
  * pushes a workspace file out to a chat channel (Feishu, etc.).
  */
-export function createChannelTools(deps: ChannelToolsDeps): ToolDefinition[] {
-	const sendFileTool = defineTool({
+export function createChannelTools(deps: ChannelToolsDeps): ToolRegistration[] {
+	const sendFileTool = defineInnoTool({
 		name: "send_file_to_channel",
+		...(deps.durable ? { replay: "safe" as const } : {}),
 		label: "发送文件到渠道",
 		description:
 			"把工作区里的某个文件发送到聊天渠道（如飞书）。" +
@@ -106,9 +108,9 @@ export function createChannelTools(deps: ChannelToolsDeps): ToolDefinition[] {
 				Type.String({ description: "发送时显示的文件名（可选），默认用文件本身的名字。" }),
 			),
 		}),
-		async execute(toolCallId, params) {
+		async execute(params, api) {
 			const durable = deps.durable;
-			const operationId = durable?.getOperationId(toolCallId);
+			const operationId = durable?.getOperationId(api.callId);
 			let outbox: ChannelOutboxRecord | undefined;
 			if (durable && operationId) {
 				try {

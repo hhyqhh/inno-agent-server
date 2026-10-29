@@ -277,14 +277,14 @@ export function createInnoExtension(
 
 		// 3a. Register channel tools (send workspace files out to chat channels)
 		if (channelRegistry) {
-			const channelTools = createChannelTools({
+			const channelTools = createLegacyToolDefinitions(createChannelTools({
 				channelRegistry,
 				workspaceRegistry: deps?.workspaceRegistry,
 				getCurrentSessionId: deps?.getCurrentSessionId,
 				workspaceDir: paths.workspaceDir,
 				allowWorkspaceFallback: !deps?.sharedExtensionsDisabled,
 				recordChannelInteraction: deps?.recordChannelInteraction,
-			});
+			}));
 			for (const tool of channelTools) {
 				pi.registerTool(tool);
 			}
