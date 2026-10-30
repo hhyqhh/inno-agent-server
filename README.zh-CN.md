@@ -1,42 +1,18 @@
-# Inno Agent
+# Inno Agent Server
 
-> 开源的**个人学习智能体**——分层记忆、主动调度、多渠道消息，以及可选的**多租户 Durable 运行时**；基于 PI SDK 构建，**不修改其内核**。
+> **[Inno Agent](https://github.com/hhyqhh/inno-agent) 的多用户服务端版本。** 在原项目能力之上，加入 Better Auth + PostgreSQL personal tenant、独立 Durable 会话并发、崩溃恢复、租户级状态和可选静态 worker 路由。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19.0-brightgreen.svg)](https://nodejs.org)
 [![Release](https://img.shields.io/github/v/release/hhyqhh/inno-agent-server.svg)](https://github.com/hhyqhh/inno-agent-server/releases)
-[![Website](https://img.shields.io/badge/Website-Inno%20Agent-ff6b35.svg)](https://hhyqhh.github.io/inno-agent-website/)
 
 [English](./README.md) | **简体中文**
 
-🌐 **[项目主页](https://hhyqhh.github.io/inno-agent-website/)** · 📄 **[技术报告](./docs/inno-agent.pdf)**(arXiv,2026 年 6 月)· 📦 **[资源中心](https://github.com/Chloris-Blaxk/inno-agent-hub)**(技能库 + 工作区预设)
+原项目的个人学习目标、分层记忆设计、桌面应用、技术报告和截图，请访问 **[Inno Agent 原项目](https://github.com/hhyqhh/inno-agent)**。本仓库聚焦服务端运行时，不再重复这些背景介绍。
 
-<p align="center">
-  <img src="./docs/assets/app-overview-2026-09-13-v2.png" alt="Inno Agent — 重构后的欢迎页与预设工作区" width="100%" />
-</p>
+多用户架构、真实服务验收结果和生产边界见[多用户 Durable 指南](./docs/MULTI_USER_DURABLE.md)。
 
-> 🚀 **2026 年 10 月 —— 多用户 Durable 重构**：Better Auth + PostgreSQL personal tenant、独立会话并发、SQLite 崩溃恢复、租户级 memory/OCR/channel、可恢复的问题卡与工作区审批，以及可选的静态 tenant-owner worker 路由。CLI/Desktop/local legacy 行为继续保留。详见[多用户 Durable 指南](./docs/MULTI_USER_DURABLE.md)。
-
-> 🎨 **2026 年 9 月 —— Web UI 基于 InnoSpark 设计语言整体重构**(亮色 + 暗色双主题):一键打开预设工作区的欢迎页、集成权限模式与模型选择的统一输入框、作为 artifact 浏览器的右侧面板,以及对话内的流式富文本渲染(Mermaid / SVG / ECharts / 可运行代码块)。
-
-Inno Agent 是服务于单个学习者的长期学习伙伴。它把长期学习支持组织为三个显式记忆层——**L1 学习者画像**、**L2 原生 wiki 知识库**、**L3 会话记录与跨对话检索**——并围绕它们构建学习闭环:cron 调度器、个人 IM 渠道(飞书 / 微信),以及带浏览器内终端的练习实验室。
-
-三种形态共享同一份运行时状态:
-
-- **桌面应用**(Electron)—— macOS / Windows 一键安装。
-- **Web UI**(React 19 + Tailwind 4)—— Node HTTP 服务,SSE 流式对话、终端、wiki 图谱、任务、技能与设置。
-- **终端 CLI**(`inno`)—— 纯 TUI agent,无 HTTP。
-
-## 为什么是 Inno Agent
-
-通用编程 agent 面向开放式软件工程优化,而教育是不同的目标:价值在于**个性化讲解、误解诊断、出题、反馈、复习调度、隐私与低延迟的持续交互**。Inno Agent 的设计立场:
-
-- **分层记忆,而非扁平的聊天摘要**——学习者状态、归档知识与近期对话生命周期不同,各自独立成层。
-- **持久事实写入工具,而非回复**——凡影响后续教学的内容都通过工具写入 L1/L2,个性化决策有据可查。
-- **开放、可纠正的学习者模型**——L1 画像对学习者可检视、可编辑,系统提示词禁止无证据的标签。
-- **永不修改 SDK 内核**——所有学习行为通过注册工具和扩展钩子实现，运行时始终与上游兼容。
-
-### 运行时边界
+## 运行时边界
 
 当前有两条显式执行路径：
 
@@ -69,16 +45,7 @@ Inno Agent 是服务于单个学习者的长期学习伙伴。它把长期学习
 
 ## 快速开始
 
-### 方式 A —— 桌面应用(最简单)
-
-从 [**GitHub Releases**](https://github.com/hhyqhh/inno-agent-server/releases) 下载最新安装包:
-
-- **macOS**(Apple Silicon):`Inno.Agent-x.y.z-arm64.dmg` —— 未签名,首次启动请右键 → 打开。
-- **Windows**(x64):`Inno.Agent.Setup.x.y.z.exe` 或 `.msi`。
-
-首次启动会在 `~/.inno-agent/config/config.json` 生成默认配置——在该文件(或应用内设置)中填入供应商 API key。
-
-### 方式 B —— 源码运行
+### 方式 A —— 源码运行
 
 ```bash
 git clone https://github.com/hhyqhh/inno-agent-server.git
@@ -96,7 +63,7 @@ npm run server -- --home ./runtime --workspace ./workspace --port 3000
 
 打开 **http://localhost:3000**。详细的 5 分钟上手指南(含各供应商配置示例)见 **[QUICKSTART.md](./QUICKSTART.md)**。
 
-### 方式 C —— Docker
+### 方式 B —— Docker
 
 ```bash
 docker compose up -d   # 服务端口 3000,挂载 runtime/ 与 workspace/

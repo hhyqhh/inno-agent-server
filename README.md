@@ -1,42 +1,18 @@
-# Inno Agent
+# Inno Agent Server
 
-> An open-source **personal learning agent** with layered memory, proactive scheduling, multi-channel messaging, and an optional **multi-tenant Durable runtime** — built on the PI SDK **without modifying its kernel**.
+> **The multi-user server edition of [Inno Agent](https://github.com/hhyqhh/inno-agent).** It adds Better Auth + PostgreSQL personal tenants, independent Durable session concurrency, crash recovery, tenant-scoped state, and optional static worker routing.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19.0-brightgreen.svg)](https://nodejs.org)
 [![Release](https://img.shields.io/github/v/release/hhyqhh/inno-agent-server.svg)](https://github.com/hhyqhh/inno-agent-server/releases)
-[![Website](https://img.shields.io/badge/Website-Inno%20Agent-ff6b35.svg)](https://hhyqhh.github.io/inno-agent-website/)
 
 **English** | [简体中文](./README.zh-CN.md)
 
-🌐 **[Homepage](https://hhyqhh.github.io/inno-agent-website/)** · 📄 **[Technical Report](./docs/inno-agent.pdf)** (arXiv, June 2026) · 📦 **[Resource Hub](https://github.com/Chloris-Blaxk/inno-agent-hub)** (skill library + workspace presets)
+For the original project's personal-learning goals, layered-memory design, desktop app, research report, and screenshots, see **[Inno Agent](https://github.com/hhyqhh/inno-agent)**. This repository focuses on the server runtime and does not duplicate that introduction.
 
-<p align="center">
-  <img src="./docs/assets/app-overview-2026-09-13-v2.png" alt="Inno Agent — redesigned welcome page with preset workspaces" width="100%" />
-</p>
+Start with the [multi-user Durable guide](./docs/MULTI_USER_DURABLE.md) for the refactor architecture, real-service acceptance results, and production limitations.
 
-> 🚀 **October 2026 — multi-user Durable refactor:** Better Auth + PostgreSQL personal tenants, independent per-session concurrency, SQLite-backed crash recovery, tenant-local memory/OCR/channels, replay-safe questions and workspace approvals, and optional static tenant-owner worker routing. Legacy CLI/Desktop/local behavior remains available. See the [multi-user Durable guide](./docs/MULTI_USER_DURABLE.md).
-
-> 🎨 **September 2026 — the Web UI was rebuilt around the InnoSpark design language** (light + dark themes): a welcome page with one-click preset workspaces, a unified composer with permission-mode and model pills, an artifact-browser right panel, and rich streaming Markdown (Mermaid / SVG / ECharts / runnable code blocks) in the conversation.
-
-Inno Agent is a single-learner companion that organizes long-term learning support into three explicit memory layers — an **L1 learner profile**, an **L2 native wiki knowledge base**, and **L3 session records with cross-conversation retrieval** — and wraps them in a learning loop: a cron scheduler, personal IM channels (Feishu / WeChat), and a Practice Lab with an in-browser terminal.
-
-It ships in three forms that share the same runtime state:
-
-- **Desktop app** (Electron) — one-click install for macOS and Windows.
-- **Web UI** (React 19 + Tailwind 4) — Node HTTP server with SSE streaming, terminal, wiki graph, jobs, skills, and settings.
-- **Terminal CLI** (`inno`) — a pure TUI agent, no HTTP.
-
-## Why Inno Agent
-
-General-purpose coding agents optimize for open-ended software engineering. Education is a different target: the value lies in **personalized explanation, misconception diagnosis, exercise generation, feedback, review scheduling, privacy, and low-latency continuous interaction**. Inno Agent's stances:
-
-- **Layered memory, not a flat chat summary** — learner state, archived knowledge, and recent dialogue have different lifecycles and live in separate layers.
-- **Durable facts go to tools, not replies** — anything that affects future teaching is written to L1/L2 via tools, so personalization is evidence-driven and traceable.
-- **An open, correctable learner model** — the L1 profile is inspectable and editable by the learner; unevidenced labels are forbidden.
-- **The SDK kernel is never modified** — learning behavior is added through registered tools and explicit runtime hooks, keeping both legacy and Durable execution upstream-compatible.
-
-### Runtime boundaries
+## Runtime boundaries
 
 Inno Agent now supports two explicit execution paths:
 
@@ -73,16 +49,7 @@ See the [multi-user Durable guide](./docs/MULTI_USER_DURABLE.md) and [runtime co
 
 ## Quick Start
 
-### Option A — Desktop app (easiest)
-
-Download the latest installer from [**GitHub Releases**](https://github.com/hhyqhh/inno-agent-server/releases):
-
-- **macOS** (Apple Silicon): `Inno.Agent-x.y.z-arm64.dmg` — unsigned; right-click → Open on first launch.
-- **Windows** (x64): `Inno.Agent.Setup.x.y.z.exe` or `.msi`.
-
-On first launch a default config is created at `~/.inno-agent/config/config.json` — add your provider API key there (or via the in-app settings).
-
-### Option B — From source
+### Option A — From source
 
 ```bash
 git clone https://github.com/hhyqhh/inno-agent-server.git
@@ -100,7 +67,7 @@ npm run server -- --home ./runtime --workspace ./workspace --port 3000
 
 Open **http://localhost:3000**. See **[QUICKSTART.md](./QUICKSTART.md)** (中文) for a 5-minute walkthrough with provider examples.
 
-### Option C — Docker
+### Option B — Docker
 
 ```bash
 docker compose up -d   # serves on :3000, mounts runtime/ and workspace/
